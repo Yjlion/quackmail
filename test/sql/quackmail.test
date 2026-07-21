@@ -1,0 +1,58 @@
+# name: test/sql/quackmail.test
+# description: QuackMail extensions load and their control functions work
+# group: [quackmail]
+
+require quackmail
+
+require quackmail_smtp_in
+
+require quackmail_imap
+
+# Umbrella version + schema-backed status
+query I
+SELECT version FROM qm_version();
+----
+QuackMail 0.1.0
+
+# Adding a user succeeds and is reflected in qm_status
+query II
+SELECT ok, note FROM qm_user_add('carol', 'pw');
+----
+true	user added
+
+query I
+SELECT value FROM qm_status() WHERE metric = 'users';
+----
+1
+
+# Start the inbound SMTP listener on an ephemeral port
+query I
+SELECT note FROM qm_smtp_in_start('127.0.0.1', 12525);
+----
+started
+
+query I
+SELECT running FROM qm_smtp_in_status();
+----
+true
+
+query I
+SELECT note FROM qm_smtp_in_stop();
+----
+stopped
+
+query I
+SELECT running FROM qm_smtp_in_status();
+----
+false
+
+# A second, independent extension starts on its own port
+query I
+SELECT note FROM qm_imap_start('127.0.0.1', 11430);
+----
+started
+
+query I
+SELECT note FROM qm_imap_stop();
+----
+stopped

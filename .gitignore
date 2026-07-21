@@ -1,0 +1,13 @@
+build/
+*.duckdb_extension
+*.o
+*.a
+*.so
+*.dylib
+.idea/
+cmake-build-*/
+__pycache__/
+*.pyc
+.venv/
+test/certs/*.pem
+.cache/
