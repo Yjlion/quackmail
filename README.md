@@ -91,6 +91,22 @@ GEN=ninja make                              # builds DuckDB + all extensions
 Artifacts land in `build/release/extension/<name>/<name>.duckdb_extension`, and a
 DuckDB CLI with every extension statically linked is at `build/release/duckdb`.
 
+### Install from a release
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the extensions and attaches a
+`quackmail-<tag>-linux_amd64.tar.gz` bundle (the six `.duckdb_extension` files plus a statically
+linked `duckdb` CLI) to a GitHub Release. To install:
+
+```bash
+tar -xzf quackmail-<tag>-linux_amd64.tar.gz
+cd quackmail-<tag>-linux_amd64
+./duckdb -unsigned          # unsigned extensions require -unsigned (or SET allow_unsigned_extensions=true)
+```
+```sql
+LOAD './quackmail.duckdb_extension';
+LOAD './quackmail_smtp_in.duckdb_extension';
+```
+
 ## Try it
 
 ```bash
