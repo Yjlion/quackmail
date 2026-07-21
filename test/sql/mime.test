@@ -1,0 +1,127 @@
+# name: test/sql/mime.test
+# description: MIME & message-format helpers (RFC 2045-2049, 822/2822/5322)
+# group: [quackmail]
+
+require quackmail
+
+# --- RFC 2045 Content-Transfer-Encoding decoding ---------------------------
+
+# base64
+query I
+SELECT decoded FROM qm_mime_decode('base64', 'SGVsbG8sIHdvcmxkIQ==');
+----
+Hello, world!
+
+# quoted-printable: =XX hex escapes
+query I
+SELECT decoded FROM qm_mime_decode('quoted-printable', '=48=65=6C=6C=6F x=3Dy');
+----
+Hello x=y
+
+# quoted-printable: soft line break (trailing '=' before newline)
+query I
+SELECT decoded FROM qm_mime_decode('quoted-printable', 'a=' || chr(10) || 'b');
+----
+ab
+
+# --- RFC 2047 encoded-word decoding ----------------------------------------
+
+# B (base64) encoded word
+query I
+SELECT decoded FROM qm_mime_decode_header('=?UTF-8?B?SGVsbG8=?=');
+----
+Hello
+
+# Q encoded word: '_' is space, =XX hex
+query I
+SELECT decoded FROM qm_mime_decode_header('=?UTF-8?Q?a_b=3Dc?=');
+----
+a b=c
+
+# ISO-8859-1 (Latin-1) transcoded to UTF-8: 0xE9 -> é
+query I
+SELECT decoded FROM qm_mime_decode_header('=?ISO-8859-1?Q?caf=E9?=');
+----
+café
+
+# Adjacent encoded words: whitespace between them is dropped (RFC 2047 §6.2)
+query I
+SELECT decoded FROM qm_mime_decode_header('=?UTF-8?B?SGVsbG8=?= =?UTF-8?B?V29ybGQ=?=');
+----
+HelloWorld
+
+# Non-encoded whitespace is preserved
+query I
+SELECT decoded FROM qm_mime_decode_header('plain =?UTF-8?B?dGV4dA==?= here');
+----
+plain text here
+
+# --- RFC 5322 address-list parsing -----------------------------------------
+
+query TT
+SELECT name, address FROM qm_mime_addresses('"Doe, John" <john@example.com>, Jane <jane@example.org>');
+----
+Doe, John	john@example.com
+Jane	jane@example.org
+
+# Group syntax: label stripped, members returned individually
+query TT
+SELECT name, address FROM qm_mime_addresses('Team: a@x.com, b@y.com;');
+----
+(empty)	a@x.com
+(empty)	b@y.com
+
+# Bare addr-spec with a trailing comment
+query TT
+SELECT name, address FROM qm_mime_addresses('bob@example.com (Bob)');
+----
+(empty)	bob@example.com
+
+# --- RFC 5322 date parsing -------------------------------------------------
+
+query IT
+SELECT epoch, iso FROM qm_parse_date('Mon, 02 Jan 2006 15:04:05 -0700');
+----
+1136239445	2006-01-02T22:04:05Z
+
+# Named zone
+query I
+SELECT epoch FROM qm_parse_date('2 Jan 2006 22:04:05 GMT');
+----
+1136239445
+
+# --- RFC 2046 multipart decomposition --------------------------------------
+
+query TTTT
+SELECT section, content_type, filename, content FROM qm_mime_parts(
+  'Content-Type: multipart/mixed; boundary="B"' || chr(10) || chr(10) ||
+  'preamble' || chr(10) ||
+  '--B' || chr(10) ||
+  'Content-Type: text/plain' || chr(10) || chr(10) ||
+  'hello' || chr(10) ||
+  '--B' || chr(10) ||
+  'Content-Type: text/plain' || chr(10) ||
+  'Content-Disposition: attachment; filename="a.txt"' || chr(10) ||
+  'Content-Transfer-Encoding: base64' || chr(10) || chr(10) ||
+  'SGk=' || chr(10) ||
+  '--B--' || chr(10) ||
+  'epilogue');
+----
+1	text/plain	(empty)	hello
+2	text/plain	a.txt	Hi
+
+# A single-part message is section "1"
+query TT
+SELECT section, content FROM qm_mime_parts(
+  'Content-Type: text/plain' || chr(10) || chr(10) || 'just text');
+----
+1	just text
+
+# --- header extraction -----------------------------------------------------
+
+query TT
+SELECT name, value FROM qm_mime_headers(
+  'Subject: Hi' || chr(10) || 'From: a@b.com' || chr(10) || chr(10) || 'body');
+----
+Subject	Hi
+From	a@b.com
