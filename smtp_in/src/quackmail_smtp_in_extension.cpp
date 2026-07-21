@@ -142,8 +142,17 @@ bool StoreMessage(Connection &con, const std::string &mail_from, const std::vect
 
 	store::StoredMessage msg;
 	msg.mailbox = mailbox;
+	// Prefer the envelope MAIL FROM, but fall back to the parsed From: header
+	// address when the envelope is empty (e.g. a bounce with <>).
 	msg.from_addr = mail_from;
-	msg.subject = parsed.subject;
+	if (msg.from_addr.empty() && !parsed.from.empty()) {
+		auto addrs = mime::ParseAddressList(parsed.from);
+		if (!addrs.empty()) {
+			msg.from_addr = addrs[0].addr;
+		}
+	}
+	// Decode any RFC 2047 encoded words in the subject for display/storage.
+	msg.subject = mime::DecodeEncodedWords(parsed.subject);
 	msg.message_id = parsed.message_id;
 	msg.raw = body;
 	msg.recipients = rcpts;

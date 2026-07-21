@@ -29,6 +29,9 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/server_controls.cpp
         ${QUACKMAIL_CORE_DIR}/src/tls.cpp
         ${QUACKMAIL_CORE_DIR}/src/mime.cpp
+        ${QUACKMAIL_CORE_DIR}/src/mime_codec.cpp
+        ${QUACKMAIL_CORE_DIR}/src/mime_entity.cpp
+        ${QUACKMAIL_CORE_DIR}/src/rfc5322.cpp
         ${QUACKMAIL_CORE_DIR}/src/auth.cpp
         ${QUACKMAIL_CORE_DIR}/src/sieve.cpp
         ${QUACKMAIL_CORE_DIR}/src/util.cpp

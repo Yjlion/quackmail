@@ -1,0 +1,169 @@
+name: Release
+
+# Build the QuackMail DuckDB extensions and publish them as installable release
+# assets. Pushing a version tag (e.g. `v0.1.0`) cuts a GitHub Release; a manual
+# run just builds and uploads a workflow artifact so the pipeline can be tested
+# without tagging.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Required so `gh release create` can attach assets to a Release.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & package (linux_amd64)
+    runs-on: ubuntu-latest
+    env:
+      GEN: ninja
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build libssl-dev
+
+      - name: Resolve versions
+        id: vers
+        run: |
+          set -euo pipefail
+          # The extension metadata must be stamped with the DuckDB version the
+          # submodule is pinned to; the submodule is a shallow checkout without
+          # tags, so `git describe` would otherwise fall back to v0.0.1 and the
+          # extensions would refuse to load. Feed the pinned version to DuckDB's
+          # OVERRIDE_GIT_DESCRIBE instead of fetching tags.
+          duckdb_version="$(git config -f .gitmodules submodule.duckdb.branch)"
+          echo "duckdb_version=${duckdb_version}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            release="${GITHUB_REF_NAME}"
+          else
+            release="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+          echo "Building QuackMail ${release} against DuckDB ${duckdb_version}"
+
+      - name: Build extensions
+        env:
+          OVERRIDE_GIT_DESCRIBE: ${{ steps.vers.outputs.duckdb_version }}
+        run: make
+
+      - name: Run tests
+        run: make test
+
+      - name: Package artifacts
+        id: pkg
+        env:
+          REL: ${{ steps.vers.outputs.release }}
+          DUCKDB_VERSION: ${{ steps.vers.outputs.duckdb_version }}
+        run: |
+          set -euo pipefail
+          bundle="quackmail-${REL}-linux_amd64"
+          out="dist/${bundle}"
+          mkdir -p "${out}"
+
+          # The six loadable extensions (original names, so `LOAD` is simple).
+          for ext in quackmail quackmail_smtp_in quackmail_smtp_out \
+                     quackmail_imap quackmail_managesieve quackmail_pop3; do
+            cp "build/release/extension/${ext}/${ext}.duckdb_extension" "${out}/"
+          done
+
+          # A batteries-included DuckDB CLI with everything statically linked,
+          # so the bundle runs a mail server with no separate DuckDB install.
+          cp build/release/duckdb "${out}/duckdb"
+          cp README.md "${out}/"
+
+          cat > "${out}/INSTALL.md" <<EOF
+          # QuackMail ${REL} (linux_amd64)
+
+          These are unsigned DuckDB loadable extensions built against DuckDB
+          ${DUCKDB_VERSION}. Load them into a matching DuckDB with unsigned
+          extensions enabled.
+
+          ## Option A — bundled DuckDB CLI (no separate install)
+
+          \`\`\`bash
+          ./duckdb -unsigned
+          \`\`\`
+          \`\`\`sql
+          LOAD './quackmail.duckdb_extension';        -- umbrella: schema + users
+          LOAD './quackmail_smtp_in.duckdb_extension';
+          CALL qm_user_add('alice', 'secret');
+          CALL qm_smtp_in_start('127.0.0.1', 2525, starttls => true);
+          \`\`\`
+
+          ## Option B — your own DuckDB ${DUCKDB_VERSION}
+
+          \`\`\`bash
+          duckdb -unsigned            # or: SET allow_unsigned_extensions=true;
+          \`\`\`
+          \`\`\`sql
+          LOAD '/absolute/path/to/quackmail.duckdb_extension';
+          \`\`\`
+
+          Extensions: quackmail (umbrella), quackmail_smtp_in, quackmail_smtp_out,
+          quackmail_imap, quackmail_managesieve, quackmail_pop3.
+          EOF
+
+          tar -C dist -czf "dist/${bundle}.tar.gz" "${bundle}"
+          ( cd dist && sha256sum "${bundle}.tar.gz" > "${bundle}.tar.gz.sha256" )
+          echo "bundle=${bundle}" >> "$GITHUB_OUTPUT"
+          ls -la dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.bundle }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL: ${{ steps.vers.outputs.release }}
+          DUCKDB_VERSION: ${{ steps.vers.outputs.duckdb_version }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<EOF
+          QuackMail ${REL} — a mail server that runs inside DuckDB, as loadable
+          extensions. Built against DuckDB ${DUCKDB_VERSION} for **linux_amd64**.
+
+          ## Install
+
+          \`\`\`bash
+          tar -xzf quackmail-${REL}-linux_amd64.tar.gz
+          cd quackmail-${REL}-linux_amd64
+          ./duckdb -unsigned          # bundled CLI; extensions load from this dir
+          \`\`\`
+          \`\`\`sql
+          LOAD './quackmail.duckdb_extension';
+          LOAD './quackmail_smtp_in.duckdb_extension';
+          CALL qm_user_add('alice', 'secret');
+          CALL qm_smtp_in_start('127.0.0.1', 2525, starttls => true);
+          \`\`\`
+
+          Unsigned extensions require the \`-unsigned\` flag (or
+          \`SET allow_unsigned_extensions=true;\`). See \`INSTALL.md\` in the bundle.
+          Verify the download with the accompanying \`.sha256\` file.
+          EOF
+
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/quackmail-${REL}-linux_amd64.tar.gz" \
+            "dist/quackmail-${REL}-linux_amd64.tar.gz.sha256" \
+            --title "QuackMail ${REL}" \
+            --notes-file release-notes.md

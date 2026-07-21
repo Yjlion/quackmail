@@ -8,12 +8,26 @@
 
 #include "quackmail/auth.hpp"
 #include "quackmail/mail_store.hpp"
+#include "quackmail/mime.hpp"
+
+#include <ctime>
 
 namespace duckdb {
 
 namespace {
 
-enum class UmbrellaKind { VERSION, USER_ADD, USER_REMOVE, STATUS };
+enum class UmbrellaKind {
+	VERSION,
+	USER_ADD,
+	USER_REMOVE,
+	STATUS,
+	MIME_HEADERS,
+	MIME_DECODE_HEADER,
+	MIME_DECODE,
+	MIME_ADDRESSES,
+	PARSE_DATE,
+	MIME_PARTS,
+};
 
 struct RowsBindData : public FunctionData {
 	UmbrellaKind kind = UmbrellaKind::VERSION;
@@ -64,6 +78,55 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 		add_metric("recipients", "SELECT count(*) FROM quackmail_recipients");
 		add_metric("users", "SELECT count(*) FROM quackmail_users");
 		add_metric("outbound_queued", "SELECT count(*) FROM quackmail_outbound WHERE status = 'queued'");
+		break;
+	}
+	case UmbrellaKind::MIME_HEADERS: {
+		auto parsed = quackmail::mime::Parse(bind.args[0]);
+		for (auto &h : parsed.headers) {
+			gstate->rows.push_back({Value(h.first), Value(h.second)});
+		}
+		break;
+	}
+	case UmbrellaKind::MIME_DECODE_HEADER: {
+		gstate->rows.push_back({Value(quackmail::mime::DecodeEncodedWords(bind.args[0]))});
+		break;
+	}
+	case UmbrellaKind::MIME_DECODE: {
+		gstate->rows.push_back(
+		    {Value(quackmail::mime::DecodeContentTransferEncoding(bind.args[0], bind.args[1]))});
+		break;
+	}
+	case UmbrellaKind::MIME_ADDRESSES: {
+		for (auto &a : quackmail::mime::ParseAddressList(bind.args[0])) {
+			gstate->rows.push_back({Value(a.name), Value(a.addr)});
+		}
+		break;
+	}
+	case UmbrellaKind::PARSE_DATE: {
+		int64_t epoch = 0;
+		if (quackmail::mime::ParseDate(bind.args[0], epoch)) {
+			std::time_t t = static_cast<std::time_t>(epoch);
+			std::tm tm_utc{};
+#if defined(_WIN32)
+			gmtime_s(&tm_utc, &t);
+#else
+			gmtime_r(&t, &tm_utc);
+#endif
+			char buf[32];
+			std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+			gstate->rows.push_back({Value::BIGINT(epoch), Value(std::string(buf))});
+		} else {
+			gstate->rows.push_back({Value(LogicalType::BIGINT), Value(LogicalType::VARCHAR)});
+		}
+		break;
+	}
+	case UmbrellaKind::MIME_PARTS: {
+		auto root = quackmail::mime::ParseEntity(bind.args[0]);
+		for (auto &p : quackmail::mime::FlattenParts(root)) {
+			gstate->rows.push_back({Value(p.section), Value(p.content_type), Value(p.charset),
+			                        Value(p.encoding), Value::BIGINT(p.size_bytes), Value(p.filename),
+			                        Value(p.content)});
+		}
 		break;
 	}
 	}
@@ -122,6 +185,67 @@ unique_ptr<FunctionData> StatusBind(ClientContext &, TableFunctionBindInput &, v
 	return std::move(b);
 }
 
+unique_ptr<FunctionData> MimeHeadersBind(ClientContext &, TableFunctionBindInput &input,
+                                         vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::MIME_HEADERS;
+	b->args = {input.inputs[0].ToString()};
+	names = {"name", "value"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> MimeDecodeHeaderBind(ClientContext &, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::MIME_DECODE_HEADER;
+	b->args = {input.inputs[0].ToString()};
+	names = {"decoded"};
+	return_types = {LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> MimeDecodeBind(ClientContext &, TableFunctionBindInput &input,
+                                        vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::MIME_DECODE;
+	b->args = {input.inputs[0].ToString(), input.inputs[1].ToString()};
+	names = {"decoded"};
+	return_types = {LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> MimeAddressesBind(ClientContext &, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::MIME_ADDRESSES;
+	b->args = {input.inputs[0].ToString()};
+	names = {"name", "address"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> ParseDateBind(ClientContext &, TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::PARSE_DATE;
+	b->args = {input.inputs[0].ToString()};
+	names = {"epoch", "iso"};
+	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> MimePartsBind(ClientContext &, TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::MIME_PARTS;
+	b->args = {input.inputs[0].ToString()};
+	names = {"section", "content_type", "charset", "encoding", "size_bytes", "filename", "content"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	// Ensure the shared schema exists as soon as the umbrella loads.
 	Connection con(loader.GetDatabaseInstance());
@@ -133,6 +257,20 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(
 	    TableFunction("qm_user_remove", {LogicalType::VARCHAR}, RowsFunc, UserRemoveBind, RowsInit));
 	loader.RegisterFunction(TableFunction("qm_status", {}, RowsFunc, StatusBind, RowsInit));
+
+	// MIME / message-format helpers (RFC 2045-2049, 822/2822/5322).
+	loader.RegisterFunction(
+	    TableFunction("qm_mime_headers", {LogicalType::VARCHAR}, RowsFunc, MimeHeadersBind, RowsInit));
+	loader.RegisterFunction(TableFunction("qm_mime_decode_header", {LogicalType::VARCHAR}, RowsFunc,
+	                                      MimeDecodeHeaderBind, RowsInit));
+	loader.RegisterFunction(TableFunction("qm_mime_decode", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                      RowsFunc, MimeDecodeBind, RowsInit));
+	loader.RegisterFunction(
+	    TableFunction("qm_mime_addresses", {LogicalType::VARCHAR}, RowsFunc, MimeAddressesBind, RowsInit));
+	loader.RegisterFunction(
+	    TableFunction("qm_parse_date", {LogicalType::VARCHAR}, RowsFunc, ParseDateBind, RowsInit));
+	loader.RegisterFunction(
+	    TableFunction("qm_mime_parts", {LogicalType::VARCHAR}, RowsFunc, MimePartsBind, RowsInit));
 }
 
 } // namespace
