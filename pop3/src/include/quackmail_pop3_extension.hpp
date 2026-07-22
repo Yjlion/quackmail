@@ -4,8 +4,9 @@
 
 namespace duckdb {
 
-// POP3 retrieval (stub). Serves messages from quackmail_messages. Full command
-// set is a later iteration.
+// POP3 retrieval gateway. Serves each user's Citadel Mail room
+// (citadel_room_msgs -> citadel_messages) over USER/PASS/STAT/LIST/UIDL/RETR/
+// DELE/RSET/QUIT.
 class QuackmailPop3Extension : public Extension {
 public:
 	void Load(ExtensionLoader &loader) override;

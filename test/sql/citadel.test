@@ -1,0 +1,66 @@
+# name: test/sql/citadel.test
+# description: Native Citadel extension loads; schema seeds + admin fns + control work
+# group: [quackmail]
+
+require quackmail
+
+require quackmail_citadel
+
+# The schema seeds a base floor (Main Floor) and two system rooms (Lobby, Aide).
+query I
+SELECT value FROM qm_status() WHERE metric = 'floors';
+----
+1
+
+query I
+SELECT value FROM qm_status() WHERE metric = 'rooms';
+----
+2
+
+# Room numbers below 100 are reserved for system rooms; user rooms start at 100.
+query II
+SELECT ok, note FROM cit_room_add('Lounge');
+----
+true	room 100 created
+
+query I
+SELECT value FROM qm_status() WHERE metric = 'rooms';
+----
+3
+
+query I
+SELECT display_name FROM citadel_rooms WHERE room_num = 100;
+----
+Lounge
+
+# Create a floor.
+query I
+SELECT ok FROM cit_floor_add('Second Floor');
+----
+true
+
+query I
+SELECT value FROM qm_status() WHERE metric = 'floors';
+----
+2
+
+# Start / status / stop the native Citadel listener on an ephemeral port.
+query I
+SELECT note FROM cit_start('127.0.0.1', 15040);
+----
+started
+
+query I
+SELECT running FROM cit_status();
+----
+true
+
+query I
+SELECT note FROM cit_stop();
+----
+stopped
+
+query I
+SELECT running FROM cit_status();
+----
+false

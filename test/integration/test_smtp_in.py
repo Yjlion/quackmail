@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""End-to-end test for the quackmail_smtp_in extension.
+"""End-to-end test for the mail gateways over the shared Citadel store.
 
-Runs entirely in one process: loads the QuackMail extensions into an in-memory
-DuckDB, starts the inbound SMTP listener (with STARTTLS + AUTH), sends a message
-with smtplib, and asserts it lands in quackmail_messages.
+Runs entirely in one process: loads the extensions into an in-memory DuckDB,
+starts the inbound SMTP listener (STARTTLS + AUTH), sends a message with
+smtplib, asserts it landed in the recipient's Citadel Mail room, then retrieves
+it back through the POP3 gateway — proving SMTP-in and POP3 share one store.
 
 Requires: pip install duckdb==1.5.4  (matching the submodule-pinned DuckDB).
 Run after `make` so the loadable extensions exist under build/release/extension.
 """
 import os
+import poplib
 import smtplib
 import ssl
-import sys
 import time
 from email.mime.text import MIMEText
 
@@ -19,8 +20,9 @@ import duckdb
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 EXT_DIR = os.path.join(REPO, "build", "release", "extension")
-PORT = 2526
 HOST = "127.0.0.1"
+SMTP_PORT = 2526
+POP_PORT = 1111
 
 
 def ext(name):
@@ -31,21 +33,20 @@ def main():
     con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
     con.execute(f"LOAD '{ext('quackmail')}'")
     con.execute(f"LOAD '{ext('quackmail_smtp_in')}'")
+    con.execute(f"LOAD '{ext('quackmail_pop3')}'")
 
-    # Create a local user for AUTH.
     ok = con.execute("SELECT ok FROM qm_user_add('alice', 'secret')").fetchone()[0]
     assert ok, "qm_user_add failed"
 
-    # Start the inbound SMTP server with STARTTLS enabled (self-signed cert).
     note = con.execute(
-        f"SELECT note FROM qm_smtp_in_start('{HOST}', {PORT}, starttls=true)"
+        f"SELECT note FROM qm_smtp_in_start('{HOST}', {SMTP_PORT}, starttls=true)"
     ).fetchone()[0]
     assert note == "started", f"server did not start: {note}"
     time.sleep(0.3)
 
     try:
         # Plaintext AUTH must be refused before STARTTLS.
-        pre = smtplib.SMTP(HOST, PORT, timeout=10)
+        pre = smtplib.SMTP(HOST, SMTP_PORT, timeout=10)
         pre.ehlo()
         try:
             pre.login("alice", "secret")
@@ -54,8 +55,8 @@ def main():
             pass
         pre.quit()
 
-        # Now the real flow: EHLO -> STARTTLS -> AUTH -> send.
-        s = smtplib.SMTP(HOST, PORT, timeout=10)
+        # Real flow: EHLO -> STARTTLS -> AUTH -> send.
+        s = smtplib.SMTP(HOST, SMTP_PORT, timeout=10)
         s.ehlo()
         s.starttls(context=ssl._create_unverified_context())
         s.ehlo()
@@ -71,22 +72,44 @@ def main():
     finally:
         con.execute("CALL qm_smtp_in_stop()").fetchall()
 
+    # It should have been delivered as an RFC822 (format 4) message and pointed
+    # into alice's personal Mail room.
     rows = con.execute(
-        "SELECT from_addr, subject, message_id FROM quackmail_messages"
+        "SELECT author, recipient, subject, format_type FROM citadel_messages"
     ).fetchall()
     assert len(rows) == 1, f"expected 1 message, got {rows}"
     assert rows[0][0] == "bob@example.com", rows[0]
-    assert rows[0][1] == "Hello QuackMail", rows[0]
+    assert rows[0][2] == "Hello QuackMail", rows[0]
+    assert rows[0][3] == 4, rows[0]
 
-    rcpts = con.execute("SELECT rcpt FROM quackmail_recipients").fetchall()
-    assert rcpts == [("alice@quackmail.test",)], rcpts
-
-    hdr = con.execute(
-        "SELECT count(*) FROM quackmail_headers WHERE name = 'Subject'"
+    in_mail = con.execute(
+        "SELECT count(*) FROM citadel_room_msgs rm "
+        "JOIN citadel_rooms r ON r.room_num = rm.room_num "
+        "WHERE r.mailbox_owner > 0 AND r.display_name = 'Mail'"
     ).fetchone()[0]
-    assert hdr == 1, "expected the Subject header to be stored"
+    assert in_mail == 1, "message should be pointed into a personal Mail room"
 
-    print("PASS: message received over STARTTLS+AUTH and stored in DuckDB")
+    # Now retrieve it back through the POP3 gateway.
+    note = con.execute(
+        f"SELECT note FROM qm_pop3_start('{HOST}', {POP_PORT})"
+    ).fetchone()[0]
+    assert note == "started", f"pop3 did not start: {note}"
+    time.sleep(0.3)
+    try:
+        p = poplib.POP3(HOST, POP_PORT, timeout=10)
+        p.user("alice")
+        p.pass_("secret")
+        count, _size = p.stat()
+        assert count == 1, f"POP3 STAT expected 1 message, got {count}"
+        _resp, lines, _octets = p.retr(1)
+        body = b"\r\n".join(lines)
+        assert b"Hello QuackMail" in body, "Subject missing from POP3 RETR"
+        assert b"This is the body." in body, "Body missing from POP3 RETR"
+        p.quit()
+    finally:
+        con.execute("CALL qm_pop3_stop()").fetchall()
+
+    print("PASS: SMTP delivery -> Citadel Mail room -> POP3 retrieval")
 
 
 if __name__ == "__main__":

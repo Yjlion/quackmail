@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GEN: ninja
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -34,7 +35,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build libssl-dev
+            build-essential cmake ninja-build libssl-dev ccache
 
       - name: Resolve versions
         id: vers
@@ -53,12 +54,37 @@ jobs:
             release="dev-$(git rev-parse --short HEAD)"
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"
-          echo "Building QuackMail ${release} against DuckDB ${duckdb_version}"
+          echo "Building QuackCit ${release} against DuckDB ${duckdb_version}"
+
+      # These extensions use DuckDB's *internal* C++ API (ExtensionLoader,
+      # TableFunction, MaterializedQueryResult, ...), whose headers ship only in
+      # the DuckDB source tree — not in the released libduckdb amalgamation — so
+      # DuckDB cannot be swapped for a downloaded binary; it must be compiled
+      # from the pinned submodule. ccache makes that a one-time cost: DuckDB's
+      # CMake auto-detects ccache, so after the first run its ~unchanged object
+      # files are reused and only our extension sources recompile.
+      - name: Cache DuckDB compilation (ccache)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-linux-amd64-duckdb-${{ steps.vers.outputs.duckdb_version }}-${{ github.sha }}
+          restore-keys: |
+            ccache-linux-amd64-duckdb-${{ steps.vers.outputs.duckdb_version }}-
+            ccache-linux-amd64-duckdb-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=2G
+          ccache --zero-stats
 
       - name: Build extensions
         env:
           OVERRIDE_GIT_DESCRIBE: ${{ steps.vers.outputs.duckdb_version }}
         run: make
+
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats
 
       - name: Run tests
         run: make test
@@ -74,8 +100,8 @@ jobs:
           out="dist/${bundle}"
           mkdir -p "${out}"
 
-          # The six loadable extensions (original names, so `LOAD` is simple).
-          for ext in quackmail quackmail_smtp_in quackmail_smtp_out \
+          # The loadable extensions (original names, so `LOAD` is simple).
+          for ext in quackmail quackmail_citadel quackmail_smtp_in quackmail_smtp_out \
                      quackmail_imap quackmail_managesieve quackmail_pop3; do
             cp "build/release/extension/${ext}/${ext}.duckdb_extension" "${out}/"
           done
@@ -99,9 +125,9 @@ jobs:
           \`\`\`
           \`\`\`sql
           LOAD './quackmail.duckdb_extension';        -- umbrella: schema + users
-          LOAD './quackmail_smtp_in.duckdb_extension';
+          LOAD './quackmail_citadel.duckdb_extension';
           CALL qm_user_add('alice', 'secret');
-          CALL qm_smtp_in_start('127.0.0.1', 2525, starttls => true);
+          CALL cit_start('127.0.0.1', 5040);          -- native Citadel protocol
           \`\`\`
 
           ## Option B — your own DuckDB ${DUCKDB_VERSION}
@@ -113,8 +139,9 @@ jobs:
           LOAD '/absolute/path/to/quackmail.duckdb_extension';
           \`\`\`
 
-          Extensions: quackmail (umbrella), quackmail_smtp_in, quackmail_smtp_out,
-          quackmail_imap, quackmail_managesieve, quackmail_pop3.
+          Extensions: quackmail (umbrella), quackmail_citadel (native Citadel
+          protocol), quackmail_smtp_in, quackmail_smtp_out, quackmail_imap,
+          quackmail_managesieve, quackmail_pop3.
           EOF
 
           tar -C dist -czf "dist/${bundle}.tar.gz" "${bundle}"
@@ -140,8 +167,9 @@ jobs:
         run: |
           set -euo pipefail
           cat > release-notes.md <<EOF
-          QuackMail ${REL} — a mail server that runs inside DuckDB, as loadable
-          extensions. Built against DuckDB ${DUCKDB_VERSION} for **linux_amd64**.
+          QuackCit ${REL} — a Citadel groupware/BBS server that runs inside
+          DuckDB, as loadable extensions (also speaks SMTP/IMAP/POP3). Built
+          against DuckDB ${DUCKDB_VERSION} for **linux_amd64**.
 
           ## Install
 
@@ -152,9 +180,9 @@ jobs:
           \`\`\`
           \`\`\`sql
           LOAD './quackmail.duckdb_extension';
-          LOAD './quackmail_smtp_in.duckdb_extension';
+          LOAD './quackmail_citadel.duckdb_extension';
           CALL qm_user_add('alice', 'secret');
-          CALL qm_smtp_in_start('127.0.0.1', 2525, starttls => true);
+          CALL cit_start('127.0.0.1', 5040);
           \`\`\`
 
           Unsigned extensions require the \`-unsigned\` flag (or

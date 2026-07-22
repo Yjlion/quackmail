@@ -1,5 +1,5 @@
 # name: test/sql/quackmail.test
-# description: QuackMail extensions load and their control functions work
+# description: QuackCit extensions load and their control functions work
 # group: [quackmail]
 
 require quackmail
@@ -12,7 +12,7 @@ require quackmail_imap
 query I
 SELECT version FROM qm_version();
 ----
-QuackMail 0.1.0
+QuackCit 0.1.0
 
 # Adding a user succeeds and is reflected in qm_status
 query II

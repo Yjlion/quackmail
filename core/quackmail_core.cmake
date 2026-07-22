@@ -24,6 +24,8 @@ find_package(Threads REQUIRED)
 if(NOT TARGET quackmail_core)
     add_library(quackmail_core STATIC
         ${QUACKMAIL_CORE_DIR}/src/mail_store.cpp
+        ${QUACKMAIL_CORE_DIR}/src/citadel_store.cpp
+        ${QUACKMAIL_CORE_DIR}/src/citadel_msg.cpp
         ${QUACKMAIL_CORE_DIR}/src/net.cpp
         ${QUACKMAIL_CORE_DIR}/src/server_controller.cpp
         ${QUACKMAIL_CORE_DIR}/src/server_controls.cpp

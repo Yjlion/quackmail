@@ -6,6 +6,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include "quackmail/auth.hpp"
+#include "quackmail/citadel_store.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mime.hpp"
 #include "quackmail/server_controller.hpp"
@@ -13,6 +14,7 @@
 #include "quackmail/sieve.hpp"
 #include "quackmail/util.hpp"
 
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -120,44 +122,82 @@ bool HandleAuth(Connection &con, net::ClientStream &stream, const std::string &r
 	return false;
 }
 
-// Parse, filter (Sieve), and store an accepted message. Returns false on error.
+// Find a header value by case-insensitive name (empty if absent).
+std::string HeaderValue(const mime::ParsedMessage &parsed, const std::string &name) {
+	std::string want = util::Upper(name);
+	for (auto &h : parsed.headers) {
+		if (util::Upper(h.first) == want) {
+			return h.second;
+		}
+	}
+	return "";
+}
+
+// Parse, filter (Sieve), and deliver an accepted message into each recipient's
+// Citadel Mail room (or a Sieve fileinto room). Returns false on error.
 bool StoreMessage(Connection &con, const std::string &mail_from, const std::vector<std::string> &rcpts,
                   const std::string &body, std::string &err) {
 	auto parsed = mime::Parse(body);
 
-	std::string mailbox = "INBOX";
-	if (!rcpts.empty()) {
-		std::string user = util::LocalPart(rcpts[0]);
+	// Resolve the delivery room for each local recipient (deduplicated).
+	std::vector<int64_t> rooms;
+	auto add_room = [&](int64_t room) {
+		if (room < 0) {
+			return;
+		}
+		for (int64_t r : rooms) {
+			if (r == room) {
+				return;
+			}
+		}
+		rooms.push_back(room);
+	};
+
+	for (const std::string &rcpt : rcpts) {
+		std::string user = util::LocalPart(rcpt);
+		std::string folder = "Mail";
 		std::string script = sieve::LoadActiveScript(con, user);
 		if (!script.empty()) {
 			auto action = sieve::Evaluate(script, parsed);
 			if (action.type == sieve::Action::DISCARD) {
-				return true; // silently dropped by the user's filter
+				continue; // silently dropped by the user's filter
 			}
 			if (action.type == sieve::Action::FILEINTO && !action.folder.empty()) {
-				mailbox = action.folder;
+				folder = action.folder;
 			}
 		}
+		add_room(citadel::GetOrCreateUserRoom(con, user, folder));
 	}
 
-	store::StoredMessage msg;
-	msg.mailbox = mailbox;
-	// Prefer the envelope MAIL FROM, but fall back to the parsed From: header
-	// address when the envelope is empty (e.g. a bounce with <>).
-	msg.from_addr = mail_from;
-	if (msg.from_addr.empty() && !parsed.from.empty()) {
+	if (rooms.empty()) {
+		return true; // no local recipients / all filtered out; accept and drop
+	}
+
+	citadel::Message msg;
+	// Author: the From: display name/address, falling back to the envelope sender.
+	if (!parsed.from.empty()) {
 		auto addrs = mime::ParseAddressList(parsed.from);
 		if (!addrs.empty()) {
-			msg.from_addr = addrs[0].addr;
+			msg.author = !addrs[0].name.empty() ? addrs[0].name : addrs[0].addr;
 		}
 	}
-	// Decode any RFC 2047 encoded words in the subject for display/storage.
+	if (msg.author.empty()) {
+		msg.author = mail_from;
+	}
+	std::string joined;
+	for (size_t i = 0; i < rcpts.size(); i++) {
+		joined += (i ? ", " : "") + rcpts[i];
+	}
+	msg.recipient = joined;
 	msg.subject = mime::DecodeEncodedWords(parsed.subject);
-	msg.message_id = parsed.message_id;
+	msg.euid = parsed.message_id;
+	msg.references = HeaderValue(parsed, "References");
+	msg.format_type = 4; // RFC822/MIME
 	msg.raw = body;
-	msg.recipients = rcpts;
-	msg.headers = parsed.headers;
-	return store::InsertMessage(con, msg, err) >= 0;
+	int64_t epoch = 0;
+	msg.msgtime = mime::ParseDate(HeaderValue(parsed, "Date"), epoch) ? epoch : (int64_t)std::time(nullptr);
+
+	return citadel::InsertMessage(con, msg, rooms, err) >= 0;
 }
 
 void HandleSmtp(DatabaseInstance &db, net::ClientStream &stream) {
