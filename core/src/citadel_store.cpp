@@ -199,17 +199,22 @@ int64_t GetOrAssignUserNum(Connection &con, const std::string &username) {
 	if (!existing.IsNull()) {
 		return existing.GetValue<int64_t>();
 	}
-	// Assign atomically in a single statement: RETURNING hands back the number
-	// without a follow-up SELECT (a separate read-your-own-write on this
-	// connection is unreliable), and ON CONFLICT keeps any concurrently-assigned
-	// value. Both the insert and the returned value come from one statement.
-	auto v = ScalarP(con,
-	                 "INSERT INTO citadel_users (username, usernum, axlevel) "
-	                 "VALUES ($1, nextval('citadel_user_seq'), 4) "
-	                 "ON CONFLICT (username) DO UPDATE SET axlevel = citadel_users.axlevel "
-	                 "RETURNING usernum",
-	                 {Value(username)});
-	return AsBigint(v);
+	// Assign in an explicit transaction. A bare autocommit write is not reliably
+	// visible to this same connection's follow-up read (the listener connection
+	// pins a read snapshot); the COMMIT refreshes it, so the settle-read sees the
+	// row. Return the freshly stored value, falling back to the number we
+	// allocated if a concurrent session won the insert.
+	con.Query("BEGIN TRANSACTION");
+	auto num = ScalarP(con, "SELECT nextval('citadel_user_seq')", {});
+	if (num.IsNull()) {
+		con.Query("ROLLBACK");
+		return 0;
+	}
+	ExecP(con, "INSERT OR IGNORE INTO citadel_users (username, usernum, axlevel) VALUES ($1, $2, 4)",
+	      {Value(username), num});
+	con.Query("COMMIT");
+	auto settled = ScalarP(con, "SELECT usernum FROM citadel_users WHERE username = $1", {Value(username)});
+	return settled.IsNull() ? AsBigint(num) : AsBigint(settled);
 }
 
 int64_t GetAxLevel(Connection &con, const std::string &username) {
@@ -236,15 +241,21 @@ std::vector<Floor> ListFloors(Connection &con) {
 }
 
 int64_t CreateFloor(Connection &con, const std::string &name, std::string &err) {
-	auto v = ScalarP(con,
-	                 "INSERT INTO citadel_floors (floor_num, name) "
-	                 "VALUES (nextval('citadel_floor_seq'), $1) RETURNING floor_num",
-	                 {Value(name)});
-	if (v.IsNull()) {
+	con.Query("BEGIN TRANSACTION");
+	auto num = ScalarP(con, "SELECT nextval('citadel_floor_seq')", {});
+	if (num.IsNull()) {
+		con.Query("ROLLBACK");
+		err = "could not allocate floor number";
+		return -1;
+	}
+	auto r = ExecP(con, "INSERT INTO citadel_floors (floor_num, name) VALUES ($1, $2)", {num, Value(name)});
+	if (!r) {
+		con.Query("ROLLBACK");
 		err = "insert failed";
 		return -1;
 	}
-	return AsBigint(v);
+	con.Query("COMMIT");
+	return AsBigint(num);
 }
 
 bool GetRoomByNum(Connection &con, int64_t room_num, Room &out) {
@@ -336,19 +347,25 @@ int64_t CreateRoom(Connection &con, const std::string &display_name, int64_t flo
                    const std::string &password, int64_t mailbox_owner, std::string &err) {
 	std::string internal =
 	    mailbox_owner > 0 ? std::to_string(mailbox_owner) + "." + display_name : display_name;
-	// Single atomic statement (nextval + insert + RETURNING); a duplicate name
-	// violates the UNIQUE constraint and yields a NULL result.
-	auto v = ScalarP(con,
-	                 "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, password, "
-	                 "mailbox_owner) VALUES (nextval('citadel_room_seq'), $1, $2, $3, $4, $5, $6) "
-	                 "RETURNING room_num",
-	                 {Value(internal), Value(display_name), Value::BIGINT(floor), Value::BIGINT(qr_flags),
-	                  Value(password), Value::BIGINT(mailbox_owner)});
-	if (v.IsNull()) {
+	con.Query("BEGIN TRANSACTION");
+	auto num = ScalarP(con, "SELECT nextval('citadel_room_seq')", {});
+	if (num.IsNull()) {
+		con.Query("ROLLBACK");
+		err = "could not allocate room number";
+		return -1;
+	}
+	auto r = ExecP(con,
+	               "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, password, "
+	               "mailbox_owner) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+	               {num, Value(internal), Value(display_name), Value::BIGINT(floor), Value::BIGINT(qr_flags),
+	                Value(password), Value::BIGINT(mailbox_owner)});
+	if (!r) {
+		con.Query("ROLLBACK");
 		err = "room already exists";
 		return -1;
 	}
-	return AsBigint(v);
+	con.Query("COMMIT");
+	return AsBigint(num);
 }
 
 bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
@@ -405,10 +422,12 @@ void SetLastRead(Connection &con, const std::string &username, int64_t room_num,
 	if (username.empty()) {
 		return;
 	}
+	con.Query("BEGIN TRANSACTION");
 	ExecP(con,
 	      "INSERT INTO citadel_room_state (username, room_num, last_read) VALUES ($1, $2, $3) "
 	      "ON CONFLICT (username, room_num) DO UPDATE SET last_read = excluded.last_read",
 	      {Value(username), Value::BIGINT(room_num), Value::BIGINT(msgnum)});
+	con.Query("COMMIT");
 }
 
 int64_t InsertMessage(Connection &con, const Message &msg, const std::vector<int64_t> &rooms, std::string &err) {
