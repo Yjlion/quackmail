@@ -190,8 +190,15 @@ jobs:
           Verify the download with the accompanying \`.sha256\` file.
           EOF
 
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist/quackmail-${REL}-linux_amd64.tar.gz" \
-            "dist/quackmail-${REL}-linux_amd64.tar.gz.sha256" \
-            --title "QuackMail ${REL}" \
-            --notes-file release-notes.md
+          tarball="dist/quackmail-${REL}-linux_amd64.tar.gz"
+          # Idempotent publish: if the release already exists (e.g. it was created
+          # from the GitHub UI, which is what pushed this tag), attach/refresh the
+          # assets instead of failing on a duplicate `gh release create`.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${tarball}" "${tarball}.sha256" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              "${tarball}" "${tarball}.sha256" \
+              --title "QuackCit ${REL}" \
+              --notes-file release-notes.md
+          fi
