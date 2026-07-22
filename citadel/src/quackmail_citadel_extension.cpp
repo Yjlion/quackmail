@@ -115,9 +115,22 @@ void CompleteLogin(Connection &con, Session &s, std::string username) {
 
 void HandleGoto(Connection &con, Session &s, net::ClientStream &stream, const std::vector<std::string> &p) {
 	std::string wanted = Field(p, 0);
+	// Citadel clients auto-navigate using magic room aliases rather than literal
+	// names; translate the common ones to our seeded/per-user rooms.
+	std::string alias = util::Upper(wanted);
+	if (alias == "_BASEROOM_") {
+		wanted = "Lobby";
+	} else if (alias == "_MAIL_") {
+		wanted = "Mail"; // the logged-in user's personal mailbox room
+	} else if (alias == "_AIDE_") {
+		wanted = "Aide";
+	}
 	citadel::Room room;
 	if (!citadel::ResolveRoom(con, s.username, wanted, room)) {
-		stream.WriteLine("540 No such room.");
+		// 550 = generic error. Do NOT use 540 here: 540 means "password
+		// required" to clients, which makes them prompt for a room password
+		// and loop instead of reporting the room as missing.
+		stream.WriteLine("550 No such room.");
 		return;
 	}
 	if (room.qr_flags & citadel::QR_PASSWORDED) {
@@ -525,6 +538,12 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			}
 		} else if (verb == "INFO") {
 			WriteListing(stream, InfoLines(con));
+		} else if (verb == "MSGP") {
+			// Client message-format preference hint (which MIME types it wants
+			// decoded). We deliver messages as-is and let the client decode, so
+			// acknowledge without storing prefs. Text clients abort login if
+			// this returns non-2xx.
+			stream.WriteLine("200 OK");
 		} else {
 			stream.WriteLine("500 Unrecognized or unsupported command.");
 		}

@@ -76,6 +76,11 @@ def main():
         greeting = c.readline()
         assert greeting.startswith("200 "), f"bad greeting: {greeting}"
 
+        # Text clients send MSGP (message-format preference) during handshake
+        # and abort login on a non-2xx reply; the server must accept it.
+        resp = c.command("MSGP text/plain|text/html")
+        assert resp.startswith("200"), f"MSGP not accepted: {resp}"
+
         # Create and log in a new user.
         resp = c.command("NEWU cituser")
         assert resp.startswith("200 "), f"NEWU failed: {resp}"
@@ -83,6 +88,17 @@ def main():
         # Enter the Lobby.
         resp = c.command("GOTO Lobby")
         assert resp.startswith("200 Lobby"), f"GOTO failed: {resp}"
+
+        # Magic room aliases clients use to auto-navigate must resolve, and a
+        # missing room must NOT return 540 (which clients read as "password
+        # required" and loop on).
+        resp = c.command("GOTO _BASEROOM_")
+        assert resp.startswith("200 Lobby"), f"GOTO _BASEROOM_ failed: {resp}"
+        resp = c.command("GOTO _MAIL_")
+        assert resp.startswith("200 Mail"), f"GOTO _MAIL_ failed: {resp}"
+        resp = c.command("GOTO does-not-exist")
+        assert resp.startswith("550"), f"missing room should be 550, got: {resp}"
+        c.command("GOTO Lobby")  # return to the Lobby for the message test
 
         # Post a message: ENT0 <post=1>|<rcpt>|<anon>|<format>|<subject>
         resp = c.command("ENT0 1||0|0|Hello Subject")
