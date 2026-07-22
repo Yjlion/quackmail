@@ -102,7 +102,9 @@ std::string LoginLine(const Session &s) {
 }
 
 // Finish logging a user in: populate session, ensure a usernum + Mail room.
-void CompleteLogin(Connection &con, Session &s, const std::string &username) {
+// `username` is taken by value on purpose: callers pass s.pending_user, which we
+// clear below — a reference would be emptied before it is used.
+void CompleteLogin(Connection &con, Session &s, std::string username) {
 	s.authed = true;
 	s.username = username;
 	s.pending_user.clear();
