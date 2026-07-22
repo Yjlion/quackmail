@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GEN: ninja
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -34,7 +35,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build libssl-dev
+            build-essential cmake ninja-build libssl-dev ccache
 
       - name: Resolve versions
         id: vers
@@ -53,12 +54,37 @@ jobs:
             release="dev-$(git rev-parse --short HEAD)"
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"
-          echo "Building QuackMail ${release} against DuckDB ${duckdb_version}"
+          echo "Building QuackCit ${release} against DuckDB ${duckdb_version}"
+
+      # These extensions use DuckDB's *internal* C++ API (ExtensionLoader,
+      # TableFunction, MaterializedQueryResult, ...), whose headers ship only in
+      # the DuckDB source tree — not in the released libduckdb amalgamation — so
+      # DuckDB cannot be swapped for a downloaded binary; it must be compiled
+      # from the pinned submodule. ccache makes that a one-time cost: DuckDB's
+      # CMake auto-detects ccache, so after the first run its ~unchanged object
+      # files are reused and only our extension sources recompile.
+      - name: Cache DuckDB compilation (ccache)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-linux-amd64-duckdb-${{ steps.vers.outputs.duckdb_version }}-${{ github.sha }}
+          restore-keys: |
+            ccache-linux-amd64-duckdb-${{ steps.vers.outputs.duckdb_version }}-
+            ccache-linux-amd64-duckdb-
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=2G
+          ccache --zero-stats
 
       - name: Build extensions
         env:
           OVERRIDE_GIT_DESCRIBE: ${{ steps.vers.outputs.duckdb_version }}
         run: make
+
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats
 
       - name: Run tests
         run: make test
