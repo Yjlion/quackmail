@@ -7,6 +7,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include "quackmail/auth.hpp"
+#include "quackmail/citadel_store.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mime.hpp"
 
@@ -27,6 +28,8 @@ enum class UmbrellaKind {
 	MIME_ADDRESSES,
 	PARSE_DATE,
 	MIME_PARTS,
+	CIT_ROOM_ADD,
+	CIT_FLOOR_ADD,
 };
 
 struct RowsBindData : public FunctionData {
@@ -54,7 +57,7 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 
 	switch (bind.kind) {
 	case UmbrellaKind::VERSION:
-		gstate->rows.push_back({Value("QuackMail 0.1.0")});
+		gstate->rows.push_back({Value("QuackCit 0.1.0")});
 		break;
 	case UmbrellaKind::USER_ADD: {
 		std::string err;
@@ -74,10 +77,25 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 			int64_t v = (!r->HasError() && r->RowCount() == 1) ? r->GetValue(0, 0).GetValue<int64_t>() : -1;
 			gstate->rows.push_back({Value(name), Value::BIGINT(v)});
 		};
-		add_metric("messages", "SELECT count(*) FROM quackmail_messages");
-		add_metric("recipients", "SELECT count(*) FROM quackmail_recipients");
 		add_metric("users", "SELECT count(*) FROM quackmail_users");
+		add_metric("floors", "SELECT count(*) FROM citadel_floors");
+		add_metric("rooms", "SELECT count(*) FROM citadel_rooms");
+		add_metric("messages", "SELECT count(*) FROM citadel_messages");
 		add_metric("outbound_queued", "SELECT count(*) FROM quackmail_outbound WHERE status = 'queued'");
+		break;
+	}
+	case UmbrellaKind::CIT_ROOM_ADD: {
+		std::string err;
+		int64_t num = quackmail::citadel::CreateRoom(con, bind.args[0], 0, 0, "", 0, err);
+		gstate->rows.push_back(
+		    {Value::BOOLEAN(num >= 0), Value(num >= 0 ? ("room " + std::to_string(num) + " created") : err)});
+		break;
+	}
+	case UmbrellaKind::CIT_FLOOR_ADD: {
+		std::string err;
+		int64_t num = quackmail::citadel::CreateFloor(con, bind.args[0], err);
+		gstate->rows.push_back(
+		    {Value::BOOLEAN(num >= 0), Value(num >= 0 ? ("floor " + std::to_string(num) + " created") : err)});
 		break;
 	}
 	case UmbrellaKind::MIME_HEADERS: {
@@ -246,6 +264,26 @@ unique_ptr<FunctionData> MimePartsBind(ClientContext &, TableFunctionBindInput &
 	return std::move(b);
 }
 
+unique_ptr<FunctionData> CitRoomAddBind(ClientContext &, TableFunctionBindInput &input,
+                                        vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::CIT_ROOM_ADD;
+	b->args = {input.inputs[0].ToString()};
+	names = {"ok", "note"};
+	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> CitFloorAddBind(ClientContext &, TableFunctionBindInput &input,
+                                         vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::CIT_FLOOR_ADD;
+	b->args = {input.inputs[0].ToString()};
+	names = {"ok", "note"};
+	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	// Ensure the shared schema exists as soon as the umbrella loads.
 	Connection con(loader.GetDatabaseInstance());
@@ -257,6 +295,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(
 	    TableFunction("qm_user_remove", {LogicalType::VARCHAR}, RowsFunc, UserRemoveBind, RowsInit));
 	loader.RegisterFunction(TableFunction("qm_status", {}, RowsFunc, StatusBind, RowsInit));
+
+	// Citadel admin: create a public room / a floor.
+	loader.RegisterFunction(
+	    TableFunction("cit_room_add", {LogicalType::VARCHAR}, RowsFunc, CitRoomAddBind, RowsInit));
+	loader.RegisterFunction(
+	    TableFunction("cit_floor_add", {LogicalType::VARCHAR}, RowsFunc, CitFloorAddBind, RowsInit));
 
 	// MIME / message-format helpers (RFC 2045-2049, 822/2822/5322).
 	loader.RegisterFunction(

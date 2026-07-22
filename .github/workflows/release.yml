@@ -74,8 +74,8 @@ jobs:
           out="dist/${bundle}"
           mkdir -p "${out}"
 
-          # The six loadable extensions (original names, so `LOAD` is simple).
-          for ext in quackmail quackmail_smtp_in quackmail_smtp_out \
+          # The loadable extensions (original names, so `LOAD` is simple).
+          for ext in quackmail quackmail_citadel quackmail_smtp_in quackmail_smtp_out \
                      quackmail_imap quackmail_managesieve quackmail_pop3; do
             cp "build/release/extension/${ext}/${ext}.duckdb_extension" "${out}/"
           done
@@ -99,9 +99,9 @@ jobs:
           \`\`\`
           \`\`\`sql
           LOAD './quackmail.duckdb_extension';        -- umbrella: schema + users
-          LOAD './quackmail_smtp_in.duckdb_extension';
+          LOAD './quackmail_citadel.duckdb_extension';
           CALL qm_user_add('alice', 'secret');
-          CALL qm_smtp_in_start('127.0.0.1', 2525, starttls => true);
+          CALL cit_start('127.0.0.1', 5040);          -- native Citadel protocol
           \`\`\`
 
           ## Option B — your own DuckDB ${DUCKDB_VERSION}
@@ -113,8 +113,9 @@ jobs:
           LOAD '/absolute/path/to/quackmail.duckdb_extension';
           \`\`\`
 
-          Extensions: quackmail (umbrella), quackmail_smtp_in, quackmail_smtp_out,
-          quackmail_imap, quackmail_managesieve, quackmail_pop3.
+          Extensions: quackmail (umbrella), quackmail_citadel (native Citadel
+          protocol), quackmail_smtp_in, quackmail_smtp_out, quackmail_imap,
+          quackmail_managesieve, quackmail_pop3.
           EOF
 
           tar -C dist -czf "dist/${bundle}.tar.gz" "${bundle}"
@@ -140,8 +141,9 @@ jobs:
         run: |
           set -euo pipefail
           cat > release-notes.md <<EOF
-          QuackMail ${REL} — a mail server that runs inside DuckDB, as loadable
-          extensions. Built against DuckDB ${DUCKDB_VERSION} for **linux_amd64**.
+          QuackCit ${REL} — a Citadel groupware/BBS server that runs inside
+          DuckDB, as loadable extensions (also speaks SMTP/IMAP/POP3). Built
+          against DuckDB ${DUCKDB_VERSION} for **linux_amd64**.
 
           ## Install
 
@@ -152,9 +154,9 @@ jobs:
           \`\`\`
           \`\`\`sql
           LOAD './quackmail.duckdb_extension';
-          LOAD './quackmail_smtp_in.duckdb_extension';
+          LOAD './quackmail_citadel.duckdb_extension';
           CALL qm_user_add('alice', 'secret');
-          CALL qm_smtp_in_start('127.0.0.1', 2525, starttls => true);
+          CALL cit_start('127.0.0.1', 5040);
           \`\`\`
 
           Unsigned extensions require the \`-unsigned\` flag (or

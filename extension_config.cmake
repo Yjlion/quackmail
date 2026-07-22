@@ -11,6 +11,11 @@ duckdb_extension_load(quackmail
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/quackmail
 )
 
+# Native Citadel protocol server (users/floors/rooms/messages) — the centerpiece.
+duckdb_extension_load(quackmail_citadel
+    SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/citadel
+)
+
 # Inbound SMTP MTA (fully implemented).
 duckdb_extension_load(quackmail_smtp_in
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/smtp_in

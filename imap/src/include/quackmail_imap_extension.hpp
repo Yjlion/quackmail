@@ -4,8 +4,9 @@
 
 namespace duckdb {
 
-// IMAP4rev1 retrieval (stub). Serves mailboxes backed by quackmail_messages /
-// quackmail_message_flags. Full command set is a later iteration.
+// IMAP4rev1 retrieval gateway (minimal subset). Maps mailboxes to Citadel rooms
+// (INBOX -> the user's Mail room) and serves LOGIN/LIST/SELECT/FETCH/STORE/
+// EXPUNGE from citadel_messages + citadel_msg_flags. Deep IMAP is a later phase.
 class QuackmailImapExtension : public Extension {
 public:
 	void Load(ExtensionLoader &loader) override;
