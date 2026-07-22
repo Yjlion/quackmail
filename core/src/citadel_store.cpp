@@ -199,15 +199,17 @@ int64_t GetOrAssignUserNum(Connection &con, const std::string &username) {
 	if (!existing.IsNull()) {
 		return existing.GetValue<int64_t>();
 	}
-	auto num = ScalarP(con, "SELECT nextval('citadel_user_seq')", {});
-	if (num.IsNull()) {
-		return 0;
-	}
-	ExecP(con, "INSERT OR IGNORE INTO citadel_users (username, usernum, axlevel) VALUES ($1, $2, 4)",
-	      {Value(username), num});
-	// Re-select to settle any race (another session may have assigned first).
-	auto settled = ScalarP(con, "SELECT usernum FROM citadel_users WHERE username = $1", {Value(username)});
-	return AsBigint(settled);
+	// Assign atomically in a single statement: RETURNING hands back the number
+	// without a follow-up SELECT (a separate read-your-own-write on this
+	// connection is unreliable), and ON CONFLICT keeps any concurrently-assigned
+	// value. Both the insert and the returned value come from one statement.
+	auto v = ScalarP(con,
+	                 "INSERT INTO citadel_users (username, usernum, axlevel) "
+	                 "VALUES ($1, nextval('citadel_user_seq'), 4) "
+	                 "ON CONFLICT (username) DO UPDATE SET axlevel = citadel_users.axlevel "
+	                 "RETURNING usernum",
+	                 {Value(username)});
+	return AsBigint(v);
 }
 
 int64_t GetAxLevel(Connection &con, const std::string &username) {
@@ -234,17 +236,15 @@ std::vector<Floor> ListFloors(Connection &con) {
 }
 
 int64_t CreateFloor(Connection &con, const std::string &name, std::string &err) {
-	auto num = ScalarP(con, "SELECT nextval('citadel_floor_seq')", {});
-	if (num.IsNull()) {
-		err = "could not allocate floor number";
-		return -1;
-	}
-	auto r = ExecP(con, "INSERT INTO citadel_floors (floor_num, name) VALUES ($1, $2)", {num, Value(name)});
-	if (!r) {
+	auto v = ScalarP(con,
+	                 "INSERT INTO citadel_floors (floor_num, name) "
+	                 "VALUES (nextval('citadel_floor_seq'), $1) RETURNING floor_num",
+	                 {Value(name)});
+	if (v.IsNull()) {
 		err = "insert failed";
 		return -1;
 	}
-	return num.GetValue<int64_t>();
+	return AsBigint(v);
 }
 
 bool GetRoomByNum(Connection &con, int64_t room_num, Room &out) {
@@ -334,23 +334,21 @@ std::vector<Room> ListRooms(Connection &con, const std::string &username, int64_
 
 int64_t CreateRoom(Connection &con, const std::string &display_name, int64_t floor, int64_t qr_flags,
                    const std::string &password, int64_t mailbox_owner, std::string &err) {
-	auto num = ScalarP(con, "SELECT nextval('citadel_room_seq')", {});
-	if (num.IsNull()) {
-		err = "could not allocate room number";
-		return -1;
-	}
 	std::string internal =
 	    mailbox_owner > 0 ? std::to_string(mailbox_owner) + "." + display_name : display_name;
-	auto r = ExecP(con,
-	               "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, password, "
-	               "mailbox_owner) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-	               {num, Value(internal), Value(display_name), Value::BIGINT(floor), Value::BIGINT(qr_flags),
-	                Value(password), Value::BIGINT(mailbox_owner)});
-	if (!r) {
+	// Single atomic statement (nextval + insert + RETURNING); a duplicate name
+	// violates the UNIQUE constraint and yields a NULL result.
+	auto v = ScalarP(con,
+	                 "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, password, "
+	                 "mailbox_owner) VALUES (nextval('citadel_room_seq'), $1, $2, $3, $4, $5, $6) "
+	                 "RETURNING room_num",
+	                 {Value(internal), Value(display_name), Value::BIGINT(floor), Value::BIGINT(qr_flags),
+	                  Value(password), Value::BIGINT(mailbox_owner)});
+	if (v.IsNull()) {
 		err = "room already exists";
 		return -1;
 	}
-	return num.GetValue<int64_t>();
+	return AsBigint(v);
 }
 
 bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
