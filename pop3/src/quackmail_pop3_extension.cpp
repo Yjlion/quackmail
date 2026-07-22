@@ -38,7 +38,7 @@ std::vector<Entry> LoadMaildrop(Connection &con, const std::string &username) {
 	if (room < 0) {
 		return out;
 	}
-	auto stmt = con.Prepare("SELECT m.msgnum, length(m.raw) FROM citadel_messages m "
+	auto stmt = con.Prepare("SELECT m.msgnum, octet_length(m.raw) FROM citadel_messages m "
 	                        "JOIN citadel_room_msgs rm ON rm.msgnum = m.msgnum "
 	                        "WHERE rm.room_num = $1 ORDER BY m.msgnum");
 	if (stmt->HasError()) {
