@@ -76,6 +76,11 @@ def main():
         greeting = c.readline()
         assert greeting.startswith("200 "), f"bad greeting: {greeting}"
 
+        # Text clients send MSGP (message-format preference) during handshake
+        # and abort login on a non-2xx reply; the server must accept it.
+        resp = c.command("MSGP text/plain|text/html")
+        assert resp.startswith("200"), f"MSGP not accepted: {resp}"
+
         # Create and log in a new user.
         resp = c.command("NEWU cituser")
         assert resp.startswith("200 "), f"NEWU failed: {resp}"

@@ -525,6 +525,12 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			}
 		} else if (verb == "INFO") {
 			WriteListing(stream, InfoLines(con));
+		} else if (verb == "MSGP") {
+			// Client message-format preference hint (which MIME types it wants
+			// decoded). We deliver messages as-is and let the client decode, so
+			// acknowledge without storing prefs. Text clients abort login if
+			// this returns non-2xx.
+			stream.WriteLine("200 OK");
 		} else {
 			stream.WriteLine("500 Unrecognized or unsupported command.");
 		}
