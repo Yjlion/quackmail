@@ -16,6 +16,7 @@
 #include "quackmail/util.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <string>
@@ -387,7 +388,7 @@ void FetchOne(Connection &con, Session &s, net::ClientStream &stream, size_t pos
 // The CAPABILITY token list. STARTTLS is advertised only before the TLS upgrade;
 // mirrors a real Citadel server (which offers NAMESPACE, UIDPLUS, SASL, ID).
 std::string CapabilityLine(bool tls_active, bool starttls_avail) {
-	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS AUTH=PLAIN AUTH=LOGIN";
+	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS MOVE AUTH=PLAIN AUTH=LOGIN";
 	if (!tls_active && starttls_avail) {
 		caps += " STARTTLS";
 	}
@@ -483,6 +484,129 @@ std::vector<MailboxEntry> BuildMailboxes(Connection &con, const std::string &use
 		}
 	}
 	return out;
+}
+
+// Tokenize an IMAP SEARCH criteria string (whitespace-split; quoted strings kept
+// whole, parentheses become their own tokens).
+std::vector<std::string> SearchTokens(const std::string &s) {
+	std::vector<std::string> out;
+	size_t i = 0;
+	while (i < s.size()) {
+		if (s[i] == ' ') {
+			i++;
+		} else if (s[i] == '(' || s[i] == ')') {
+			out.push_back(std::string(1, s[i]));
+			i++;
+		} else if (s[i] == '"') {
+			size_t j = i + 1;
+			std::string v;
+			while (j < s.size() && s[j] != '"') {
+				v.push_back(s[j++]);
+			}
+			out.push_back(v);
+			i = j + 1;
+		} else {
+			size_t j = i;
+			while (j < s.size() && s[j] != ' ') {
+				j++;
+			}
+			out.push_back(s.substr(i, j - i));
+			i = j;
+		}
+	}
+	return out;
+}
+
+// Evaluate one message against a SEARCH criteria token list. `idx1` is its 1-based
+// position, `uid` its msgnum. Supports a practical RFC 3501 subset (flags, header
+// field substrings, BODY/TEXT, SIZE, sequence/UID sets, NOT, ALL). Unknown keys
+// are skipped conservatively (treated as matching) so clients still function.
+bool SearchMatch(Connection &con, const std::string &user, size_t idx1, int64_t uid,
+                 const std::vector<int64_t> &uids, const std::vector<std::string> &toks, size_t &pos) {
+	auto has_flag = [&](const char *f) {
+		auto fl = LoadFlags(con, uid, user);
+		return std::find(fl.begin(), fl.end(), std::string(f)) != fl.end();
+	};
+	citadel::Message msg;
+	bool loaded = false;
+	auto load = [&]() -> citadel::Message & {
+		if (!loaded) {
+			citadel::LoadMessage(con, uid, msg);
+			loaded = true;
+		}
+		return msg;
+	};
+	auto header_has = [&](const std::string &field, const std::string &needle) {
+		auto p = mime::Parse(load().raw);
+		std::string want = util::Upper(field), nl = util::Upper(needle);
+		for (auto &h : p.headers) {
+			if (util::Upper(h.first) == want && util::Upper(h.second).find(nl) != std::string::npos) {
+				return true;
+			}
+		}
+		return false;
+	};
+	auto in_set = [&](const std::string &set, bool is_uid) {
+		for (size_t p : ParseSet(set, uids, is_uid)) {
+			if (p == idx1) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	bool ok = true; // AND of all criteria
+	while (pos < toks.size() && toks[pos] != ")") {
+		std::string k = util::Upper(toks[pos]);
+		bool neg = false;
+		if (k == "NOT") {
+			neg = true;
+			pos++;
+			k = pos < toks.size() ? util::Upper(toks[pos]) : "";
+		}
+		bool m = true;
+		if (k == "ALL" || k == "RECENT" || k == "NEW") {
+			pos++;
+		} else if (k == "ANSWERED") { m = has_flag("\\Answered"); pos++; }
+		else if (k == "UNANSWERED") { m = !has_flag("\\Answered"); pos++; }
+		else if (k == "SEEN") { m = has_flag("\\Seen"); pos++; }
+		else if (k == "UNSEEN") { m = !has_flag("\\Seen"); pos++; }
+		else if (k == "FLAGGED") { m = has_flag("\\Flagged"); pos++; }
+		else if (k == "UNFLAGGED") { m = !has_flag("\\Flagged"); pos++; }
+		else if (k == "DELETED") { m = has_flag("\\Deleted"); pos++; }
+		else if (k == "UNDELETED") { m = !has_flag("\\Deleted"); pos++; }
+		else if (k == "DRAFT") { m = has_flag("\\Draft"); pos++; }
+		else if (k == "UNDRAFT") { m = !has_flag("\\Draft"); pos++; }
+		else if (k == "OLD") { m = !has_flag("\\Recent"); pos++; }
+		else if (k == "UID") { m = pos + 1 < toks.size() && in_set(toks[pos + 1], true); pos += 2; }
+		else if (k == "FROM" || k == "TO" || k == "CC" || k == "BCC" || k == "SUBJECT") {
+			m = pos + 1 < toks.size() && header_has(k, toks[pos + 1]);
+			pos += 2;
+		} else if (k == "HEADER") {
+			m = pos + 2 < toks.size() && header_has(toks[pos + 1], toks[pos + 2]);
+			pos += 3;
+		} else if (k == "BODY" || k == "TEXT") {
+			m = pos + 1 < toks.size() &&
+			    util::Upper(load().raw).find(util::Upper(toks[pos + 1])) != std::string::npos;
+			pos += 2;
+		} else if (k == "LARGER") {
+			m = pos + 1 < toks.size() && (int64_t)load().raw.size() > std::atoll(toks[pos + 1].c_str());
+			pos += 2;
+		} else if (k == "SMALLER") {
+			m = pos + 1 < toks.size() && (int64_t)load().raw.size() < std::atoll(toks[pos + 1].c_str());
+			pos += 2;
+		} else if (!k.empty() && (isdigit((unsigned char)k[0]) || k == "*")) {
+			m = in_set(toks[pos], false); // bare sequence set
+			pos++;
+		} else {
+			pos++; // unknown key: skip (conservatively matches)
+		}
+		if (neg) {
+			m = !m;
+		}
+		ok = ok && m;
+	}
+	return ok;
 }
 
 void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerController &ctrl) {
@@ -747,6 +871,193 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 					}
 				}
 				stream.WriteLine(tag + " OK STORE completed");
+			}
+		} else if (cmd == "SEARCH" || (cmd == "UID" && util::Upper(args).rfind("SEARCH", 0) == 0)) {
+			bool is_uid = cmd == "UID";
+			std::string crit = is_uid ? args.substr(args.find(' ') + 1) : args;
+			if (!s.selected) {
+				stream.WriteLine(tag + " NO no mailbox selected");
+			} else {
+				auto toks = SearchTokens(crit);
+				std::string hits;
+				for (size_t i = 0; i < s.uids.size(); i++) {
+					size_t pos = 0;
+					if (SearchMatch(con, s.user, i + 1, s.uids[i], s.uids, toks, pos)) {
+						hits += (hits.empty() ? "" : " ") + std::to_string(is_uid ? s.uids[i] : (int64_t)(i + 1));
+					}
+				}
+				stream.WriteLine("* SEARCH" + (hits.empty() ? "" : " " + hits));
+				stream.WriteLine(tag + " OK SEARCH completed");
+			}
+		} else if (cmd == "COPY" || (cmd == "UID" && util::Upper(args).rfind("COPY", 0) == 0) ||
+		           cmd == "MOVE" || (cmd == "UID" && util::Upper(args).rfind("MOVE", 0) == 0)) {
+			bool is_uid = cmd == "UID";
+			std::string keyword = cmd;   // COPY or MOVE
+			std::string body = args;     // "<set> <dest>"
+			if (is_uid) {
+				size_t k = args.find(' ');
+				keyword = util::Upper(args.substr(0, k));
+				body = args.substr(k + 1);
+			}
+			bool is_move = keyword == "MOVE";
+			size_t sp = body.find(' ');
+			std::string set = sp == std::string::npos ? body : body.substr(0, sp);
+			std::string dest = sp == std::string::npos ? "" : body.substr(sp + 1);
+			if (dest.size() >= 2 && dest.front() == '"' && dest.back() == '"') {
+				dest = dest.substr(1, dest.size() - 2);
+			}
+			int64_t droom = ResolveMailbox(con, s.user, dest);
+			if (!s.selected) {
+				stream.WriteLine(tag + " NO no mailbox selected");
+			} else if (droom < 0) {
+				stream.WriteLine(tag + " NO [TRYCREATE] destination mailbox not found");
+			} else {
+				for (size_t pos : ParseSet(set, s.uids, is_uid)) {
+					int64_t uid = s.uids[pos - 1];
+					auto ins = con.Prepare("INSERT OR IGNORE INTO citadel_room_msgs (room_num, msgnum) VALUES ($1, $2)");
+					if (!ins->HasError()) {
+						duckdb::vector<Value> pr = {Value::BIGINT(droom), Value::BIGINT(uid)};
+						ins->Execute(pr, false);
+					}
+					con.Query("UPDATE citadel_rooms SET highest_msg = greatest(highest_msg, " +
+					          std::to_string(uid) + ") WHERE room_num = " + std::to_string(droom));
+					if (is_move) {
+						auto del = con.Prepare("DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2");
+						if (!del->HasError()) {
+							duckdb::vector<Value> pr = {Value::BIGINT(s.room), Value::BIGINT(uid)};
+							del->Execute(pr, false);
+						}
+					}
+				}
+				if (is_move) {
+					s.uids = RoomUids(con, s.room);
+				}
+				stream.WriteLine(tag + " OK " + (is_move ? "MOVE" : "COPY") + " completed");
+			}
+		} else if (cmd == "CREATE") {
+			std::string name = args;
+			if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+				name = name.substr(1, name.size() - 2);
+			}
+			std::string leaf = name;
+			auto slash = name.rfind('/');
+			if (slash != std::string::npos) {
+				leaf = name.substr(slash + 1);
+			}
+			// New personal folder for this user (Citadel exposes them under INBOX/).
+			int64_t rn = citadel::GetOrCreateUserRoom(con, s.user, leaf);
+			stream.WriteLine(rn >= 0 ? tag + " OK CREATE completed" : tag + " NO CREATE failed");
+		} else if (cmd == "DELETE") {
+			std::string name = args;
+			if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+				name = name.substr(1, name.size() - 2);
+			}
+			int64_t rn = ResolveMailbox(con, s.user, name);
+			std::string err;
+			if (rn < 0) {
+				stream.WriteLine(tag + " NO mailbox not found");
+			} else if (citadel::KillRoom(con, rn, err)) {
+				stream.WriteLine(tag + " OK DELETE completed");
+			} else {
+				stream.WriteLine(tag + " NO " + err);
+			}
+		} else if (cmd == "RENAME") {
+			auto unq = [](std::string v) {
+				if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+					return v.substr(1, v.size() - 2);
+				}
+				return v;
+			};
+			size_t sp = args.find(' ');
+			std::string from = unq(sp == std::string::npos ? args : args.substr(0, sp));
+			std::string to = unq(sp == std::string::npos ? "" : args.substr(sp + 1));
+			int64_t rn = ResolveMailbox(con, s.user, from);
+			std::string leaf = to;
+			auto slash = to.rfind('/');
+			if (slash != std::string::npos) {
+				leaf = to.substr(slash + 1);
+			}
+			if (rn < 0) {
+				stream.WriteLine(tag + " NO mailbox not found");
+			} else {
+				auto st = con.Prepare("UPDATE citadel_rooms SET display_name = $1 WHERE room_num = $2");
+				if (!st->HasError()) {
+					duckdb::vector<Value> pr = {Value(leaf), Value::BIGINT(rn)};
+					st->Execute(pr, false);
+				}
+				stream.WriteLine(tag + " OK RENAME completed");
+			}
+		} else if (cmd == "SUBSCRIBE" || cmd == "UNSUBSCRIBE") {
+			// All rooms are effectively subscribed (LSUB mirrors LIST); accept.
+			stream.WriteLine(tag + " OK " + cmd + " completed");
+		} else if (cmd == "APPEND") {
+			// APPEND <mailbox> [(<flags>)] [<date>] {<size>}
+			std::string a = args;
+			auto unq = [](std::string v) {
+				if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+					return v.substr(1, v.size() - 2);
+				}
+				return v;
+			};
+			size_t sp = a.find(' ');
+			std::string mbox = unq(sp == std::string::npos ? a : a.substr(0, sp));
+			std::string tail = sp == std::string::npos ? "" : a.substr(sp + 1);
+			// Parse optional (flags).
+			std::vector<std::string> flags;
+			size_t lp = tail.find('(');
+			if (lp != std::string::npos && (lp == 0 || tail[lp - 1] == ' ')) {
+				size_t rp = tail.find(')', lp);
+				if (rp != std::string::npos) {
+					std::string inner = tail.substr(lp + 1, rp - lp - 1);
+					for (auto &f : SearchTokens(inner)) {
+						flags.push_back(f);
+					}
+				}
+			}
+			// Literal size {n} at the end of the line.
+			size_t brace = tail.rfind('{');
+			int64_t n = 0;
+			if (brace != std::string::npos) {
+				n = std::atoll(tail.c_str() + brace + 1);
+			}
+			int64_t droom = ResolveMailbox(con, s.user, mbox);
+			if (droom < 0) {
+				stream.WriteLine(tag + " NO [TRYCREATE] mailbox not found");
+			} else {
+				stream.WriteLine("+ Ready for literal data");
+				// Read exactly n bytes worth of message, reconstructing CRLFs.
+				std::string raw;
+				std::string ln;
+				while ((int64_t)raw.size() < n && stream.ReadLine(ln, 65536)) {
+					raw += ln;
+					raw += "\r\n";
+				}
+				if ((int64_t)raw.size() > n) {
+					raw.resize(n);
+				}
+				auto pm = mime::Parse(raw);
+				citadel::Message m;
+				m.author = s.user;
+				m.author_usernum = citadel::GetOrAssignUserNum(con, s.user);
+				m.msgtime = (int64_t)std::time(nullptr);
+				m.format_type = 4; // RFC822/MIME
+				m.subject = pm.subject;
+				m.origin_room = mbox;
+				m.raw = raw;
+				std::string err;
+				int64_t msgnum = citadel::InsertMessage(con, m, {droom}, err);
+				if (msgnum < 0) {
+					stream.WriteLine(tag + " NO APPEND failed: " + err);
+				} else {
+					for (auto &f : flags) {
+						AddFlag(con, msgnum, s.user, f);
+					}
+					if (s.selected && s.room == droom) {
+						s.uids = RoomUids(con, s.room);
+					}
+					stream.WriteLine(tag + " OK [APPENDUID " + std::to_string(droom) + " " +
+					                 std::to_string(msgnum) + "] APPEND completed");
+				}
 			}
 		} else if (cmd == "EXPUNGE") {
 			if (!s.selected) {
