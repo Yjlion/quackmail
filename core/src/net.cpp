@@ -147,5 +147,28 @@ bool ClientStream::StartTls(SSL_CTX *ctx, std::string &err) {
 	return AcceptTls(ctx, err);
 }
 
+bool ClientStream::ConnectTls(SSL_CTX *ctx, std::string &err) {
+	if (!ctx) {
+		err = "no TLS context";
+		return false;
+	}
+	ssl_ = SSL_new(ctx);
+	if (!ssl_) {
+		err = "SSL_new failed";
+		return false;
+	}
+	SSL_set_fd(ssl_, fd_);
+	int r = SSL_connect(ssl_);
+	if (r != 1) {
+		char buf[256];
+		ERR_error_string_n(ERR_get_error(), buf, sizeof(buf));
+		err = std::string("TLS connect failed: ") + buf;
+		SSL_free(ssl_);
+		ssl_ = nullptr;
+		return false;
+	}
+	return true;
+}
+
 } // namespace net
 } // namespace quackmail

@@ -27,10 +27,14 @@ EXT_DIR = os.environ.get("QUACKCIT_EXT_DIR", os.path.join(REPO, "build", "releas
 DB = os.environ.get("QUACKCIT_DB", os.path.join(REPO, "quackcit.duckdb"))
 HOST = os.environ.get("QUACKCIT_HOST", "127.0.0.1")
 
-# (extension, "CALL ...") listeners to bring up.
+# (extension, "CALL ...") listeners to bring up. Ports are dev/non-privileged;
+# the module (not the port) defines the service. SMTP is split into an inbound
+# MX (2525), STARTTLS submission (2587), and implicit-TLS submission (2465).
 LISTENERS = [
     ("quackmail_citadel", f"CALL cit_start('{HOST}', 5040)"),
     ("quackmail_smtp_in", f"CALL qm_smtp_in_start('{HOST}', 2525, starttls=>true)"),
+    ("quackmail_smtp_out", f"CALL qm_smtp_submission_start('{HOST}', 2587, starttls=>true)"),
+    ("quackmail_smtp_out", f"CALL qm_smtp_smtps_start('{HOST}', 2465, implicit_tls=>true)"),
     ("quackmail_pop3", f"CALL qm_pop3_start('{HOST}', 1110)"),
     ("quackmail_imap", f"CALL qm_imap_start('{HOST}', 1143)"),
 ]
@@ -54,7 +58,11 @@ def main():
     for _name, call in LISTENERS:
         print("started:", con.execute(call).fetchone(), flush=True)
 
-    print(f"QuackCit up on {HOST} (citadel 5040, smtp 2525, pop3 1110, imap 1143); db={DB}", flush=True)
+    print(
+        f"QuackCit up on {HOST} (citadel 5040, smtp-in 2525, submission 2587, "
+        f"smtps 2465, pop3 1110, imap 1143); db={DB}",
+        flush=True,
+    )
 
     stop = {"v": False}
     signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("v", True))

@@ -34,6 +34,8 @@ public:
 	bool StartTls(SSL_CTX *ctx, std::string &err);
 	// Perform the TLS handshake immediately (implicit-TLS listeners).
 	bool AcceptTls(SSL_CTX *ctx, std::string &err);
+	// Upgrade an outbound connection to TLS (client side, for the relay drainer).
+	bool ConnectTls(SSL_CTX *ctx, std::string &err);
 
 	bool IsTls() const {
 		return ssl_ != nullptr;

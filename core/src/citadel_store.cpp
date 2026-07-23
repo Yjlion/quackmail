@@ -215,6 +215,28 @@ int64_t GetAxLevel(Connection &con, const std::string &username) {
 	return v.IsNull() ? 4 : v.GetValue<int64_t>();
 }
 
+bool IsLocalUser(Connection &con, const std::string &addr) {
+	auto at = addr.find('@');
+	std::string local = (at == std::string::npos) ? addr : addr.substr(0, at);
+	if (at != std::string::npos) {
+		// An explicit domain that is not ours means this is a relay target.
+		std::string domain = addr.substr(at + 1);
+		std::string fqdn = GetConfig(con, "c_fqdn", "");
+		auto lower = [](std::string s) {
+			for (char &c : s) {
+				if (c >= 'A' && c <= 'Z') {
+					c = char(c - 'A' + 'a');
+				}
+			}
+			return s;
+		};
+		if (!domain.empty() && !fqdn.empty() && lower(domain) != lower(fqdn)) {
+			return false;
+		}
+	}
+	return GetOrAssignUserNum(con, local) > 0;
+}
+
 std::vector<Floor> ListFloors(Connection &con) {
 	std::vector<Floor> out;
 	auto r = con.Query("SELECT f.floor_num, f.name, "

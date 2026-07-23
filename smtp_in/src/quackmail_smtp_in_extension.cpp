@@ -5,16 +5,13 @@
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
-#include "quackmail/auth.hpp"
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/delivery.hpp"
 #include "quackmail/mail_store.hpp"
-#include "quackmail/mime.hpp"
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
-#include "quackmail/sieve.hpp"
 #include "quackmail/util.hpp"
 
-#include <ctime>
 #include <string>
 #include <vector>
 
@@ -57,156 +54,14 @@ void SplitCommand(const std::string &line, std::string &verb, std::string &rest)
 	}
 }
 
-// Handle "AUTH ..." after TLS. Returns true if authentication succeeded.
-bool HandleAuth(Connection &con, net::ClientStream &stream, const std::string &rest, std::string &user_out) {
-	std::string mechanism, initial;
-	SplitCommand(rest, mechanism, initial);
-
-	if (mechanism == "PLAIN") {
-		std::string b64 = initial;
-		if (b64.empty()) {
-			stream.WriteLine("334 ");
-			if (!stream.ReadLine(b64, 4096)) {
-				return false;
-			}
-		}
-		std::string decoded;
-		if (!util::Base64Decode(b64, decoded)) {
-			stream.WriteLine("535 Authentication failed");
-			return false;
-		}
-		// authzid \0 authcid \0 passwd
-		size_t p1 = decoded.find('\0');
-		if (p1 == std::string::npos) {
-			stream.WriteLine("535 Authentication failed");
-			return false;
-		}
-		size_t p2 = decoded.find('\0', p1 + 1);
-		if (p2 == std::string::npos) {
-			stream.WriteLine("535 Authentication failed");
-			return false;
-		}
-		std::string username = decoded.substr(p1 + 1, p2 - p1 - 1);
-		std::string password = decoded.substr(p2 + 1);
-		if (auth::Verify(con, username, password)) {
-			user_out = username;
-			stream.WriteLine("235 Authentication successful");
-			return true;
-		}
-		stream.WriteLine("535 Authentication failed");
-		return false;
-	}
-
-	if (mechanism == "LOGIN") {
-		std::string b64, username, password;
-		stream.WriteLine("334 " + util::Base64Encode("Username:"));
-		if (!stream.ReadLine(b64, 4096) || !util::Base64Decode(b64, username)) {
-			stream.WriteLine("535 Authentication failed");
-			return false;
-		}
-		stream.WriteLine("334 " + util::Base64Encode("Password:"));
-		if (!stream.ReadLine(b64, 4096) || !util::Base64Decode(b64, password)) {
-			stream.WriteLine("535 Authentication failed");
-			return false;
-		}
-		if (auth::Verify(con, username, password)) {
-			user_out = username;
-			stream.WriteLine("235 Authentication successful");
-			return true;
-		}
-		stream.WriteLine("535 Authentication failed");
-		return false;
-	}
-
-	stream.WriteLine("504 Unrecognized authentication mechanism");
-	return false;
-}
-
-// Find a header value by case-insensitive name (empty if absent).
-std::string HeaderValue(const mime::ParsedMessage &parsed, const std::string &name) {
-	std::string want = util::Upper(name);
-	for (auto &h : parsed.headers) {
-		if (util::Upper(h.first) == want) {
-			return h.second;
-		}
-	}
-	return "";
-}
-
-// Parse, filter (Sieve), and deliver an accepted message into each recipient's
-// Citadel Mail room (or a Sieve fileinto room). Returns false on error.
-bool StoreMessage(Connection &con, const std::string &mail_from, const std::vector<std::string> &rcpts,
-                  const std::string &body, std::string &err) {
-	auto parsed = mime::Parse(body);
-
-	// Resolve the delivery room for each local recipient (deduplicated).
-	std::vector<int64_t> rooms;
-	auto add_room = [&](int64_t room) {
-		if (room < 0) {
-			return;
-		}
-		for (int64_t r : rooms) {
-			if (r == room) {
-				return;
-			}
-		}
-		rooms.push_back(room);
-	};
-
-	for (const std::string &rcpt : rcpts) {
-		std::string user = util::LocalPart(rcpt);
-		std::string folder = "Mail";
-		std::string script = sieve::LoadActiveScript(con, user);
-		if (!script.empty()) {
-			auto action = sieve::Evaluate(script, parsed);
-			if (action.type == sieve::Action::DISCARD) {
-				continue; // silently dropped by the user's filter
-			}
-			if (action.type == sieve::Action::FILEINTO && !action.folder.empty()) {
-				folder = action.folder;
-			}
-		}
-		add_room(citadel::GetOrCreateUserRoom(con, user, folder));
-	}
-
-	if (rooms.empty()) {
-		return true; // no local recipients / all filtered out; accept and drop
-	}
-
-	citadel::Message msg;
-	// Author: the From: display name/address, falling back to the envelope sender.
-	if (!parsed.from.empty()) {
-		auto addrs = mime::ParseAddressList(parsed.from);
-		if (!addrs.empty()) {
-			msg.author = !addrs[0].name.empty() ? addrs[0].name : addrs[0].addr;
-		}
-	}
-	if (msg.author.empty()) {
-		msg.author = mail_from;
-	}
-	std::string joined;
-	for (size_t i = 0; i < rcpts.size(); i++) {
-		joined += (i ? ", " : "") + rcpts[i];
-	}
-	msg.recipient = joined;
-	msg.subject = mime::DecodeEncodedWords(parsed.subject);
-	msg.euid = parsed.message_id;
-	msg.references = HeaderValue(parsed, "References");
-	msg.format_type = 4; // RFC822/MIME
-	msg.raw = body;
-	int64_t epoch = 0;
-	msg.msgtime = mime::ParseDate(HeaderValue(parsed, "Date"), epoch) ? epoch : (int64_t)std::time(nullptr);
-
-	return citadel::InsertMessage(con, msg, rooms, err) >= 0;
-}
-
+// Inbound MX: accept mail only for local recipients and deliver it into their
+// Citadel Mail rooms. This is the public-facing MTA, so it offers no AUTH and
+// never relays; authenticated submission for outbound mail lives in smtp_out.
 void HandleSmtp(DatabaseInstance &db, net::ClientStream &stream) {
 	Connection con(db);
 	store::EnsureSchema(con);
 
 	bool tls_active = stream.IsTls();
-	bool authed = false;
-	std::string auth_user;
 	std::string mail_from;
 	std::vector<std::string> rcpts;
 	bool have_mail = false;
@@ -223,9 +78,6 @@ void HandleSmtp(DatabaseInstance &db, net::ClientStream &stream) {
 			if (!tls_active && g_smtp_in.StartTlsEnabled()) {
 				stream.WriteLine("250-STARTTLS");
 			}
-			if (tls_active) {
-				stream.WriteLine("250-AUTH PLAIN LOGIN");
-			}
 			stream.WriteLine("250 SIZE " + std::to_string(kMaxMessageBytes));
 		} else if (verb == "HELO") {
 			stream.WriteLine("250 quackmail");
@@ -241,19 +93,13 @@ void HandleSmtp(DatabaseInstance &db, net::ClientStream &stream) {
 					return; // handshake failed; drop connection
 				}
 				tls_active = true;
-				authed = false;
 				have_mail = false;
 				mail_from.clear();
 				rcpts.clear();
 			}
 		} else if (verb == "AUTH") {
-			if (!tls_active) {
-				stream.WriteLine("538 Encryption required for requested authentication mechanism");
-			} else if (authed) {
-				stream.WriteLine("503 Already authenticated");
-			} else {
-				authed = HandleAuth(con, stream, rest, auth_user);
-			}
+			// The MX does not authenticate senders (use the submission ports).
+			stream.WriteLine("503 5.7.0 AUTH not available; use the submission service");
 		} else if (verb == "MAIL") {
 			mail_from = ExtractPath(rest);
 			rcpts.clear();
@@ -263,8 +109,20 @@ void HandleSmtp(DatabaseInstance &db, net::ClientStream &stream) {
 			if (!have_mail) {
 				stream.WriteLine("503 Need MAIL before RCPT");
 			} else {
-				rcpts.push_back(ExtractPath(rest));
-				stream.WriteLine("250 OK");
+				std::string rcpt = ExtractPath(rest);
+				if (citadel::IsLocalUser(con, rcpt)) {
+					rcpts.push_back(rcpt);
+					stream.WriteLine("250 OK");
+				} else {
+					// Distinguish an unknown local user from a relay attempt so the
+					// client gets an accurate reason.
+					auto at = rcpt.find('@');
+					std::string fqdn = citadel::GetConfig(con, "c_fqdn", "");
+					bool foreign = at != std::string::npos && !fqdn.empty() &&
+					               util::Upper(rcpt.substr(at + 1)) != util::Upper(fqdn);
+					stream.WriteLine(foreign ? "550 5.7.1 Relaying denied"
+					                         : "550 5.1.1 No such user here");
+				}
 			}
 		} else if (verb == "DATA") {
 			if (!have_mail || rcpts.empty()) {
@@ -278,7 +136,7 @@ void HandleSmtp(DatabaseInstance &db, net::ClientStream &stream) {
 				return;
 			}
 			std::string err;
-			if (!StoreMessage(con, mail_from, rcpts, body, err)) {
+			if (!deliver::LocalDeliver(con, mail_from, rcpts, body, err)) {
 				stream.WriteLine("451 Local storage error");
 			} else {
 				stream.WriteLine("250 OK: message accepted");

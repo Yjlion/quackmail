@@ -37,6 +37,26 @@ private:
 	SSL_CTX *ctx_ = nullptr;
 };
 
+// A client-side SSL_CTX for outbound STARTTLS / implicit TLS (the relay drainer).
+// Opportunistic: the peer certificate is not verified, since mail relays commonly
+// present self-signed or hostname-mismatched certs and encryption-without-
+// authentication is the norm for MX-to-MX transport.
+class ClientContext {
+public:
+	ClientContext() = default;
+	~ClientContext();
+	ClientContext(const ClientContext &) = delete;
+	ClientContext &operator=(const ClientContext &) = delete;
+
+	bool Init(std::string &err);
+	SSL_CTX *Get() const {
+		return ctx_;
+	}
+
+private:
+	SSL_CTX *ctx_ = nullptr;
+};
+
 // One-time process-wide OpenSSL initialization (thread-safe, idempotent).
 void EnsureOpenSSLInit();
 
