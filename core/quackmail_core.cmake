@@ -37,11 +37,16 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/auth.cpp
         ${QUACKMAIL_CORE_DIR}/src/sieve.cpp
         ${QUACKMAIL_CORE_DIR}/src/util.cpp
+        ${QUACKMAIL_CORE_DIR}/src/delivery.cpp
+        ${QUACKMAIL_CORE_DIR}/src/sasl.cpp
+        ${QUACKMAIL_CORE_DIR}/src/dns.cpp
+        ${QUACKMAIL_CORE_DIR}/src/smtp_client.cpp
     )
     # Linked into loadable .so extensions, so it must be position independent.
     set_target_properties(quackmail_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_include_directories(quackmail_core PUBLIC ${QUACKMAIL_CORE_INCLUDE})
-    target_link_libraries(quackmail_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+    # `resolv` provides res_query/ns_* for MX lookups in the outbound relay.
+    target_link_libraries(quackmail_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads resolv)
 
     # The per-extension static libs are added to DuckDB's export set and link
     # quackmail_core, so quackmail_core must live in the same export set.

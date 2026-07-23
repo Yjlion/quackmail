@@ -107,5 +107,25 @@ bool TlsContext::Init(const TlsConfig &config, std::string &err) {
 	return true;
 }
 
+ClientContext::~ClientContext() {
+	if (ctx_) {
+		SSL_CTX_free(ctx_);
+		ctx_ = nullptr;
+	}
+}
+
+bool ClientContext::Init(std::string &err) {
+	EnsureOpenSSLInit();
+	ctx_ = SSL_CTX_new(TLS_client_method());
+	if (!ctx_) {
+		err = "SSL_CTX_new(client) failed: " + SSLError();
+		return false;
+	}
+	SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
+	// Opportunistic transport encryption: do not verify the peer certificate.
+	SSL_CTX_set_verify(ctx_, SSL_VERIFY_NONE, nullptr);
+	return true;
+}
+
 } // namespace tls
 } // namespace quackmail

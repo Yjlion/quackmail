@@ -78,6 +78,10 @@ std::string GetConfig(duckdb::Connection &con, const std::string &name, const st
 // Returns 0 if the username is not a known local user.
 int64_t GetOrAssignUserNum(duckdb::Connection &con, const std::string &username);
 int64_t GetAxLevel(duckdb::Connection &con, const std::string &username);
+// True when `addr` is deliverable locally: its domain (if present) matches the
+// configured c_fqdn and its local-part is a known local user. Used by the SMTP
+// front-ends to accept local mail vs. reject unknown users / deny relay.
+bool IsLocalUser(duckdb::Connection &con, const std::string &addr);
 
 // ---- floors -------------------------------------------------------------
 std::vector<Floor> ListFloors(duckdb::Connection &con);
