@@ -36,7 +36,14 @@ LISTENERS = [
     ("quackmail_smtp_out", f"CALL qm_smtp_submission_start('{HOST}', 2587, starttls=>true)"),
     ("quackmail_smtp_out", f"CALL qm_smtp_smtps_start('{HOST}', 2465, implicit_tls=>true)"),
     ("quackmail_pop3", f"CALL qm_pop3_start('{HOST}', 1110)"),
-    ("quackmail_imap", f"CALL qm_imap_start('{HOST}', 1143)"),
+    ("quackmail_imap", f"CALL qm_imap_start('{HOST}', 1143, starttls=>true)"),
+]
+
+# Users seeded on first run. Mirrors the reference Citadel box (admin/admin at
+# aide level, leo/leo as a regular user) so protocol output can be diffed 1:1.
+SEED_USERS = [
+    ("admin", "admin", 6),
+    ("leo", "leo", 4),
 ]
 
 
@@ -50,10 +57,20 @@ def main():
     for name, _ in LISTENERS:
         con.execute(f"LOAD '{ext(name)}'")
 
-    # Seed a demo user the first time so the server is immediately usable.
+    # Seed the reference users the first time so the server is immediately usable
+    # and matches the oracle box for parity diffing.
     if con.execute("SELECT count(*) FROM quackmail_users").fetchone()[0] == 0:
-        con.execute("CALL qm_user_add('alice', 'secret')")
-        print("seeded demo user alice/secret", flush=True)
+        for name, pw, axlevel in SEED_USERS:
+            con.execute("CALL qm_user_add(?, ?)", [name, pw])
+            # Log the user in once so their default rooms get provisioned, and set
+            # the aide access level where needed.
+            con.execute(
+                "INSERT INTO citadel_users (username, usernum, axlevel) VALUES "
+                "(?, nextval('citadel_user_seq'), ?) "
+                "ON CONFLICT (username) DO UPDATE SET axlevel = excluded.axlevel",
+                [name, axlevel],
+            )
+        print("seeded users:", ", ".join(u[0] for u in SEED_USERS), flush=True)
 
     for _name, call in LISTENERS:
         print("started:", con.execute(call).fetchone(), flush=True)

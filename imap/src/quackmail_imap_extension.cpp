@@ -10,10 +10,12 @@
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mime.hpp"
+#include "quackmail/sasl.hpp"
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
 #include "quackmail/util.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <ctime>
 #include <string>
@@ -77,13 +79,24 @@ std::vector<int64_t> RoomUids(Connection &con, int64_t room) {
 	return out;
 }
 
-// Resolve an IMAP mailbox name to a Citadel room ("INBOX" -> the Mail room).
+// Resolve an IMAP mailbox name to a Citadel room. Citadel exposes personal
+// rooms under an "INBOX/" prefix (with the Mail room itself as "INBOX") and
+// public rooms under their floor path ("<Floor>/<Room>"). We resolve by the
+// final path segment, which uniquely identifies a room in the default set.
 int64_t ResolveMailbox(Connection &con, const std::string &user, const std::string &name) {
 	if (util::Upper(name) == "INBOX") {
 		return citadel::GetOrCreateMailRoom(con, user);
 	}
+	std::string leaf = name;
+	auto slash = name.rfind('/');
+	if (slash != std::string::npos) {
+		leaf = name.substr(slash + 1);
+	}
+	if (util::Upper(leaf) == "INBOX") {
+		return citadel::GetOrCreateMailRoom(con, user);
+	}
 	citadel::Room room;
-	if (citadel::ResolveRoom(con, user, name, room)) {
+	if (citadel::ResolveRoom(con, user, leaf, room)) {
 		return room.room_num;
 	}
 	return -1;
@@ -371,13 +384,116 @@ void FetchOne(Connection &con, Session &s, net::ClientStream &stream, size_t pos
 	}
 }
 
-void HandleImap(DatabaseInstance &db, net::ClientStream &stream) {
+// The CAPABILITY token list. STARTTLS is advertised only before the TLS upgrade;
+// mirrors a real Citadel server (which offers NAMESPACE, UIDPLUS, SASL, ID).
+std::string CapabilityLine(bool tls_active, bool starttls_avail) {
+	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS AUTH=PLAIN AUTH=LOGIN";
+	if (!tls_active && starttls_avail) {
+		caps += " STARTTLS";
+	}
+	return caps;
+}
+
+// IMAP mailbox wildcard match: '%' matches any run of non-delimiter chars, '*'
+// matches anything (including the '/' delimiter). Case-insensitive on INBOX only,
+// but we compare literally which is fine for our fixed name set.
+bool ImapWildMatch(const std::string &pat, const std::string &name) {
+	size_t pi = 0, ni = 0, star = std::string::npos, star_n = 0;
+	while (ni < name.size()) {
+		if (pi < pat.size() && (pat[pi] == name[ni] || pat[pi] == '%' || pat[pi] == '*')) {
+			if (pat[pi] == '%' && name[ni] == '/') {
+				// '%' does not cross the hierarchy delimiter.
+				if (star == std::string::npos) {
+					return false;
+				}
+				pi = star + 1;
+				ni = ++star_n;
+				continue;
+			}
+			if (pat[pi] == '*') {
+				star = pi++;
+				star_n = ni;
+				continue;
+			}
+			pi++;
+			ni++;
+		} else if (star != std::string::npos) {
+			pi = star + 1;
+			ni = ++star_n;
+		} else {
+			return false;
+		}
+	}
+	while (pi < pat.size() && (pat[pi] == '%' || pat[pi] == '*')) {
+		pi++;
+	}
+	return pi == pat.size();
+}
+
+// One LIST/LSUB entry: attributes + IMAP mailbox name.
+struct MailboxEntry {
+	std::string attrs;
+	std::string name;
+};
+
+// Build the mailbox tree the way Citadel presents it: the user's personal rooms
+// under "INBOX"/"INBOX/<room>", and visible public rooms under their floor path
+// "<Floor>" (a \NoSelect container) + "<Floor>/<Room>".
+std::vector<MailboxEntry> BuildMailboxes(Connection &con, const std::string &user) {
+	std::vector<MailboxEntry> out;
+	int64_t usernum = citadel::GetOrAssignUserNum(con, user);
+	bool is_aide = citadel::GetAxLevel(con, user) >= 6;
+
+	// Personal rooms (mailbox_owner = usernum), ordered by display name so that
+	// "Mail" (rendered INBOX) falls in its alphabetical slot, matching Citadel.
+	auto pstmt = con.Prepare("SELECT display_name FROM citadel_rooms WHERE mailbox_owner = $1 "
+	                         "ORDER BY display_name");
+	if (!pstmt->HasError()) {
+		duckdb::vector<Value> params = {Value::BIGINT(usernum)};
+		auto r = pstmt->Execute(params, false);
+		if (!r->HasError()) {
+			auto &mat = r->Cast<MaterializedQueryResult>();
+			for (idx_t i = 0; i < mat.RowCount(); i++) {
+				std::string dn = mat.GetValue(0, i).ToString();
+				out.push_back({"()", dn == "Mail" ? "INBOX" : "INBOX/" + dn});
+			}
+		}
+	}
+
+	// Visible public rooms grouped by floor. Private rooms are hidden from
+	// non-aides (Citadel does the same: Aide/Global Address Book stay hidden).
+	std::string psql = "SELECT f.name, r.display_name FROM citadel_rooms r "
+	                   "JOIN citadel_floors f ON f.floor_num = r.floor_num "
+	                   "WHERE r.mailbox_owner = 0";
+	if (!is_aide) {
+		psql += " AND (r.qr_flags & 4) = 0";
+	}
+	psql += " ORDER BY f.floor_num, r.display_name";
+	std::vector<std::string> floors_seen;
+	auto r = con.Query(psql);
+	if (!r->HasError()) {
+		for (idx_t i = 0; i < r->RowCount(); i++) {
+			std::string floor = r->GetValue(0, i).ToString();
+			std::string dn = r->GetValue(1, i).ToString();
+			if (std::find(floors_seen.begin(), floors_seen.end(), floor) == floors_seen.end()) {
+				floors_seen.push_back(floor);
+				out.push_back({"(\\NoSelect \\HasChildren)", floor});
+			}
+			out.push_back({"()", floor + "/" + dn});
+		}
+	}
+	return out;
+}
+
+void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerController &ctrl) {
 	Connection con(db);
 	store::EnsureSchema(con);
 
 	Session s;
+	bool tls_active = stream.IsTls();
 	std::string pending_user;
-	stream.WriteLine("* OK [CAPABILITY IMAP4rev1] quackcit IMAP ready");
+	stream.WriteLine("* OK [CAPABILITY " + CapabilityLine(tls_active, ctrl.StartTlsEnabled()) +
+	                 "] quackcit IMAP ready");
 
 	std::string line;
 	while (stream.ReadLine(line, 65536)) {
@@ -393,8 +509,55 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream) {
 			continue;
 		}
 		if (cmd == "CAPABILITY") {
-			stream.WriteLine("* CAPABILITY IMAP4rev1");
+			stream.WriteLine("* CAPABILITY " + CapabilityLine(tls_active, ctrl.StartTlsEnabled()));
 			stream.WriteLine(tag + " OK CAPABILITY completed");
+		} else if (cmd == "STARTTLS") {
+			if (tls_active) {
+				stream.WriteLine(tag + " NO Already using TLS");
+			} else if (!ctrl.StartTlsEnabled()) {
+				stream.WriteLine(tag + " NO STARTTLS not available");
+			} else {
+				stream.WriteLine(tag + " OK Begin TLS negotiation now");
+				std::string terr;
+				if (!stream.StartTls(ctrl.TlsCtx(), terr)) {
+					return;
+				}
+				tls_active = true;
+				// RFC 3501: discard any authentication state established before TLS.
+				s = Session();
+				pending_user.clear();
+			}
+		} else if (cmd == "AUTHENTICATE") {
+			if (s.authed) {
+				stream.WriteLine(tag + " NO Already authenticated");
+			} else {
+				std::string mech = util::Upper(args);
+				std::string initial;
+				size_t sp = mech.find(' ');
+				if (sp != std::string::npos) {
+					initial = args.substr(sp + 1);
+					mech = mech.substr(0, sp);
+				}
+				auto challenge = [&](const std::string &c, std::string &resp) -> bool {
+					if (!stream.WriteLine("+ " + c)) {
+						return false;
+					}
+					return stream.ReadLine(resp, 8192);
+				};
+				std::string auth_user;
+				auto r = sasl::ServerAuth(con, mech, initial, challenge, auth_user);
+				if (r == sasl::Result::Ok) {
+					s.authed = true;
+					s.user = auth_user;
+					citadel::EnsureUserRooms(con, auth_user);
+					stream.WriteLine(tag + " OK [CAPABILITY " +
+					                 CapabilityLine(tls_active, ctrl.StartTlsEnabled()) + "] AUTHENTICATE completed");
+				} else if (r == sasl::Result::Unsupported) {
+					stream.WriteLine(tag + " NO Unsupported authentication mechanism");
+				} else {
+					stream.WriteLine(tag + " NO Authentication failed");
+				}
+			}
 		} else if (cmd == "NOOP") {
 			stream.WriteLine(tag + " OK NOOP completed");
 		} else if (cmd == "LOGOUT") {
@@ -416,30 +579,83 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream) {
 			if (auth::Verify(con, u, pw)) {
 				s.authed = true;
 				s.user = u;
+				citadel::EnsureUserRooms(con, u);
 				stream.WriteLine(tag + " OK LOGIN completed");
 			} else {
 				stream.WriteLine(tag + " NO LOGIN failed");
 			}
 		} else if (!s.authed) {
 			stream.WriteLine(tag + " NO Please LOGIN first");
+		} else if (cmd == "NAMESPACE") {
+			// Personal namespace "INBOX/", shared namespace "<Floor>/"; delimiter "/".
+			stream.WriteLine("* NAMESPACE ((\"INBOX/\" \"/\")) NIL ((\"Main Floor/\" \"/\"))");
+			stream.WriteLine(tag + " OK NAMESPACE completed");
 		} else if (cmd == "LIST" || cmd == "LSUB") {
-			// List the user's personal rooms as mailboxes; INBOX is always present.
-			stream.WriteLine("* LIST (\\HasNoChildren) \"/\" \"INBOX\"");
-			int64_t usernum = citadel::GetOrAssignUserNum(con, s.user);
-			auto stmt = con.Prepare("SELECT display_name FROM citadel_rooms WHERE mailbox_owner = $1 "
-			                        "AND display_name <> 'Mail' ORDER BY display_name");
-			if (!stmt->HasError()) {
-				duckdb::vector<Value> params = {Value::BIGINT(usernum)};
-				auto r = stmt->Execute(params, false);
-				if (!r->HasError()) {
-					auto &mat = r->Cast<MaterializedQueryResult>();
-					for (idx_t i = 0; i < mat.RowCount(); i++) {
-						stream.WriteLine("* LIST (\\HasNoChildren) \"/\" " +
-						                 ImapQuote(mat.GetValue(0, i).ToString()));
-					}
+			// args = <reference> <pattern>; join them and match against the tree.
+			auto unq = [](std::string v) {
+				if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+					return v.substr(1, v.size() - 2);
+				}
+				return v;
+			};
+			std::string ref, pat;
+			size_t sp = args.find(' ');
+			if (sp == std::string::npos) {
+				pat = unq(args);
+			} else {
+				ref = unq(args.substr(0, sp));
+				pat = unq(args.substr(sp + 1));
+			}
+			std::string full = ref + pat;
+			for (auto &mb : BuildMailboxes(con, s.user)) {
+				if (full.empty() || full == "*" || ImapWildMatch(full, mb.name)) {
+					stream.WriteLine("* " + cmd + " " + mb.attrs + " \"/\" " + ImapQuote(mb.name));
 				}
 			}
 			stream.WriteLine(tag + " OK " + cmd + " completed");
+		} else if (cmd == "STATUS") {
+			// args = <mailbox> (<items>)
+			std::string name = args;
+			size_t paren = args.find('(');
+			std::string items;
+			if (paren != std::string::npos) {
+				name = args.substr(0, paren);
+				size_t rp = args.find(')', paren);
+				items = util::Upper(args.substr(paren + 1, rp == std::string::npos ? std::string::npos : rp - paren - 1));
+			}
+			while (!name.empty() && (name.back() == ' ')) {
+				name.pop_back();
+			}
+			if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+				name = name.substr(1, name.size() - 2);
+			}
+			int64_t room = ResolveMailbox(con, s.user, name);
+			if (room < 0) {
+				stream.WriteLine(tag + " NO STATUS mailbox not found");
+			} else {
+				auto uids = RoomUids(con, room);
+				int64_t unseen = 0;
+				for (int64_t u : uids) {
+					auto fl = LoadFlags(con, u, s.user);
+					if (std::find(fl.begin(), fl.end(), "\\Seen") == fl.end()) {
+						unseen++;
+					}
+				}
+				int64_t uidnext = uids.empty() ? 1 : uids.back() + 1;
+				std::string resp;
+				auto append = [&](const std::string &k, int64_t v) {
+					if (items.find(k) != std::string::npos) {
+						resp += (resp.empty() ? "" : " ") + k + " " + std::to_string(v);
+					}
+				};
+				append("MESSAGES", (int64_t)uids.size());
+				append("RECENT", 0);
+				append("UIDNEXT", uidnext);
+				append("UIDVALIDITY", room);
+				append("UNSEEN", unseen);
+				stream.WriteLine("* STATUS " + ImapQuote(name) + " (" + resp + ")");
+				stream.WriteLine(tag + " OK STATUS completed");
+			}
 		} else if (cmd == "SELECT" || cmd == "EXAMINE") {
 			std::string name = args;
 			if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
@@ -457,7 +673,9 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream) {
 				stream.WriteLine("* " + std::to_string(s.uids.size()) + " EXISTS");
 				stream.WriteLine("* 0 RECENT");
 				stream.WriteLine("* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)");
-				stream.WriteLine("* OK [UIDVALIDITY 1] UIDs valid");
+				stream.WriteLine("* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)] Limited");
+				// UIDVALIDITY is stable per room (room_num never changes once assigned).
+				stream.WriteLine("* OK [UIDVALIDITY " + std::to_string(room) + "] UIDs valid");
 				stream.WriteLine("* OK [UIDNEXT " + std::to_string(uidnext) + "] Predicted next UID");
 				stream.WriteLine(tag + " OK [" + std::string(s.read_only ? "READ-ONLY" : "READ-WRITE") +
 				                 "] " + cmd + " completed");
@@ -564,10 +782,16 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream) {
 	}
 }
 
+// Thin ConnHandler that carries the global controller into the real handler
+// (needed for STARTTLS: ctrl.StartTlsEnabled()/TlsCtx()).
+void HandleImapConn(DatabaseInstance &db, net::ClientStream &stream) {
+	HandleImap(db, stream, g_imap);
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	Connection con(loader.GetDatabaseInstance());
 	store::EnsureSchema(con);
-	RegisterServerControls(loader, "qm_imap", 1143, g_imap, HandleImap);
+	RegisterServerControls(loader, "qm_imap", 1143, g_imap, HandleImapConn);
 }
 
 } // namespace

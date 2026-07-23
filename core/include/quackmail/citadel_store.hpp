@@ -9,17 +9,37 @@
 namespace quackmail {
 namespace citadel {
 
-// Room attribute flags (a small, useful subset of Citadel's QR_* bitmask).
+// Room attribute flags. Values match Citadel's canonical QR_* bitmask so the
+// numbers we put on the wire (LKRA/GOTO/GETR) are byte-compatible with a real
+// Citadel server and its clients.
 enum QRFlags {
-	QR_PERMANENT = 0x0001, // do not auto-purge when empty
-	QR_PRIVATE = 0x0004,   // invitation-only / hidden
-	QR_PASSWORDED = 0x0008,
-	QR_GUESSNAME = 0x0010,
-	QR_MAILBOX = 0x0400, // personal mailbox room (owned by one user)
+	QR_PERMANENT = 2,      // do not auto-purge when empty
+	QR_PRIVATE = 4,        // invitation-only / hidden
+	QR_PASSWORDED = 8,
+	QR_GUESSNAME = 16,
+	QR_DIRECTORY = 32,
+	QR_UPLOAD = 64,
+	QR_DOWNLOAD = 128,
+	QR_VISDIR = 256,
+	QR_NETWORK = 2048,
+	QR_PREFONLY = 4096,
+	QR_READONLY = 8192,
+	QR_MAILBOX = 16384, // personal mailbox room (owned by one user)
 };
 
-// Reserved room numbers.
+// Reserved room numbers (fixed, seeded ids) — match Citadel's low room numbers.
 constexpr int64_t kLobbyRoom = 0;
+constexpr int64_t kAideRoom = 1;
+
+// Citadel default_view codes (VIEW_*): what kind of content a room holds.
+enum RoomView {
+	VIEW_BBS = 0,       // ordinary message board
+	VIEW_MAILBOX = 1,   // mail folder
+	VIEW_ADDRESSBOOK = 2,
+	VIEW_CALENDAR = 3,
+	VIEW_TASKS = 4,
+	VIEW_NOTES = 5,
+};
 
 struct Room {
 	int64_t room_num = 0;
@@ -103,6 +123,10 @@ int64_t GetOrCreateUserRoom(duckdb::Connection &con, const std::string &username
                             const std::string &display_name);
 // Convenience: the user's personal "Mail" room.
 int64_t GetOrCreateMailRoom(duckdb::Connection &con, const std::string &username);
+// Provision the full set of default personal rooms Citadel gives every user
+// (Mail, Sent Items, Drafts, Trash, Calendar, Contacts, Notes, Tasks) with the
+// correct default_view. Idempotent; call on login / user creation.
+void EnsureUserRooms(duckdb::Connection &con, const std::string &username);
 
 // ---- per-user room read state ------------------------------------------
 RoomStats GetRoomStats(duckdb::Connection &con, const std::string &username, int64_t room_num);

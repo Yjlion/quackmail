@@ -81,6 +81,26 @@ int64_t NowEpoch() {
 	return (int64_t)std::time(nullptr);
 }
 
+// Process start time, reported by TIME as the server-uptime reference.
+const int64_t g_server_start = (int64_t)std::time(nullptr);
+
+// TIME reply: "200 <unixtime>|<gmtoffset_secs>|<isdst>|<serverstart>".
+std::string TimeLine() {
+	std::time_t now = std::time(nullptr);
+	std::tm local {};
+#if defined(_WIN32)
+	localtime_s(&local, &now);
+#else
+	localtime_r(&now, &local);
+#endif
+	long gmtoff = 0;
+#if !defined(_WIN32)
+	gmtoff = local.tm_gmtoff;
+#endif
+	return "200 " + std::to_string((int64_t)now) + "|" + std::to_string(gmtoff) + "|" +
+	       std::to_string(local.tm_isdst > 0 ? 1 : 0) + "|" + std::to_string(g_server_start);
+}
+
 void WriteListing(net::ClientStream &stream, const std::vector<std::string> &lines) {
 	stream.WriteLine("100 listing follows");
 	for (auto &l : lines) {
@@ -110,7 +130,9 @@ void CompleteLogin(Connection &con, Session &s, std::string username) {
 	s.pending_user.clear();
 	s.usernum = citadel::GetOrAssignUserNum(con, username);
 	s.axlevel = citadel::GetAxLevel(con, username);
-	citadel::GetOrCreateMailRoom(con, username);
+	// Provision the full default room set (Mail, Sent Items, Calendar, ...) the
+	// way a real Citadel server does on first login.
+	citadel::EnsureUserRooms(con, username);
 }
 
 void HandleGoto(Connection &con, Session &s, net::ClientStream &stream, const std::vector<std::string> &p) {
@@ -396,10 +418,10 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 
 	Session s;
 	std::string node = citadel::GetConfig(con, "c_nodename", "quackcit");
-	std::string human = citadel::GetConfig(con, "c_humannode", "QuackCit BBS");
-	std::string fqdn = citadel::GetConfig(con, "c_fqdn", "quackmail.test");
-	std::string ver = citadel::GetConfig(con, "c_version", "QuackCit 0.1.0");
-	stream.WriteLine("200 " + node + "|" + human + "|" + fqdn + "|" + ver);
+	// Greeting must match a real Citadel server's format ("200 <node> Citadel
+	// server ready.") — the official text client parses this line and rejects a
+	// pipe-delimited variant. Node/version details are exposed via INFO instead.
+	stream.WriteLine("200 " + node + " Citadel server ready.");
 
 	std::string line;
 	while (stream.ReadLine(line, 8192)) {
@@ -536,6 +558,8 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				citadel::SetLastRead(con, s.username, s.room.room_num, n);
 				stream.WriteLine("200 " + std::to_string(n));
 			}
+		} else if (verb == "TIME") {
+			stream.WriteLine(TimeLine());
 		} else if (verb == "INFO") {
 			WriteListing(stream, InfoLines(con));
 		} else if (verb == "MSGP") {
