@@ -136,12 +136,12 @@ stopped
 
 # XMPP and XMPPS.
 query I
-SELECT note FROM qm_xmpp_start('127.0.0.1', 15222, starttls => true);
+SELECT note FROM qm_xmpp_start('127.0.0.1', 15522, starttls => true);
 ----
 started
 
 query I
-SELECT note FROM qm_xmpps_start('127.0.0.1', 15223, implicit_tls => true);
+SELECT note FROM qm_xmpps_start('127.0.0.1', 15523, implicit_tls => true);
 ----
 started
 

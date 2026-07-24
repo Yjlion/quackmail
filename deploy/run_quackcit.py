@@ -42,8 +42,8 @@ LISTENERS = [
     ("quackmail_telnet", f"CALL qm_telnets_start('{HOST}', 2992, implicit_tls=>true)"),
     ("quackmail_nntp", f"CALL qm_nntp_start('{HOST}', 1119, starttls=>true)"),
     ("quackmail_nntp", f"CALL qm_nntps_start('{HOST}', 1563, implicit_tls=>true)"),
-    ("quackmail_xmpp", f"CALL qm_xmpp_start('{HOST}', 5222, starttls=>true)"),
-    ("quackmail_xmpp", f"CALL qm_xmpps_start('{HOST}', 5223, implicit_tls=>true)"),
+    ("quackmail_xmpp", f"CALL qm_xmpp_start('{HOST}', 15222, starttls=>true)"),
+    ("quackmail_xmpp", f"CALL qm_xmpps_start('{HOST}', 15223, implicit_tls=>true)"),
 ]
 
 # Users seeded on first run. Mirrors the reference Citadel box (admin/admin at
@@ -85,7 +85,7 @@ def main():
     print(
         f"QuackCit up on {HOST} (citadel 5040, smtp-in 2525, submission 2587, "
         f"smtps 2465, pop3 1110, pop3s 1995, imap 1143, telnet 2300, "
-        f"telnets 2992, nntp 1119, nntps 1563, xmpp 5222, xmpps 5223); "
+        f"telnets 2992, nntp 1119, nntps 1563, xmpp 15222, xmpps 15223); "
         f"db={DB}",
         flush=True,
     )

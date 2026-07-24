@@ -21,9 +21,10 @@ namespace {
 
 using namespace quackmail;
 
-// xmpp (5222, STARTTLS) and xmpps (5223, implicit TLS). A real Citadel server
-// listens only on 5222; the implicit-TLS port is free with the shared listener
-// machinery, so it is offered too.
+// xmpp (5222; dev 15222, STARTTLS) and xmpps (5223; dev 15223, implicit TLS).
+// A real Citadel server listens only on 5222, and on a box shared with one those
+// ports are taken, so — like every other module here — the defaults are the
+// non-privileged dev ports and the real ones are passed explicitly.
 ServerController g_xmpp;
 ServerController g_xmpps;
 
@@ -389,8 +390,8 @@ void HandleXmppsConn(DatabaseInstance &db, net::ClientStream &stream) {
 void LoadInternal(ExtensionLoader &loader) {
 	Connection con(loader.GetDatabaseInstance());
 	store::EnsureSchema(con);
-	RegisterServerControls(loader, "qm_xmpp", 5222, g_xmpp, HandleXmppConn);
-	RegisterServerControls(loader, "qm_xmpps", 5223, g_xmpps, HandleXmppsConn);
+	RegisterServerControls(loader, "qm_xmpp", 15222, g_xmpp, HandleXmppConn);
+	RegisterServerControls(loader, "qm_xmpps", 15223, g_xmpps, HandleXmppsConn);
 }
 
 } // namespace
