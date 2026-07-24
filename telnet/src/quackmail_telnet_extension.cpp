@@ -415,13 +415,8 @@ bool Login(Connection &con, Bbs &s, telnet::Session &t) {
 
 // ------------------------------------------------------------ command loop
 
-// A "." command: read the rest of the line and act on the first word.
-void DotCommand(Connection &con, Bbs &s, telnet::Session &t) {
-	t.Write(".");
-	std::string rest;
-	if (!t.ReadLine(rest)) {
-		return;
-	}
+// A "." command, e.g. ".Goto Lobby": `rest` is whatever followed the dot.
+void DotCommand(Connection &con, Bbs &s, telnet::Session &t, const std::string &rest) {
 	std::string up = util::Upper(rest);
 	std::string arg;
 	size_t sp = rest.find(' ');
@@ -484,16 +479,39 @@ void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerControl
 		t.Write("\n" + (s.have_room ? s.room.display_name : std::string("(no room)")) +
 		        std::string(1, s.have_room ? PromptChar(s.room) : '>') + " ");
 
-		int ch = t.GetChar();
-		if (ch < 0) {
-			break;
-		}
-		if (ch == '\r' || ch == '\n') {
-			continue;
-		}
-		char cmd = (char)std::toupper((unsigned char)ch);
-		if (t.Echoing() && cmd != '.') {
-			t.Write(std::string(1, cmd) + "\n");
+		// A negotiated telnet client sends one keystroke at a time; a raw socket
+		// (nc, expect harnesses, our tests) sends whole lines. Read accordingly,
+		// otherwise the trailing CRLF of a line-mode command would be swallowed
+		// by whatever prompt the command opens.
+		char cmd = 0;
+		std::string rest;
+		if (t.Echoing()) {
+			int ch = t.GetChar();
+			if (ch < 0) {
+				break;
+			}
+			if (ch == '\r' || ch == '\n') {
+				continue;
+			}
+			cmd = (char)std::toupper((unsigned char)ch);
+			if (cmd == '.') {
+				t.Write("."); // the rest of a dot command is typed as a line
+				if (!t.ReadLine(rest)) {
+					break;
+				}
+			} else {
+				t.Write(std::string(1, cmd) + "\n");
+			}
+		} else {
+			std::string cmdline;
+			if (!t.ReadLine(cmdline)) {
+				break;
+			}
+			if (cmdline.empty()) {
+				continue;
+			}
+			cmd = (char)std::toupper((unsigned char)cmdline[0]);
+			rest = cmdline.substr(1);
 		}
 		citadel::TouchSession(con, s.session_id, s.username,
 		                      s.have_room ? s.room.display_name : std::string(), std::string(1, cmd),
@@ -547,7 +565,7 @@ void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerControl
 			t.Write(s.expert ? "\nExpert mode ON\n" : "\nExpert mode OFF\n");
 			break;
 		case '.':
-			DotCommand(con, s, t);
+			DotCommand(con, s, t, rest);
 			break;
 		case 'T':
 			t.Write("\nGoodbye.\n");
