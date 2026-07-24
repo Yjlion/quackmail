@@ -641,6 +641,13 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				citadel::SetLastRead(con, s.username, s.room.room_num, n);
 				stream.WriteLine("200 " + std::to_string(n));
 			}
+		} else if (verb == "MESG") {
+			// The client requests named system banners (e.g. "MESG hello" for the
+			// login banner) during handshake; a real server returns the text.
+			// Returning a banner here avoids a spurious "unrecognized command".
+			std::string human = citadel::GetConfig(con, "c_humannode", "QuackCit BBS");
+			WriteListing(stream, {"Welcome to " + human + "!", "",
+			                      "You are connected to a QuackCit server speaking the Citadel protocol."});
 		} else if (verb == "TIME") {
 			stream.WriteLine(TimeLine());
 		} else if (verb == "RWHO") {

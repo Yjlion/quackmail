@@ -60,12 +60,16 @@ Results (verified on the box):
 - Tests: `test/integration/test_imap.py` (new) + all existing integration tests +
   `make test` sqllogictest pass.
 
-Known limitation: a **direct run of the official `citadel` text client against
-QuackCit could not be done on `debian.lan`** — that client hardcodes the Citadel
-TCP port **504** (privileged; owned by the running oracle, and `leo` lacks root to
-rebind it). Parity is instead established at the wire-protocol level (QuackCit's
-responses match the oracle) plus a full real-client session against the real
-server showing the identical room set QuackCit now seeds.
+Direct client test: the **official `citadel` text client drives a full clean
+session against QuackCit** — it reports "connected to QuackCit BBS", shows the
+login banner (`MESG hello`), logs in, and `<K>nown rooms` lists the identical room
+set, with **no spurious errors**. The client prefers the local server's IPv6/UDS
+socket on port 504, so it's pointed at QuackCit with a tiny user-space
+`LD_PRELOAD` shim (`test`/`~/parity/port_hook.c`) that rewrites its `socket()`/
+`connect()` to `127.0.0.1:5040` — no root, no iptables, oracle untouched:
+`LD_PRELOAD=port_hook.so citadel -h localhost`. (The client hardcodes port 504,
+which the oracle owns, so the shim is the clean way to reach QuackCit on the same
+box.)
 
 ## Phase 1 — SMTP rework (done, see PR #6)
 
@@ -206,9 +210,9 @@ Planned:
 
 ## Known notes
 
-- The official Citadel text client now completes a session against QuackCit
-  (MSGP + GOTO fixes on `main`). One cosmetic nit: it prints a single
-  `Unrecognized or unsupported command.` for a handshake verb right after the
-  banner — non-blocking, login proceeds fine.
+- The official Citadel text client completes a **clean** session against QuackCit
+  (greeting + `MSGP`/`GOTO` + `MESG hello` handling). The earlier cosmetic
+  "Unrecognized or unsupported command." nit was the client's `MESG hello`
+  handshake verb — now handled (returns the login banner), so no error appears.
 - `qm_version()` / the greeting still report `0.1.0` even in the v0.2.1 release —
   the internal version constant was never bumped.
