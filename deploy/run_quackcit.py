@@ -35,7 +35,8 @@ LISTENERS = [
     ("quackmail_smtp_in", f"CALL qm_smtp_in_start('{HOST}', 2525, starttls=>true)"),
     ("quackmail_smtp_out", f"CALL qm_smtp_submission_start('{HOST}', 2587, starttls=>true)"),
     ("quackmail_smtp_out", f"CALL qm_smtp_smtps_start('{HOST}', 2465, implicit_tls=>true)"),
-    ("quackmail_pop3", f"CALL qm_pop3_start('{HOST}', 1110)"),
+    ("quackmail_pop3", f"CALL qm_pop3_start('{HOST}', 1110, starttls=>true)"),
+    ("quackmail_pop3", f"CALL qm_pop3s_start('{HOST}', 1995, implicit_tls=>true)"),
     ("quackmail_imap", f"CALL qm_imap_start('{HOST}', 1143, starttls=>true)"),
 ]
 
@@ -77,7 +78,7 @@ def main():
 
     print(
         f"QuackCit up on {HOST} (citadel 5040, smtp-in 2525, submission 2587, "
-        f"smtps 2465, pop3 1110, imap 1143); db={DB}",
+        f"smtps 2465, pop3 1110, pop3s 1995, imap 1143); db={DB}",
         flush=True,
     )
 

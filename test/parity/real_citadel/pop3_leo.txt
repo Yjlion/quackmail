@@ -1,0 +1,28 @@
++OK Citadel POP3 server ready.
++OK Capability list follows
+TOP
+USER
+UIDL
+IMPLEMENTATION Citadel Server 17846585
+.
+-ERR Not logged in.
+-ERR No such user.
++OK Password required for leo
+-ERR That is NOT the password.
++OK leo is logged in (0 messages)
++OK 0 0
++OK Here's your mail:
+.
+-ERR no such message, only 0 are here
+-ERR no such message, only 0 are here
++OK Here's your mail:
+.
++OK 0
+-ERR No such message.
+-ERR No such message.
+-ERR No such message.
++OK Reset completed.
++OK No operation.
+-ERR I'm afraid I can't do that.
+-ERR I'm afraid I can't do that.
++OK Goodbye...
