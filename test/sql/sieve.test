@@ -1,0 +1,182 @@
+# name: test/sql/sieve.test
+# description: the RFC 5228 Sieve parser accepts real scripts and rejects broken ones
+# group: [quackmail]
+#
+# This checks the parser, which is what ManageSieve's PUTSCRIPT/CHECKSCRIPT
+# gate on. Evaluation semantics (which folder a message actually lands in) are
+# covered end to end by test/integration/test_managesieve.py.
+
+require quackmail
+
+# ---- scripts that must parse ----------------------------------------------
+
+# The minimal script.
+query I
+SELECT qm_sieve_valid('keep;');
+----
+true
+
+# An empty script is legal and simply does nothing.
+query I
+SELECT qm_sieve_valid('');
+----
+true
+
+# require + a guarded fileinto: the common case.
+query I
+SELECT qm_sieve_valid('
+require ["fileinto"];
+if header :contains "Subject" "[list]" {
+    fileinto "Lists";
+}
+');
+----
+true
+
+# if / elsif / else chains.
+query I
+SELECT qm_sieve_valid('
+require ["fileinto"];
+if address :domain :is "From" "spam.example" {
+    discard;
+} elsif header :matches "Subject" "*urgent*" {
+    fileinto "Urgent";
+} else {
+    keep;
+}
+');
+----
+true
+
+# anyof / allof / not, and the envelope test.
+query I
+SELECT qm_sieve_valid('
+require ["envelope", "fileinto"];
+if allof (
+     anyof (header :contains "To" "sales", header :contains "Cc" "sales"),
+     not envelope :domain :is "From" "internal.example"
+   ) {
+    fileinto "Sales";
+    stop;
+}
+');
+----
+true
+
+# size with the K/M/G suffixes.
+query I
+SELECT qm_sieve_valid('if size :over 5M { discard; }');
+----
+true
+
+query I
+SELECT qm_sieve_valid('if size :under 100 { keep; }');
+----
+true
+
+# exists, redirect, reject, and fileinto :create / :copy.
+query I
+SELECT qm_sieve_valid('
+require ["fileinto", "reject", "copy"];
+if exists ["X-Spam-Flag"] { reject "no thanks"; }
+if header :is "X-Backup" "yes" { redirect :copy "archive@example.com"; }
+fileinto :create "Archive/2026";
+');
+----
+true
+
+# Comments in both forms, and a multi-line text: block.
+query I
+SELECT qm_sieve_valid('
+# a hash comment
+/* a block
+   comment */
+require ["reject"];
+if header :contains "Subject" "spam" {
+    reject text:
+This message was refused.
+Please do not send it again.
+.
+;
+}
+');
+----
+true
+
+# String lists in both argument positions.
+query I
+SELECT qm_sieve_valid('
+if header :contains ["To", "Cc", "Bcc"] ["alice@", "bob@"] { keep; }
+');
+----
+true
+
+# A comparator, explicitly.
+query I
+SELECT qm_sieve_valid('
+if header :comparator "i;octet" :is "Subject" "Exact" { discard; }
+');
+----
+true
+
+# ---- scripts that must be rejected ----------------------------------------
+
+# Missing semicolon.
+query I
+SELECT qm_sieve_valid('keep');
+----
+false
+
+# Unclosed block.
+query I
+SELECT qm_sieve_valid('if header :is "Subject" "x" { keep;');
+----
+false
+
+# Unknown command.
+query I
+SELECT qm_sieve_valid('frobnicate "everything";');
+----
+false
+
+# Unknown test.
+query I
+SELECT qm_sieve_valid('if telepathy :is "Subject" "x" { keep; }');
+----
+false
+
+# Unterminated string.
+query I
+SELECT qm_sieve_valid('if header :is "Subject" "x { keep; }');
+----
+false
+
+# size without :over or :under has no meaning.
+query I
+SELECT qm_sieve_valid('if size 100 { keep; }');
+----
+false
+
+# else with no preceding if.
+query I
+SELECT qm_sieve_valid('else { keep; }');
+----
+false
+
+# ---- the table-function form reports why -----------------------------------
+
+query I
+SELECT ok FROM qm_sieve_check('keep;');
+----
+true
+
+# The error names the line, which is what ManageSieve hands back to the client.
+query I
+SELECT note LIKE '%line%' FROM qm_sieve_check('keep');
+----
+true
+
+query I
+SELECT ok FROM qm_sieve_check('frobnicate "x";');
+----
+false

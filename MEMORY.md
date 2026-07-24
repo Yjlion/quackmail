@@ -20,7 +20,11 @@ prefixes still say `quackmail`; the product is QuackCit.
 | — | HANDOFF doc (superseded by these files) | PR #7 |
 | 2 | IMAP expansion: STARTTLS + AUTHENTICATE, core RFC 3501, folders/public rooms, NAMESPACE/UIDPLUS/BODYSTRUCTURE | PR #8 |
 | 3 | Citadel native: presence (`RWHO`), instant messages (`SEXP`/`GEXP`), `CHEK`, `DELE`/`MOVE`, default room/floor parity | PR #8 |
-| 4 | POP3 Citadel parity + `qm_pop3s` + agent docs | in progress |
+| 4 | POP3 Citadel parity + `qm_pop3s` + agent docs | PR #10 |
+| 5 | Telnet/telnets BBS shell (`quackmail_telnet`) | PR #11 |
+| 6 | NNTP/NNTPS reader + poster (`quackmail_nntp`) | PR #12 |
+| 7 | XMPP c2s bridged to Citadel express messages (`quackmail_xmpp`) | PR #13 |
+| 8 | SMTP authentication (SPF/DKIM/DMARC/DNSBL), site policy, outbound signing + rate limiting, LMTP, real Sieve/ManageSieve, `deploy/` CLI tooling | in progress |
 
 Phases 2 and 3 were validated byte-for-byte against the real Citadel server, and
 the **official `citadel` text client drives a full clean session** against
@@ -45,6 +49,38 @@ QuackCit (login banner, `<K>nown rooms`, no spurious errors).
   are non-privileged. Nothing is exposed to the internet; TLS is dev self-signed.
 - **`MESG hello`** is the official client's login-banner handshake verb. Not
   handling it produced a cosmetic "Unrecognized or unsupported command." nit.
+- **Site policy is tables, not config strings.** Domains, aliases, ACLs, DNSBL
+  zones, DKIM keys and quotas live in `quackmail_*` tables read by both SMTP
+  extensions — the same "tables are the bus" rule as presence. Everything ships
+  empty: a fresh install accepts mail only for `c_fqdn`, queries no blocklist
+  and signs nothing, so upgrading changes no behaviour until an admin acts.
+- **Report every authentication result, reject on few.** SPF/DKIM/DMARC/DNSBL
+  verdicts are always stamped into `Authentication-Results:`/`Received-SPF:`,
+  but only the *sender's own* published `p=reject` and an explicit DNSBL listing
+  cause a rejection. SPF hard-fail alone does not: forwarded mail and mailing
+  lists fail SPF routinely, and rejecting on it loses real mail. Each rule has a
+  `citadel_config` override (`qm_spf_reject`, `qm_dkim_reject`, …).
+- **DKIM verification takes an injectable key lookup.** `policy::DkimKeyLookup`
+  resolves locally stored public keys before falling back to DNS, which is what
+  lets the whole sign→verify path be tested with no resolver at all.
+- **DMARC's organizational domain is approximated.** No Public Suffix List is
+  bundled, so it is "last two labels" plus a table of common multi-label
+  suffixes. The error direction is deliberate: relaxed alignment comes out
+  stricter than a PSL would make it, never looser, so it cannot turn a Fail into
+  a Pass. Bundling a PSL is on the backlog.
+- **LMTP is the deliberate hole in the fence.** It performs no authentication
+  and no spam filtering, by design, because it is the trusted local-injection
+  path. It binds to loopback unless explicitly overridden, and the README says
+  plainly not to expose it.
+- **DuckDB allows one read-write process per database file**, so the admin CLI
+  cannot open the database while the server holds it. `run_quackcit.py` exposes
+  a mode-0600 Unix socket next to the database; `quackcitadm.sh` sends SQL there
+  when the server is up and opens the file directly when it is down. That socket
+  accepts arbitrary SQL — treat it as root-equivalent.
+- **DuckDB table functions require constant-foldable arguments**, so
+  `qm_dkim_verify(qm_dkim_sign(...))` is only expressible if both are *scalar*
+  functions. The composable forms are scalar; `qm_dkim_verify_detail` remains a
+  table function for the per-signature breakdown.
 
 ## The test box: debian.lan
 

@@ -5,6 +5,8 @@
 #include <poll.h>
 #include <unistd.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 #include <openssl/err.h>
@@ -155,6 +157,43 @@ bool ClientStream::WriteLine(const std::string &line) {
 	std::string out = line;
 	out += "\r\n";
 	return RawWrite(out.data(), out.size());
+}
+
+std::string ClientStream::PeerIp() const {
+	if (fd_ < 0) {
+		return "";
+	}
+	struct sockaddr_storage ss {};
+	socklen_t slen = sizeof(ss);
+	if (::getpeername(fd_, reinterpret_cast<struct sockaddr *>(&ss), &slen) != 0) {
+		return "";
+	}
+	char buf[INET6_ADDRSTRLEN] = {0};
+	if (ss.ss_family == AF_INET) {
+		auto *a = reinterpret_cast<struct sockaddr_in *>(&ss);
+		if (!inet_ntop(AF_INET, &a->sin_addr, buf, sizeof(buf))) {
+			return "";
+		}
+		return buf;
+	}
+	if (ss.ss_family == AF_INET6) {
+		auto *a = reinterpret_cast<struct sockaddr_in6 *>(&ss);
+		// A dual-stack listener reports IPv4 peers as ::ffff:1.2.3.4; SPF and
+		// DNSBL both want the bare IPv4 form.
+		if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr)) {
+			struct in_addr v4 {};
+			std::memcpy(&v4, a->sin6_addr.s6_addr + 12, sizeof(v4));
+			if (!inet_ntop(AF_INET, &v4, buf, sizeof(buf))) {
+				return "";
+			}
+			return buf;
+		}
+		if (!inet_ntop(AF_INET6, &a->sin6_addr, buf, sizeof(buf))) {
+			return "";
+		}
+		return buf;
+	}
+	return "";
 }
 
 bool ClientStream::AcceptTls(SSL_CTX *ctx, std::string &err) {

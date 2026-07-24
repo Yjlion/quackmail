@@ -9,6 +9,10 @@ Loads the extensions into an in-memory DuckDB, starts the inbound SMTP listener
 then retrieves the delivered message back over POP3 (shared store). The MX offers
 no AUTH — authenticated submission lives in smtp_out (see test_submission.py).
 
+The second half covers site policy: an additional hosted domain, alias and
+catch-all expansion, sender/IP block rules, and the trace headers the inbound
+checks stamp on every accepted message.
+
 Requires: pip install duckdb==1.5.4. Run after `make`.
 """
 import os
@@ -78,6 +82,20 @@ def main():
     assert len(rows) == 1, f"expected exactly 1 delivered message, got {rows}"
     assert rows[0][0] == "bob@example.com" and rows[0][1] == "Hello QuackMail" and rows[0][2] == 4, rows[0]
 
+    # Every accepted message is stamped with what the inbound checks concluded.
+    stored = con.execute("SELECT decode(raw) FROM citadel_messages").fetchone()[0]
+    assert "Received: from" in stored, "no Received header was added"
+    assert "Authentication-Results:" in stored, "no Authentication-Results header"
+    assert "dkim=none" in stored, f"unsigned mail should report dkim=none: {stored[:400]}"
+    # The message body survived the prepended headers intact.
+    assert "This is the body." in stored
+
+    # The audit trail records one row per accepted recipient.
+    logged = con.execute(
+        "SELECT rcpt, disposition FROM quackmail_inbound_log ORDER BY at"
+    ).fetchall()
+    assert ("alice@quackmail.test", "accept") in logged, logged
+
     # Retrieve it back through POP3 (shared store).
     assert con.execute(f"SELECT note FROM qm_pop3_start('{HOST}', {POP_PORT})").fetchone()[0] == "started"
     time.sleep(0.3)
@@ -93,7 +111,83 @@ def main():
     finally:
         con.execute("CALL qm_pop3_stop()").fetchall()
 
-    print("PASS: inbound MX validates recipients, delivers local mail, POP3 retrieves it")
+    check_policy(con)
+
+    print("PASS: inbound MX validates recipients, delivers local mail, POP3 retrieves it,")
+    print("      and honours domains, aliases and block rules")
+
+
+def check_policy(con):
+    """Hosted domains, aliases, catch-alls and allow/block rules."""
+    assert con.execute("SELECT ok FROM qm_user_add('carol', 'pw')").fetchone()[0]
+    assert con.execute("SELECT ok FROM qm_domain_add('extra.test', 'local')").fetchone()[0]
+    # An address alias fanning out to two users, plus a domain catch-all.
+    assert con.execute("SELECT ok FROM qm_alias_add('team@extra.test', 'alice')").fetchone()[0]
+    assert con.execute("SELECT ok FROM qm_alias_add('team@extra.test', 'carol')").fetchone()[0]
+    assert con.execute("SELECT ok FROM qm_alias_add('@extra.test', 'carol')").fetchone()[0]
+    # A blocked sender pattern.
+    assert con.execute(
+        "SELECT ok FROM qm_acl_add('sender', '*@blocked.example', 'block', 'test rule')"
+    ).fetchone()[0]
+
+    assert con.execute(
+        f"SELECT note FROM qm_smtp_in_start('{HOST}', {SMTP_PORT + 1})"
+    ).fetchone()[0] == "started"
+    time.sleep(0.3)
+    try:
+        s = smtplib.SMTP(HOST, SMTP_PORT + 1, timeout=10)
+
+        def send(sender, rcpt, subject):
+            m = MIMEText("policy body\n")
+            m["Subject"] = subject
+            m["From"] = sender
+            m["To"] = rcpt
+            s.sendmail(sender, [rcpt], m.as_string())
+
+        # The newly hosted domain is accepted; the alias fans out to two users.
+        send("outside@example.com", "team@extra.test", "To the team")
+
+        # An address with no alias falls through to the domain catch-all.
+        send("outside@example.com", "whoever@extra.test", "To the catch-all")
+
+        # A blocked sender is refused at MAIL FROM, before any recipient.
+        try:
+            send("spammer@blocked.example", "alice@quackmail.test", "Should not arrive")
+            raise AssertionError("blocked sender should have been refused")
+        except smtplib.SMTPSenderRefused as e:
+            assert e.smtp_code == 550, f"blocked sender reply: {e.smtp_code} {e.smtp_error}"
+            assert b"test rule" in e.smtp_error, e.smtp_error
+
+        # A domain we do not host is still relay-denied.
+        try:
+            send("outside@example.com", "someone@unhosted.test", "Should not relay")
+            raise AssertionError("unhosted domain should be relay-denied")
+        except smtplib.SMTPRecipientsRefused as e:
+            code, text = list(e.recipients.values())[0]
+            assert code == 550 and b"elay" in text, e.recipients
+
+        s.quit()
+    finally:
+        con.execute("CALL qm_smtp_in_stop()").fetchall()
+
+    # The alias reached both mailboxes; the catch-all reached carol's only.
+    fanout = con.execute(
+        "SELECT count(DISTINCT r.mailbox_owner) FROM citadel_messages m "
+        "JOIN citadel_room_msgs rm ON rm.msgnum = m.msgnum "
+        "JOIN citadel_rooms r ON r.room_num = rm.room_num "
+        "WHERE m.subject = 'To the team' AND r.mailbox_owner > 0"
+    ).fetchone()[0]
+    assert fanout == 2, f"alias should reach 2 mailboxes, got {fanout}"
+
+    catchall = con.execute(
+        "SELECT count(*) FROM citadel_messages WHERE subject = 'To the catch-all'"
+    ).fetchone()[0]
+    assert catchall == 1, f"catch-all should have delivered once, got {catchall}"
+
+    blocked = con.execute(
+        "SELECT count(*) FROM citadel_messages WHERE subject = 'Should not arrive'"
+    ).fetchone()[0]
+    assert blocked == 0, "a blocked sender's message was stored"
 
 
 if __name__ == "__main__":

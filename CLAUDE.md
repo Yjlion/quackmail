@@ -23,7 +23,7 @@ for what's next.
 | `test/sql/` | sqllogictest (`make test`) |
 | `test/integration/` | python end-to-end tests, one per protocol |
 | `test/parity/` | captured output from the real Citadel server used as fixtures |
-| `deploy/run_quackcit.py` | dev launcher: loads every extension, starts every listener |
+| `deploy/` | `run_quackcit.py` (env-driven launcher), `quackcit.sh` + `quackcit.conf` (run it), `quackcitadm.sh` + `quackcit_admin.py` (administer it) |
 
 ## Build and test
 
@@ -85,6 +85,14 @@ README table.
 - `mime.hpp` — `Parse`, `ParseEntity`, `FlattenParts`, `ParseContentType`.
 - `auth.hpp` (`Verify`, `AddUser`), `sasl.hpp` (`ServerAuth` — the callback owns
   the wire framing), `delivery.hpp` (`LocalDeliver`), `smtp_client.hpp`, `dns.hpp`.
+- `mailpolicy.hpp` — site policy for both SMTP front-ends: `IsLocalDomain`,
+  `ExpandAlias`, `CheckAcl`, `RblZones`, `DkimKeyFor`/`DkimKeyLookup`,
+  `CheckRate`/`RecordSend`, `GetEnforcement`, `LogInbound`.
+- `spf.hpp`, `dkim.hpp` (sign, verify, keygen), `dmarc.hpp`, `rbl.hpp` — mail
+  authentication. `dkim::Verify` takes an injectable `KeyLookup` so it can read
+  locally stored keys instead of DNS; that is what makes it testable offline.
+- `sieve.hpp` — RFC 5228 `Evaluate` (returns a *list* of actions with implicit
+  keep) and `Check` for ManageSieve validation.
 - Cross-session state lives in `citadel_sessions` and `citadel_express`
   (already backing `RWHO` / `SEXP` / `GEXP`).
 
@@ -96,6 +104,12 @@ README table.
   them) — use it to check whether a user exists.
 - DuckDB prepared statements: check `HasError()` before `Execute`, and use
   `Cast<MaterializedQueryResult>()` for row access.
+- DuckDB **table function arguments must be constant-foldable**, so table
+  functions cannot be nested. Anything that needs to compose (`qm_dkim_sign` →
+  `qm_dkim_verify`) has to be a scalar function.
+- The admin CLI cannot open the database while the server is running — DuckDB
+  permits one read-write process per file. `deploy/quackcitadm.sh` goes through
+  the launcher's Unix socket instead; see `deploy/quackcit_admin.py`.
 - `pkill -f run_quackcit` over SSH kills your own shell (the pattern matches the
   command line). Kill by PID.
 
