@@ -307,7 +307,9 @@ void HandleXmpp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 			} else if (el == "presence") {
 				SendPresenceDump(con, stream, s);
 			} else if (el == "iq") {
-				std::string from_domain = s.client_jid.empty() ? s.node : s.BareJid();
+				// Citadel answers errors "from" the domain part of the client JID
+				// (the bare JID is used only for roster results).
+				std::string from_domain = s.node;
 				if (s.iq_type == "GET" && s.query_xmlns == "jabber:iq:roster") {
 					Send(stream, "<iq type=\"result\" from=\"" + Esc(s.BareJid()) + "\" id=\"" +
 					                 Esc(s.iq_id) + "\">");
@@ -347,8 +349,11 @@ void HandleXmpp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 				} else if (s.session_requested) {
 					Send(stream, "<iq type=\"result\" id=\"" + Esc(s.iq_id) + "\"></iq>");
 				} else if (s.ping_requested) {
-					Send(stream, "<iq type=\"result\" from=\"" + Esc(s.node) + "\" id=\"" + Esc(s.iq_id) +
-					                 "\"/>");
+					// Citadel echoes to=/from= only when the request carried them.
+					Send(stream, "<iq type=\"result\" " +
+					                 (s.iq_from.empty() ? "" : "to=\"" + Esc(s.iq_from) + "\" ") +
+					                 (s.iq_to.empty() ? "" : "from=\"" + Esc(s.iq_to) + "\" ") + "id=\"" +
+					                 Esc(s.iq_id) + "\"/>");
 				} else if (s.vcard_requested) {
 					Send(stream, "<iq type=\"result\" id=\"" + Esc(s.iq_id) + "\" to=\"" +
 					                 Esc(s.iq_from) + "\"><vCard xmlns=\"vcard-temp\"><fn>" +
