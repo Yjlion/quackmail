@@ -48,7 +48,12 @@ def deliver(con, user, subject, body):
 
 
 def raw_session(port, lines, use_tls=False):
-    """Drive a POP3 session by hand and return every response line."""
+    """Drive a POP3 session by hand and return every response line.
+
+    Responses are not read one-per-command: a multi-line reply can arrive split
+    across TCP segments, so we read what is available after each command and
+    then drain the socket to EOF at the end. Order is preserved either way.
+    """
     s = socket.create_connection((HOST, port), timeout=5)
     if use_tls:
         ctx = ssl.create_default_context()
@@ -59,25 +64,35 @@ def raw_session(port, lines, use_tls=False):
     out = []
     buf = b""
 
-    def read_some():
+    def read_some(until_eof=False):
         nonlocal buf
+        eof = False
         try:
             while True:
                 d = s.recv(8192)
                 if not d:
+                    eof = True
                     break
                 buf += d
-                if buf.endswith(b"\r\n"):
+                if buf.endswith(b"\r\n") and not until_eof:
                     break
         except socket.timeout:
             pass
+        except OSError:
+            eof = True
         text, buf = buf.decode("utf-8", "replace"), b""
-        out.extend(text.split("\r\n")[:-1])
+        lines = text.split("\r\n")
+        # Keep a trailing partial line only when the peer hung up on it (the
+        # server closes right after answering QUIT).
+        out.extend(lines if eof and lines and lines[-1] else lines[:-1])
 
     read_some()
     for line in lines:
         s.sendall(line.encode() + b"\r\n")
         read_some()
+    # Anything still in flight (the server closes right after answering QUIT).
+    s.settimeout(1)
+    read_some(until_eof=True)
     s.close()
     return out
 
