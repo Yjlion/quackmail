@@ -14,6 +14,8 @@ require quackmail_telnet
 
 require quackmail_nntp
 
+require quackmail_xmpp
+
 # Umbrella version + schema-backed status
 query I
 SELECT version FROM qm_version();
@@ -129,5 +131,26 @@ stopped
 
 query I
 SELECT note FROM qm_nntps_stop();
+----
+stopped
+
+# XMPP and XMPPS.
+query I
+SELECT note FROM qm_xmpp_start('127.0.0.1', 15222, starttls => true);
+----
+started
+
+query I
+SELECT note FROM qm_xmpps_start('127.0.0.1', 15223, implicit_tls => true);
+----
+started
+
+query I
+SELECT note FROM qm_xmpp_stop();
+----
+stopped
+
+query I
+SELECT note FROM qm_xmpps_stop();
 ----
 stopped

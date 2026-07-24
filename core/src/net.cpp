@@ -1,6 +1,8 @@
 #include "quackmail/net.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <poll.h>
 #include <unistd.h>
 
 #include <sys/socket.h>
@@ -97,6 +99,33 @@ bool ClientStream::ReadByte(char &c) {
 	}
 	c = rbuf_[rpos_++];
 	return true;
+}
+
+bool ClientStream::ReadAvailable(std::string &out, size_t max_bytes) {
+	out.clear();
+	if (rpos_ >= rbuf_.size() && !FillBuffer()) {
+		return false;
+	}
+	size_t n = std::min(max_bytes, rbuf_.size() - rpos_);
+	out.assign(rbuf_, rpos_, n);
+	rpos_ += n;
+	return true;
+}
+
+bool ClientStream::WaitReadable(int timeout_ms) {
+	// Bytes already buffered here, or inside OpenSSL's record buffer, would not
+	// show up in poll().
+	if (rpos_ < rbuf_.size()) {
+		return true;
+	}
+	if (ssl_ && SSL_pending(ssl_) > 0) {
+		return true;
+	}
+	struct pollfd pfd {};
+	pfd.fd = fd_;
+	pfd.events = POLLIN;
+	int r = ::poll(&pfd, 1, timeout_ms);
+	return r > 0;
 }
 
 bool ClientStream::ReadDotStuffed(std::string &out, size_t max_bytes) {

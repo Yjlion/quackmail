@@ -29,6 +29,7 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/net.cpp
         ${QUACKMAIL_CORE_DIR}/src/telnet.cpp
         ${QUACKMAIL_CORE_DIR}/src/wildmat.cpp
+        ${QUACKMAIL_CORE_DIR}/src/xmlstream.cpp
         ${QUACKMAIL_CORE_DIR}/src/server_controller.cpp
         ${QUACKMAIL_CORE_DIR}/src/server_controls.cpp
         ${QUACKMAIL_CORE_DIR}/src/tls.cpp
