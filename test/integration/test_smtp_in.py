@@ -125,6 +125,10 @@ def check_policy(con):
     assert con.execute("SELECT ok FROM qm_alias_add('team@extra.test', 'alice')").fetchone()[0]
     assert con.execute("SELECT ok FROM qm_alias_add('team@extra.test', 'carol')").fetchone()[0]
     assert con.execute("SELECT ok FROM qm_alias_add('@extra.test', 'carol')").fetchone()[0]
+    # An alias may point off-site; that recipient is forwarded, not rejected.
+    assert con.execute(
+        "SELECT ok FROM qm_alias_add('fwd@extra.test', 'elsewhere@example.net')"
+    ).fetchone()[0]
     # A blocked sender pattern.
     assert con.execute(
         "SELECT ok FROM qm_acl_add('sender', '*@blocked.example', 'block', 'test rule')"
@@ -149,6 +153,9 @@ def check_policy(con):
 
         # An address with no alias falls through to the domain catch-all.
         send("outside@example.com", "whoever@extra.test", "To the catch-all")
+
+        # An alias pointing off-site is accepted and queued for forwarding.
+        send("outside@example.com", "fwd@extra.test", "To be forwarded")
 
         # A blocked sender is refused at MAIL FROM, before any recipient.
         try:
@@ -188,6 +195,15 @@ def check_policy(con):
         "SELECT count(*) FROM citadel_messages WHERE subject = 'Should not arrive'"
     ).fetchone()[0]
     assert blocked == 0, "a blocked sender's message was stored"
+
+    # The off-site alias was queued for relay rather than stored or refused.
+    forwarded = con.execute(
+        "SELECT count(*) FROM quackmail_outbound WHERE rcpt = 'elsewhere@example.net'"
+    ).fetchone()[0]
+    assert forwarded == 1, f"off-site alias should be queued once, got {forwarded}"
+    assert con.execute(
+        "SELECT count(*) FROM citadel_messages WHERE subject = 'To be forwarded'"
+    ).fetchone()[0] == 0, "a forward-only alias should store nothing locally"
 
 
 if __name__ == "__main__":

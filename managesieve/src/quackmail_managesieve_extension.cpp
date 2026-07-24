@@ -42,10 +42,14 @@ std::string Quote(const std::string &in) {
 	return out;
 }
 
-// A literal is written as {N+} followed by CRLF and N raw bytes. Scripts are
-// sent this way because they contain newlines and quotes.
+// A literal is "{N}" then CRLF then N raw bytes. Scripts travel this way
+// because they contain newlines and quotes.
+//
+// Server-emitted literals use the plain "{N}" form; the trailing "+"
+// (non-synchronizing) is a client-to-server construct, and ReadArg below
+// accepts it on the way in.
 std::string Literal(const std::string &in) {
-	return "{" + std::to_string(in.size()) + "+}\r\n" + in;
+	return "{" + std::to_string(in.size()) + "}\r\n" + in;
 }
 
 // Read one argument from `rest`, consuming it. Handles quoted strings and

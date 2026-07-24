@@ -82,10 +82,15 @@ std::string DomainOf(const std::string &addr) {
 
 // One accepted recipient: what the client asked for, and where it actually goes
 // after alias expansion. LMTP must reply once per envelope recipient, so the
-// two are tracked separately.
+// envelope address is kept separate from the resolved targets.
 struct Recipient {
-	std::string envelope;                 // as given in RCPT TO
-	std::vector<std::string> destinations; // resolved local addresses
+	std::string envelope;                  // as given in RCPT TO
+	std::vector<std::string> destinations; // resolved local users
+	std::vector<std::string> forwards;     // off-site addresses an alias points at
+
+	bool Deliverable() const {
+		return !destinations.empty() || !forwards.empty();
+	}
 
 	Recipient() = default;
 };
@@ -336,12 +341,17 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 			for (const auto &dest : expanded) {
 				if (citadel::IsLocalUser(con, dest)) {
 					r.destinations.push_back(dest);
+				} else {
+					// An alias may point off-site. Forwarding it is not open
+					// relay: the mail is addressed to a domain we host, and an
+					// admin configured this destination explicitly.
+					r.forwards.push_back(dest);
 				}
 			}
-			if (r.destinations.empty() && expanded.empty() && citadel::IsLocalUser(con, rcpt)) {
+			if (expanded.empty() && citadel::IsLocalUser(con, rcpt)) {
 				r.destinations.push_back(rcpt);
 			}
-			if (r.destinations.empty()) {
+			if (!r.Deliverable()) {
 				stream.WriteLine("550 5.1.1 No such user here");
 				continue;
 			}
@@ -459,8 +469,23 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				policy::LogInbound(con, v);
 			};
 
+			// Alias forwards go onto the same outbound queue the submission
+			// service uses, so retries and backoff live in one place.
+			auto enqueue_forwards = [&](const Recipient &r) {
+				for (const auto &fwd : r.forwards) {
+					store::EnqueueOutbound(con, s.mail_from, fwd, stored);
+				}
+			};
+
 			if (lmtp) {
 				for (const auto &r : s.rcpts) {
+					enqueue_forwards(r);
+					if (r.destinations.empty()) {
+						// Purely a forwarding alias; nothing is stored here.
+						log_one(r.envelope, "accept", "forwarded");
+						stream.WriteLine("250 2.0.0 <" + r.envelope + "> forwarded");
+						continue;
+					}
 					deliver::Outcome outcome;
 					bool ok = deliver::LocalDeliver(con, s.mail_from, r.destinations, stored, opts, outcome);
 					if (!ok) {
@@ -477,10 +502,13 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 			} else {
 				std::vector<std::string> targets;
 				for (const auto &r : s.rcpts) {
+					enqueue_forwards(r);
 					targets.insert(targets.end(), r.destinations.begin(), r.destinations.end());
 				}
 				deliver::Outcome outcome;
-				bool ok = deliver::LocalDeliver(con, s.mail_from, targets, stored, opts, outcome);
+				bool ok = targets.empty()
+				              ? true // everything was forwarded; nothing to store
+				              : deliver::LocalDeliver(con, s.mail_from, targets, stored, opts, outcome);
 				for (const auto &r : s.rcpts) {
 					log_one(r.envelope, ok ? (quarantine ? "quarantine" : "accept") : "defer", outcome.err);
 				}

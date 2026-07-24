@@ -87,7 +87,7 @@ mail only for `c_fqdn`, queries no blocklist, and signs nothing.
 | Table | Purpose |
 |---|---|
 | `quackmail_domains` | Domains we accept mail for beyond `c_fqdn`: `kind` is `local` (deliver here) or `relay`, plus the default `dkim_selector`. |
-| `quackmail_aliases` | `alias` → `destination`. Several rows for one alias fan out to several users; `@example.com` is that domain's catch-all. |
+| `quackmail_aliases` | `alias` → `destination`. Several rows for one alias fan out to several users; `@example.com` is that domain's catch-all. A destination that is not a local user is **forwarded** onto the outbound queue — not open relay, since the mail is addressed to a domain we host and an admin configured that target explicitly. Chains are followed, with a depth cap so a cycle cannot hang `RCPT`. |
 | `quackmail_acl` | Allow/block rules over `scope` ∈ {`ip`, `sender`, `domain`, `rcpt`, `helo`}. Patterns are globs; `ip` also takes CIDR. **Allow always beats block**, so a narrow allow carves an exception out of a broad block. |
 | `quackmail_rbl_zones` | DNSBL zones to query, in order. Empty by default — blocklist checking is opt-in. |
 | `quackmail_dkim_keys` | Outbound signing keys. The private half is stored here, so the database file's permissions are the security boundary for it. |
