@@ -113,8 +113,13 @@ def main():
         assert status.startswith("215"), status
         names = [g.split()[0] for g in groups]
         assert "ctdl.lobby" in names, names
-        assert "ctdl.global+20address+20book" in names, names
-        assert any(n.endswith(".Mail") for n in names), names  # own mailbox room
+        assert "ctdl.trashcan" in names, names
+        # Aide and Global Address Book are aide-private, so a regular user does
+        # not see them. Personal rooms keep their "<usernum>.<name>" form when it
+        # is already a valid newsgroup name, and get escaped when it is not —
+        # the same rule the oracle applies.
+        assert any(n.endswith(".Mail") for n in names), names
+        assert any(n.startswith("ctdl.") and "sent+20items" in n for n in names), names
         lobby_line = next(g for g in groups if g.startswith("ctdl.lobby "))
         assert lobby_line.split()[-1] == "y", lobby_line  # posting allowed
 
