@@ -1,0 +1,30 @@
+CAPABILITIES(pre): ('IMAP4REV1', 'NAMESPACE', 'ID', 'AUTH=PLAIN', 'AUTH=LOGIN', 'UIDPLUS', 'STARTTLS', 'ACL', 'METADATA')
+STARTTLS: ok
+CAPABILITIES(post): ('IMAP4REV1', 'NAMESPACE', 'ID', 'AUTH=PLAIN', 'AUTH=LOGIN', 'UIDPLUS', 'ACL', 'METADATA')
+NAMESPACE: OK [b'(("INBOX/" "/")) NIL (("Main Floor/" "/"))']
+LIST:
+   (\NoSelect \HasChildren) "/" "Main Floor"
+   () "/" "INBOX/Calendar"
+   () "/" "INBOX/Contacts"
+   () "/" "INBOX/Drafts"
+   () "/" "INBOX"
+   () "/" "INBOX/Notes"
+   () "/" "INBOX/Sent Items"
+   () "/" "INBOX/Tasks"
+   () "/" "INBOX/Trash"
+   () "/" "Main Floor/Lobby"
+   () "/" "Main Floor/Trashcan"
+LSUB:
+   (\NoSelect \HasChildren) "/" "Main Floor"
+   () "/" "INBOX/Calendar"
+   () "/" "INBOX/Contacts"
+   () "/" "INBOX/Drafts"
+   () "/" "INBOX"
+   () "/" "INBOX/Notes"
+   () "/" "INBOX/Sent Items"
+   () "/" "INBOX/Tasks"
+   () "/" "INBOX/Trash"
+   () "/" "Main Floor/Lobby"
+   () "/" "Main Floor/Trashcan"
+SELECT INBOX: OK [b'0']
+STATUS INBOX: [b'"INBOX" (MESSAGES 0 RECENT 0 UIDNEXT 9 UNSEEN 0)']

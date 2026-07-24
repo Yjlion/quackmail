@@ -168,12 +168,45 @@ void EnsureCitadelSchema(Connection &con) {
 		)
 	)");
 
+	// Cross-session presence (RWHO) and instant messages (SEXP/GEXP). Per the
+	// "tables are the bus" design, live session state lives in DuckDB rather than
+	// shared C++ memory, so any connection/extension sees a consistent view.
+	con.Query("CREATE SEQUENCE IF NOT EXISTS citadel_session_seq START 1");
+	con.Query("CREATE SEQUENCE IF NOT EXISTS citadel_express_seq START 1");
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_sessions (
+			session_id BIGINT PRIMARY KEY,
+			username   VARCHAR DEFAULT '',
+			host       VARCHAR DEFAULT '',
+			room       VARCHAR DEFAULT '',
+			last_cmd   VARCHAR DEFAULT '',
+			axlevel    BIGINT DEFAULT 0,
+			since      BIGINT DEFAULT 0,
+			last_seen  BIGINT DEFAULT 0
+		)
+	)");
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_express (
+			id        BIGINT PRIMARY KEY,
+			to_user   VARCHAR,
+			from_user VARCHAR,
+			text      VARCHAR,
+			sent_at   BIGINT,
+			delivered BOOLEAN DEFAULT false
+		)
+	)");
+
 	// Seed the base floor and system rooms (fixed ids -> idempotent, no seq churn).
+	// These mirror a stock Citadel install's public/system rooms (see LKRA on a
+	// real server: Lobby, Aide, Global Address Book, Trashcan) with matching
+	// qr_flags and default_view so clients see the same room set.
 	con.Query("INSERT OR IGNORE INTO citadel_floors (floor_num, name) VALUES (0, 'Main Floor')");
-	con.Query("INSERT OR IGNORE INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, info) "
-	          "VALUES (0, 'Lobby', 'Lobby', 0, 1, 'Welcome to the Lobby.')");
-	con.Query("INSERT OR IGNORE INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, info) "
-	          "VALUES (1, 'Aide', 'Aide', 0, 5, 'Room for system administrators.')");
+	con.Query("INSERT OR IGNORE INTO citadel_rooms "
+	          "(room_num, name, display_name, floor_num, qr_flags, default_view, listorder, info) VALUES "
+	          "(0, 'Lobby', 'Lobby', 0, 2, 0, 0, 'Welcome to the Lobby.'), "
+	          "(1, 'Aide', 'Aide', 0, 6, 0, 10, 'Room for system administrators.'), "
+	          "(2, 'Global Address Book', 'Global Address Book', 0, 6, 2, 20, 'Shared address book.'), "
+	          "(3, 'Trashcan', 'Trashcan', 0, 2, 0, 30, 'Discarded rooms land here.')");
 
 	con.Query("INSERT OR IGNORE INTO citadel_config (name, value) VALUES "
 	          "('c_nodename', 'quackcit'), "
@@ -324,7 +357,9 @@ std::vector<Room> ListRooms(Connection &con, const std::string &username, int64_
 	std::string sql = std::string("SELECT ") + kRoomCols +
 	                  " FROM citadel_rooms WHERE (mailbox_owner = 0 OR mailbox_owner = $1)";
 	if (!is_aide) {
-		sql += " AND (qr_flags & 4) = 0"; // hide private rooms from non-aides
+		// Hide other people's private rooms from non-aides, but always show a
+		// user their own mailbox rooms (which are themselves flagged private).
+		sql += " AND ((qr_flags & 4) = 0 OR mailbox_owner = $1)";
 	}
 	if (floor >= 0) {
 		sql += " AND floor_num = $2";
@@ -401,11 +436,38 @@ int64_t GetOrCreateUserRoom(Connection &con, const std::string &username, const 
 		return existing.GetValue<int64_t>();
 	}
 	std::string err;
-	return CreateRoom(con, display_name, 0, QR_MAILBOX | QR_PRIVATE, "", usernum, err);
+	// Personal mailbox rooms are permanent (never auto-purged) — matches the
+	// qr_flags a real Citadel server reports for them (16390).
+	return CreateRoom(con, display_name, 0, QR_MAILBOX | QR_PRIVATE | QR_PERMANENT, "", usernum, err);
 }
 
 int64_t GetOrCreateMailRoom(Connection &con, const std::string &username) {
 	return GetOrCreateUserRoom(con, username, "Mail");
+}
+
+void EnsureUserRooms(Connection &con, const std::string &username) {
+	int64_t usernum = GetOrAssignUserNum(con, username);
+	if (usernum <= 0) {
+		return;
+	}
+	// The default groupware rooms Citadel provisions for every user, each with
+	// its Citadel view code so clients render them correctly (mail/calendar/...).
+	struct DefRoom {
+		const char *name;
+		int64_t view;
+	};
+	static const DefRoom kDefaults[] = {
+	    {"Mail", VIEW_MAILBOX},       {"Sent Items", VIEW_MAILBOX}, {"Drafts", VIEW_MAILBOX},
+	    {"Trash", VIEW_MAILBOX},      {"Calendar", VIEW_CALENDAR},  {"Contacts", VIEW_ADDRESSBOOK},
+	    {"Notes", VIEW_NOTES},        {"Tasks", VIEW_TASKS},
+	};
+	for (const auto &d : kDefaults) {
+		int64_t room_num = GetOrCreateUserRoom(con, username, d.name);
+		if (room_num >= 0 && d.view != VIEW_BBS) {
+			ExecP(con, "UPDATE citadel_rooms SET default_view = $1 WHERE room_num = $2",
+			      {Value::BIGINT(d.view), Value::BIGINT(room_num)});
+		}
+	}
 }
 
 RoomStats GetRoomStats(Connection &con, const std::string &username, int64_t room_num) {

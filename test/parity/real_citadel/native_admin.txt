@@ -1,0 +1,58 @@
+GREETING: 200 debian Citadel server ready.
+USER: ['300 Password required for admin']
+PASS: ['200 admin|6|0|0|11792|1|1784848478|admin@debian']
+=== INFO ===
+100 Server info:
+5
+debian
+Citadel Server
+debian
+Citadel Server 17846585
+17846585
+(null)
+admin
+0
+<more>
+1
+1
+
+1
+1
+0
+America/New_York
+0
+0
+0
+0
+1
+26204
+0
+0
+=== LFLR ===
+100 Known floors:
+0|Main Floor|25
+=== LKRA ===
+100 Known rooms:
+(null)|6|0|64|0|486|0|0|1784846576|
+Calendar|16390|0|0|0|486|3|3|1784848568|
+Contacts|16390|0|0|0|486|2|2|1784848568|
+Drafts|16390|0|0|0|486|1|1|1784846406|
+Mail|16390|0|0|0|486|1|1|1784845645|
+Notes|16390|0|0|0|486|5|5|1784848568|
+Sent Items|16390|0|0|0|486|1|1|1784846406|
+Tasks|16390|0|0|0|486|4|4|1784848568|
+Trash|16390|0|0|0|486|1|1|1784846406|
+Aide|6|0|0|16|430|0|0|1784846679|
+Global Address Book|6|0|64|0|494|2|2|1784846679|
+Lobby|2|0|0|0|486|0|0|1784845643|
+Trashcan|2|0|64|0|486|0|0|1784845643|
+=== LKRN ===
+100 Rooms with new msgs:
+Aide|6|0|0|16|430|0|0|1784846679|
+Global Address Book|6|0|64|0|494|2|2|1784846679|
+=== LZRM ===
+100 Zapped rooms:
+=== LPRM ===
+100 Public rooms:
+Lobby|2|0|0|0|486|0|0|1784845643|
+Trashcan|2|0|64|0|486|0|0|1784845643|
