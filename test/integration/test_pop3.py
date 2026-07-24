@@ -41,9 +41,11 @@ def deliver(con, user, subject, body):
         """
         INSERT INTO citadel_room_msgs (room_num, msgnum)
         SELECT r.room_num, (SELECT max(msgnum) FROM citadel_messages)
-        FROM citadel_rooms r WHERE r.name = ? || '.Mail'
+        FROM citadel_rooms r
+        JOIN citadel_users u ON u.usernum = r.mailbox_owner
+        WHERE u.username = ? AND r.display_name = 'Mail'
         """,
-        [str(con.execute("SELECT usernum FROM citadel_users WHERE username = ?", [user]).fetchone()[0])],
+        [user],
     )
 
 
