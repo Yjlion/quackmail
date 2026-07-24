@@ -1,0 +1,56 @@
+200 debian NNTP Citadel server is not finished yet
+101 Capability list:
+IMPLEMENTATION Citadel 17846585
+VERSION 2
+READER
+MODE-READER
+LIST ACTIVE NEWSGROUPS
+OVER
+STARTTLS
+AUTHINFO USER
+.
+201 Reader mode activated
+381 Password required for leo
+281 Authentication accepted
+215 list of newsgroups follows
+0000000002.Calendar 0 0 n
+0000000002.Contacts 0 0 n
+0000000002.Drafts 0 0 n
+0000000002.Mail 0 0 n
+0000000002.Notes 0 0 n
+ctdl.0000000002.sent+20items 0 0 n
+0000000002.Tasks 0 0 n
+0000000002.Trash 0 0 n
+ctdl.lobby 0 0 n
+ctdl.trashcan 0 0 n
+.
+215 list of newsgroups follows
+0000000002.Calendar 0000000002.Calendar
+0000000002.Contacts 0000000002.Contacts
+0000000002.Drafts 0000000002.Drafts
+0000000002.Mail 0000000002.Mail
+0000000002.Notes 0000000002.Notes
+ctdl.0000000002.sent+20items 0000000002.Sent Items
+0000000002.Tasks 0000000002.Tasks
+0000000002.Trash 0000000002.Trash
+ctdl.lobby Lobby
+ctdl.trashcan Trashcan
+.
+215 Order of fields in overview database.
+Subject:
+From:
+Date:
+Message-ID:
+References:
+Bytes:
+Lines:
+.
+501 syntax error , unsupported list format
+211 0 -1 -1 ctdl.lobby
+411 no such newsgroup
+420 No current article selected
+100 This is the Citadel NNTP service.
+RTFM http://www.ietf.org/rfc/rfc3977.txt
+.
+500 I'm afraid I can't do that.
+221 Goodbye...

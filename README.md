@@ -42,6 +42,7 @@ extension.
 | `quackmail_smtp_in` | `qm_smtp_in_start/_stop/_status` | ✅ inbound SMTP gateway → delivers into Mail rooms (STARTTLS/implicit TLS + SASL AUTH + Sieve) |
 | `quackmail_pop3` | `qm_pop3_start/_stop/_status`, `qm_pop3s_*` | ✅ POP3 gateway (STLS + implicit TLS) → serves each user's Mail room |
 | `quackmail_imap` | `qm_imap_start/_stop/_status` | ✅ minimal IMAP4rev1 gateway → mailboxes = rooms |
+| `quackmail_nntp` | `qm_nntp_start/_stop/_status`, `qm_nntps_*` | ✅ NNTP reader **and poster** (119/563; dev 1119/1563) — rooms are newsgroups |
 | `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
 | `quackmail_managesieve` | `qm_managesieve_start/_stop/_status` | 🚧 stub |
 | `quackmail_smtp_out` | `qm_smtp_out_start/_stop/_status` | 🚧 stub (outbound queue drainer) |
@@ -118,6 +119,22 @@ Commands: `<G>`oto, `<K>`nown rooms, `<U>`ngoto, `<M>`ail, read `<N>`ew/`<O>`ld/
 `<P>`age a user, `<X>` expert mode, `<?>` help, `<T>`erminate, and `.` commands
 (`.Goto <room>`). Sessions register in `citadel_sessions`, so telnet users and
 native Citadel clients see each other in the who-list and can page one another.
+
+## News (NNTP)
+
+Every room a user can see is a newsgroup, using Citadel's own name mapping
+(`Lobby` → `ctdl.lobby`, `Global Address Book` → `ctdl.global+20address+20book`,
+`0000000002.Mail` unchanged), and the room's message pointers are the article
+numbers. `LIST ACTIVE/NEWSGROUPS/OVERVIEW.FMT` (with wildmat patterns), `GROUP`,
+`LISTGROUP`, `ARTICLE`/`HEAD`/`BODY`/`STAT`, `NEXT`/`LAST`, `OVER`/`XOVER`,
+`NEWGROUPS`, `DATE`, `AUTHINFO`, and `STARTTLS` are implemented.
+
+Unlike a stock Citadel server, which answers `POST` with
+`500 I'm afraid I can't do that.`, QuackCit **accepts posted articles**: they are
+stored as ordinary Citadel messages, so an article posted over NNTP is readable
+from a Citadel client, the BBS shell, IMAP and POP3. (It also resolves
+`<message-id>` fetches and reports real `:bytes`/`:lines` in `OVER`, both of
+which Citadel punts on.)
 
 ## Mail gateways
 

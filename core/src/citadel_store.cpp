@@ -3,6 +3,10 @@
 #include "duckdb/main/materialized_query_result.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <string>
 
@@ -56,6 +60,15 @@ std::string AsString(const Value &v) {
 
 int64_t NowEpoch() {
 	return (int64_t)std::time(nullptr);
+}
+
+// A personal room's internal key. Citadel names these "<usernum>.<room>" with
+// the user number zero-padded to ten digits ("0000000002.Mail"), which is what
+// shows up on the wire in NNTP group names, so match it exactly.
+std::string MailboxRoomName(int64_t usernum, const std::string &display_name) {
+	char prefix[16];
+	std::snprintf(prefix, sizeof prefix, "%010lld", (long long)usernum);
+	return std::string(prefix) + "." + display_name;
 }
 
 Room RowToRoom(MaterializedQueryResult &mat, idx_t row) {
@@ -203,6 +216,13 @@ void EnsureCitadelSchema(Connection &con) {
 			delivered BOOLEAN DEFAULT false
 		)
 	)");
+
+	// Personal room keys used to be "<usernum>.<room>" without padding; Citadel
+	// pads the user number to ten digits and that name is visible over NNTP.
+	con.Query("UPDATE citadel_rooms "
+	          "SET name = lpad(mailbox_owner::VARCHAR, 10, '0') || '.' || display_name "
+	          "WHERE mailbox_owner > 0 "
+	          "  AND name <> lpad(mailbox_owner::VARCHAR, 10, '0') || '.' || display_name");
 
 	// Seed the base floor and system rooms (fixed ids -> idempotent, no seq churn).
 	// These mirror a stock Citadel install's public/system rooms (see LKRA on a
@@ -404,8 +424,7 @@ int64_t CreateRoom(Connection &con, const std::string &display_name, int64_t flo
 		err = "could not allocate room number";
 		return -1;
 	}
-	std::string internal =
-	    mailbox_owner > 0 ? std::to_string(mailbox_owner) + "." + display_name : display_name;
+	std::string internal = mailbox_owner > 0 ? MailboxRoomName(mailbox_owner, display_name) : display_name;
 	auto r = ExecP(con,
 	               "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, password, "
 	               "mailbox_owner) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -438,7 +457,7 @@ int64_t GetOrCreateUserRoom(Connection &con, const std::string &username, const 
 	if (usernum <= 0) {
 		return -1;
 	}
-	std::string internal = std::to_string(usernum) + "." + display_name;
+	std::string internal = MailboxRoomName(usernum, display_name);
 	auto existing = ScalarP(con, "SELECT room_num FROM citadel_rooms WHERE name = $1", {Value(internal)});
 	if (!existing.IsNull()) {
 		return existing.GetValue<int64_t>();
@@ -476,6 +495,64 @@ void EnsureUserRooms(Connection &con, const std::string &username) {
 			      {Value::BIGINT(d.view), Value::BIGINT(room_num)});
 		}
 	}
+}
+
+namespace {
+
+// is_valid_newsgroup_name() from Citadel's serv_nntp.c.
+bool IsValidNewsgroupName(const std::string &name) {
+	if (name.size() >= 5 && strncasecmp(name.c_str(), "ctdl.", 5) == 0) {
+		return false;
+	}
+	bool has_letter = false;
+	int dots = 0;
+	for (unsigned char c : name) {
+		if (std::isalpha(c)) {
+			has_letter = true;
+		}
+		if (c == '.') {
+			++dots;
+		}
+		if (!(std::isalnum(c) || c == '.' || c == '+' || c == '-')) {
+			return false;
+		}
+	}
+	return has_letter && dots >= 1;
+}
+
+} // namespace
+
+std::string RoomToNewsgroup(const std::string &room_name) {
+	if (IsValidNewsgroupName(room_name)) {
+		return room_name;
+	}
+	std::string out = "ctdl.";
+	char hex[8];
+	for (unsigned char c : room_name) {
+		if (std::isalnum(c) || c == '.' || c == '-') {
+			out += (char)std::tolower(c);
+		} else {
+			std::snprintf(hex, sizeof hex, "+%02x", c);
+			out += hex;
+		}
+	}
+	return out;
+}
+
+std::string NewsgroupToRoom(const std::string &newsgroup) {
+	if (newsgroup.size() < 5 || strncasecmp(newsgroup.c_str(), "ctdl.", 5) != 0) {
+		return newsgroup; // not a converted name; pass through as-is
+	}
+	std::string out;
+	for (size_t i = 5; i < newsgroup.size(); i++) {
+		if (newsgroup[i] == '+' && i + 2 < newsgroup.size()) {
+			out += (char)std::strtol(newsgroup.substr(i + 1, 2).c_str(), nullptr, 16);
+			i += 2;
+		} else {
+			out += newsgroup[i];
+		}
+	}
+	return out;
 }
 
 int64_t RegisterSession(Connection &con, const std::string &client) {

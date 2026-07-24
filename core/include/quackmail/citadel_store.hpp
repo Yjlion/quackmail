@@ -128,6 +128,15 @@ int64_t GetOrCreateMailRoom(duckdb::Connection &con, const std::string &username
 // correct default_view. Idempotent; call on login / user creation.
 void EnsureUserRooms(duckdb::Connection &con, const std::string &username);
 
+// ---- newsgroup naming (NNTP) --------------------------------------------
+// Citadel's room <-> newsgroup mapping (serv_nntp.c). A room name is used
+// verbatim when it is already a valid newsgroup name (no "ctdl." prefix, only
+// [alnum.+-], at least one letter and at least one dot); otherwise it becomes
+// "ctdl." + the lowercased name with every other byte escaped as "+HH".
+std::string RoomToNewsgroup(const std::string &room_name);
+// The inverse: strips "ctdl." and decodes "+HH"; other names pass through.
+std::string NewsgroupToRoom(const std::string &newsgroup);
+
 // ---- live sessions (presence) -------------------------------------------
 // Sessions and instant messages live in DuckDB tables, not in process memory, so
 // every front-end (native Citadel, telnet, XMPP, ...) sees the same presence.
