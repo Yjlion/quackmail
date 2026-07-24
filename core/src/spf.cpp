@@ -506,8 +506,10 @@ Result Evaluate(const std::string &domain, const MacroCtx &ctx_in, Limits &limit
 				explanation = "malformed " + mech + " term in " + domain;
 				return Result::PermError;
 			}
-			int cidr = target.v6 ? (c4 >= 0 ? c4 : -1) : c4;
-			if (PrefixMatch(ctx.ip, target, cidr)) {
+			// ip4/ip6 carry a single prefix length for their own family, which
+			// SplitCidr always returns in cidr4.
+			(void)c6;
+			if (PrefixMatch(ctx.ip, target, c4)) {
 				explanation = "client matched " + raw + " in " + domain;
 				return QualifierToResult(qualifier);
 			}

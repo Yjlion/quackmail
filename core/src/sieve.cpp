@@ -296,8 +296,8 @@ using TestPtr = std::unique_ptr<Test>;
 
 struct Test {
 	enum Kind {
-		TRUE,
-		FALSE,
+		ALWAYS,
+		NEVER,
 		NOT,
 		ANYOF,
 		ALLOF,
@@ -308,7 +308,7 @@ struct Test {
 		SIZE,
 		BODY,
 	};
-	Kind kind = TRUE;
+	Kind kind = ALWAYS;
 	std::vector<TestPtr> children; // NOT/ANYOF/ALLOF
 	std::vector<std::string> names;  // header names / envelope parts
 	std::vector<std::string> keys;   // values to match against
@@ -443,12 +443,12 @@ private:
 		auto test = std::unique_ptr<Test>(new Test());
 
 		if (name == "true") {
-			test->kind = Test::TRUE;
+			test->kind = Test::ALWAYS;
 			out = std::move(test);
 			return true;
 		}
 		if (name == "false") {
-			test->kind = Test::FALSE;
+			test->kind = Test::NEVER;
 			out = std::move(test);
 			return true;
 		}
@@ -736,9 +736,9 @@ bool MatchAny(const std::vector<std::string> &values, const Test &test) {
 
 bool EvalTest(const Test &test, const Context &ctx) {
 	switch (test.kind) {
-	case Test::TRUE:
+	case Test::ALWAYS:
 		return true;
-	case Test::FALSE:
+	case Test::NEVER:
 		return false;
 	case Test::NOT:
 		return test.children.empty() ? false : !EvalTest(*test.children[0], ctx);

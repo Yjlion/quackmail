@@ -349,8 +349,9 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 		break;
 	}
 	case UmbrellaKind::RATE_STATUS: {
-		// Ask for zero additional messages: this reports current usage without
-		// pretending a send is about to happen.
+		// CheckRate always charges at least one message, so `allowed` answers
+		// "could this user send right now?" rather than "are they exactly at
+		// the limit?" — which is the question an admin is actually asking.
 		auto v = quackmail::policy::CheckRate(con, bind.args[0], 0);
 		gstate->rows.push_back({Value(bind.args[0]), Value::BIGINT(v.burst_used),
 		                        Value::BIGINT(v.limit.burst_max), Value::BIGINT(v.daily_used),
@@ -630,8 +631,10 @@ DatabaseInstance &BoundDb(ExpressionState &state) {
 // qm_dkim_sign(message, domain) -> the message with a DKIM-Signature prepended,
 // or NULL when no key is configured for the domain or signing fails.
 void DkimSignScalar(DataChunk &args, ExpressionState &state, Vector &result) {
+	// Read-only: the schema already exists (LoadInternal creates it), and
+	// running DDL from inside an executing query would start a write
+	// transaction underneath the one already in flight.
 	Connection con(BoundDb(state));
-	quackmail::store::EnsureSchema(con);
 
 	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
 	    args.data[0], args.data[1], result, args.size(),
@@ -657,8 +660,7 @@ void DkimSignScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 // signatures passes if any one of them does, which is what RFC 6376 §6.1 says
 // a verifier should conclude.
 void DkimVerifyScalar(DataChunk &args, ExpressionState &state, Vector &result) {
-	Connection con(BoundDb(state));
-	quackmail::store::EnsureSchema(con);
+	Connection con(BoundDb(state)); // read-only; see DkimSignScalar
 	auto lookup = quackmail::policy::DkimKeyLookup(con);
 
 	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t raw) {

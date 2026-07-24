@@ -757,7 +757,7 @@ RateVerdict CheckRate(Connection &con, const std::string &username, int64_t coun
 	                           {Value(username), Value::BIGINT(burst_secs)}));
 	v.daily_used = Int(ScalarP(con,
 	                           "SELECT count(*) FROM quackmail_send_log "
-	                           "WHERE username = $1 AND sent_at > now() - INTERVAL 24 HOUR",
+	                           "WHERE username = $1 AND sent_at > now() - (24 * INTERVAL 1 HOUR)",
 	                           {Value(username)}));
 
 	if (v.limit.burst_max > 0 && v.burst_used + count > v.limit.burst_max) {
@@ -782,7 +782,7 @@ RateVerdict CheckRate(Connection &con, const std::string &username, int64_t coun
 		int64_t oldest = Int(ScalarP(con,
 		                             "SELECT CAST(date_diff('second', min(sent_at), now()) AS BIGINT) "
 		                             "FROM quackmail_send_log WHERE username = $1 "
-		                             "AND sent_at > now() - INTERVAL 24 HOUR",
+		                             "AND sent_at > now() - (24 * INTERVAL 1 HOUR)",
 		                             {Value(username)}));
 		v.retry_after = 86400 - oldest;
 		if (v.retry_after < 1) {
@@ -849,7 +849,7 @@ std::vector<RateLimit> ListRateLimits(Connection &con) {
 
 void PruneSendLog(Connection &con) {
 	// Nothing older than the daily window can affect any quota decision.
-	con.Query("DELETE FROM quackmail_send_log WHERE sent_at < now() - INTERVAL 25 HOUR");
+	con.Query("DELETE FROM quackmail_send_log WHERE sent_at < now() - (25 * INTERVAL 1 HOUR)");
 }
 
 // ---------------------------------------------------------------------------
