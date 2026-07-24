@@ -21,8 +21,8 @@ import duckdb
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 EXT_DIR = os.path.join(REPO, "build", "release", "extension")
 HOST = "127.0.0.1"
-PORT = 15222
-PORT_TLS = 15223
+PORT = 15322
+PORT_TLS = 15323
 
 STREAM = (
     '<stream:stream to="{node}" xmlns="jabber:client" '
