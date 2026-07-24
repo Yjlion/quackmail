@@ -9,6 +9,12 @@ implicit-TLS telnets listener works.
 
 Requires: pip install duckdb==1.5.4
 Run after `make` so the loadable extensions exist under build/release/extension.
+
+Driving the shell by hand with the real client works too, but feed it LF-only
+input: piping CRLF text through `telnet` puts CR NUL CR LF on the wire (two line
+endings per line), which empties the following prompt.
+
+    (printf "leo\\nleo\\nK\\nT\\n"; sleep 4) | telnet 127.0.0.1 2300
 """
 import os
 import socket
