@@ -4,6 +4,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/materialized_query_result.hpp"
 
 #include "quackmail/auth.hpp"
 #include "quackmail/citadel_msg.hpp"
@@ -34,7 +35,8 @@ struct Session {
 	int64_t usernum = 0;
 	int64_t axlevel = 4;
 	bool have_room = false;
-	citadel::Room room; // current room when have_room
+	citadel::Room room;      // current room when have_room
+	int64_t session_id = 0;  // row in citadel_sessions (presence/RWHO)
 };
 
 // Split a command line into an upper-cased 4-char-ish verb + the remainder.
@@ -412,11 +414,89 @@ std::vector<std::string> InfoLines(Connection &con) {
 	};
 }
 
+// ---- presence + instant messages (tables are the bus) --------------------
+
+void ExecParams(Connection &con, const std::string &sql, duckdb::vector<Value> params) {
+	auto stmt = con.Prepare(sql);
+	if (!stmt->HasError()) {
+		stmt->Execute(params, false);
+	}
+}
+
+int64_t RegisterSession(Connection &con) {
+	auto num = con.Query("SELECT nextval('citadel_session_seq')");
+	if (num->HasError() || num->RowCount() < 1) {
+		return 0;
+	}
+	int64_t sid = num->GetValue(0, 0).GetValue<int64_t>();
+	ExecParams(con, "INSERT INTO citadel_sessions (session_id, since, last_seen) VALUES ($1, $2, $2)",
+	           {Value::BIGINT(sid), Value::BIGINT(NowEpoch())});
+	return sid;
+}
+
+void TouchSession(Connection &con, const Session &s, const std::string &last_cmd) {
+	if (s.session_id == 0) {
+		return;
+	}
+	ExecParams(con,
+	           "UPDATE citadel_sessions SET username=$1, room=$2, last_cmd=$3, axlevel=$4, last_seen=$5 "
+	           "WHERE session_id=$6",
+	           {Value(s.username), Value(s.have_room ? s.room.display_name : std::string()), Value(last_cmd),
+	            Value::BIGINT(s.axlevel), Value::BIGINT(NowEpoch()), Value::BIGINT(s.session_id)});
+}
+
+void UnregisterSession(Connection &con, int64_t sid) {
+	if (sid == 0) {
+		return;
+	}
+	ExecParams(con, "DELETE FROM citadel_sessions WHERE session_id=$1", {Value::BIGINT(sid)});
+}
+
+// RWHO listing line: session|user|room|host|client|idletime|lastcmd|.||||flags|axlevel
+std::vector<std::string> WhoLines(Connection &con) {
+	std::vector<std::string> out;
+	auto r = con.Query("SELECT session_id, username, room, last_cmd, axlevel, last_seen "
+	                   "FROM citadel_sessions ORDER BY session_id");
+	if (r->HasError()) {
+		return out;
+	}
+	for (idx_t i = 0; i < r->RowCount(); i++) {
+		std::string user = r->GetValue(1, i).ToString();
+		if (user.empty()) {
+			user = "(not logged in)";
+		}
+		out.push_back(std::to_string(r->GetValue(0, i).GetValue<int64_t>()) + "|" + user + "|" +
+		              r->GetValue(2, i).ToString() + "|localhost|Citadel client protocol|" +
+		              std::to_string(r->GetValue(5, i).GetValue<int64_t>()) + "|" + r->GetValue(3, i).ToString() +
+		              "|.||||1|" + std::to_string(r->GetValue(4, i).GetValue<int64_t>()));
+	}
+	return out;
+}
+
+int64_t ExpressCount(Connection &con, const std::string &user) {
+	if (user.empty()) {
+		return 0;
+	}
+	auto stmt = con.Prepare(
+	    "SELECT count(*) FROM citadel_express WHERE lower(to_user)=lower($1) AND delivered=false");
+	if (stmt->HasError()) {
+		return 0;
+	}
+	duckdb::vector<Value> p = {Value(user)};
+	auto r = stmt->Execute(p, false);
+	if (r->HasError()) {
+		return 0;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	return mat.RowCount() ? mat.GetValue(0, 0).GetValue<int64_t>() : 0;
+}
+
 void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 	Connection con(db);
 	store::EnsureSchema(con);
 
 	Session s;
+	s.session_id = RegisterSession(con);
 	std::string node = citadel::GetConfig(con, "c_nodename", "quackcit");
 	// Greeting must match a real Citadel server's format ("200 <node> Citadel
 	// server ready.") — the official text client parses this line and rejects a
@@ -431,7 +511,8 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 
 		if (verb.empty()) {
 			continue;
-		} else if (verb == "NOOP") {
+		}
+		if (verb == "NOOP") {
 			stream.WriteLine("200 OK");
 		} else if (verb == "ECHO") {
 			stream.WriteLine("200 " + rest);
@@ -439,9 +520,11 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			stream.WriteLine("200 OK");
 		} else if (verb == "QUIT") {
 			stream.WriteLine("200 Goodbye.");
-			return;
+			break;
 		} else if (verb == "LOUT") {
+			int64_t sid = s.session_id;
 			s = Session();
+			s.session_id = sid;
 			stream.WriteLine("200 Logged out.");
 		} else if (verb == "USER") {
 			s.pending_user = rest;
@@ -560,6 +643,89 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			}
 		} else if (verb == "TIME") {
 			stream.WriteLine(TimeLine());
+		} else if (verb == "RWHO") {
+			WriteListing(stream, WhoLines(con));
+		} else if (verb == "SEXP" || verb == "SEND_EXPRESS") {
+			// SEXP <recipient>|<message text>  (page a user an instant message)
+			if (!s.authed) {
+				stream.WriteLine("530 You must log in first.");
+			} else {
+				std::string to = Field(p, 0);
+				std::string text = Field(p, 1);
+				if (to.empty()) {
+					stream.WriteLine("500 Recipient required.");
+				} else if (citadel::GetOrAssignUserNum(con, to) <= 0) {
+					stream.WriteLine("550 No such user.");
+				} else {
+					auto num = con.Query("SELECT nextval('citadel_express_seq')");
+					int64_t id = num->HasError() ? 0 : num->GetValue(0, 0).GetValue<int64_t>();
+					ExecParams(con,
+					           "INSERT INTO citadel_express (id, to_user, from_user, text, sent_at) "
+					           "VALUES ($1, $2, $3, $4, $5)",
+					           {Value::BIGINT(id), Value(to), Value(s.username), Value(text),
+					            Value::BIGINT(NowEpoch())});
+					stream.WriteLine("200 Message sent.");
+				}
+			}
+		} else if (verb == "GEXP") {
+			// Retrieve and clear this user's pending instant messages.
+			if (!s.authed) {
+				stream.WriteLine("530 You must log in first.");
+			} else {
+				auto stmt = con.Prepare("SELECT id, from_user, text, sent_at FROM citadel_express "
+				                        "WHERE lower(to_user)=lower($1) AND delivered=false ORDER BY id");
+				duckdb::vector<Value> pr = {Value(s.username)};
+				auto r = stmt->HasError() ? nullptr : stmt->Execute(pr, false);
+				if (!r || r->HasError() || r->Cast<MaterializedQueryResult>().RowCount() == 0) {
+					stream.WriteLine("511 No messages waiting.");
+				} else {
+					auto &mat = r->Cast<MaterializedQueryResult>();
+					// Deliver the oldest message; header line then body listing.
+					int64_t id = mat.GetValue(0, 0).GetValue<int64_t>();
+					std::string from = mat.GetValue(1, 0).ToString();
+					std::string text = mat.GetValue(2, 0).ToString();
+					int64_t remaining = (int64_t)mat.RowCount() - 1;
+					stream.WriteLine("100 " + std::to_string(remaining) + "|" + std::to_string(NowEpoch()) +
+					                 "|" + from + "|0|");
+					stream.WriteLine(text);
+					stream.WriteLine("000");
+					ExecParams(con, "UPDATE citadel_express SET delivered=true WHERE id=$1", {Value::BIGINT(id)});
+				}
+			}
+		} else if (verb == "CHEK") {
+			// Client status poll: newmail|regis_needed|express_waiting|username
+			int64_t express = ExpressCount(con, s.username);
+			stream.WriteLine("200 0|0|" + std::to_string(express) + "|" + s.username);
+		} else if (verb == "DELE") {
+			// Delete a message from the current room (distinct from KILL = delete room).
+			if (!s.have_room) {
+				stream.WriteLine("540 Not in a room.");
+			} else {
+				int64_t msgnum = ToInt(Field(p, 0), -1);
+				ExecParams(con, "DELETE FROM citadel_room_msgs WHERE room_num=$1 AND msgnum=$2",
+				           {Value::BIGINT(s.room.room_num), Value::BIGINT(msgnum)});
+				stream.WriteLine("200 Message deleted.");
+			}
+		} else if (verb == "MOVE") {
+			// MOVE <msgnum>|<target_room>|<is_copy>  — move/copy a message.
+			if (!s.have_room) {
+				stream.WriteLine("540 Not in a room.");
+			} else {
+				int64_t msgnum = ToInt(Field(p, 0), -1);
+				citadel::Room target;
+				bool is_copy = ToInt(Field(p, 2), 0) != 0;
+				if (!citadel::ResolveRoom(con, s.username, Field(p, 1), target)) {
+					stream.WriteLine("550 No such room.");
+				} else {
+					ExecParams(con, "INSERT OR IGNORE INTO citadel_room_msgs (room_num, msgnum) VALUES ($1, $2)",
+					           {Value::BIGINT(target.room_num), Value::BIGINT(msgnum)});
+					if (!is_copy) {
+						ExecParams(con, "DELETE FROM citadel_room_msgs WHERE room_num=$1 AND msgnum=$2",
+						           {Value::BIGINT(s.room.room_num), Value::BIGINT(msgnum)});
+					}
+					stream.WriteLine("200 Message " + std::string(is_copy ? "copied." : "moved."));
+				}
+			}
 		} else if (verb == "INFO") {
 			WriteListing(stream, InfoLines(con));
 		} else if (verb == "MSGP") {
@@ -571,7 +737,11 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 		} else {
 			stream.WriteLine("500 Unrecognized or unsupported command.");
 		}
+		// Update presence after the command so RWHO reflects the post-login user
+		// and the room just entered.
+		TouchSession(con, s, verb);
 	}
+	UnregisterSession(con, s.session_id);
 }
 
 void LoadInternal(ExtensionLoader &loader) {

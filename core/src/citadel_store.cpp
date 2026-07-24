@@ -168,6 +168,34 @@ void EnsureCitadelSchema(Connection &con) {
 		)
 	)");
 
+	// Cross-session presence (RWHO) and instant messages (SEXP/GEXP). Per the
+	// "tables are the bus" design, live session state lives in DuckDB rather than
+	// shared C++ memory, so any connection/extension sees a consistent view.
+	con.Query("CREATE SEQUENCE IF NOT EXISTS citadel_session_seq START 1");
+	con.Query("CREATE SEQUENCE IF NOT EXISTS citadel_express_seq START 1");
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_sessions (
+			session_id BIGINT PRIMARY KEY,
+			username   VARCHAR DEFAULT '',
+			host       VARCHAR DEFAULT '',
+			room       VARCHAR DEFAULT '',
+			last_cmd   VARCHAR DEFAULT '',
+			axlevel    BIGINT DEFAULT 0,
+			since      BIGINT DEFAULT 0,
+			last_seen  BIGINT DEFAULT 0
+		)
+	)");
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_express (
+			id        BIGINT PRIMARY KEY,
+			to_user   VARCHAR,
+			from_user VARCHAR,
+			text      VARCHAR,
+			sent_at   BIGINT,
+			delivered BOOLEAN DEFAULT false
+		)
+	)");
+
 	// Seed the base floor and system rooms (fixed ids -> idempotent, no seq churn).
 	// These mirror a stock Citadel install's public/system rooms (see LKRA on a
 	// real server: Lobby, Aide, Global Address Book, Trashcan) with matching
