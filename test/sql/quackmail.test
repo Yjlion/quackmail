@@ -12,7 +12,7 @@ require quackmail_imap
 query I
 SELECT version FROM qm_version();
 ----
-QuackCit 0.3.0
+QuackCit 0.3.1
 
 # Adding a user succeeds and is reflected in qm_status
 query II
