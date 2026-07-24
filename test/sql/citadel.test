@@ -6,7 +6,9 @@ require quackmail
 
 require quackmail_citadel
 
-# The schema seeds a base floor (Main Floor) and two system rooms (Lobby, Aide).
+# The schema seeds a base floor (Main Floor) and the stock Citadel system rooms
+# (Lobby, Aide, Global Address Book, Trashcan) so the default room set matches a
+# real Citadel server.
 query I
 SELECT value FROM qm_status() WHERE metric = 'floors';
 ----
@@ -15,7 +17,7 @@ SELECT value FROM qm_status() WHERE metric = 'floors';
 query I
 SELECT value FROM qm_status() WHERE metric = 'rooms';
 ----
-2
+4
 
 # Room numbers below 100 are reserved for system rooms; user rooms start at 100.
 query II
@@ -26,7 +28,7 @@ true	room 100 created
 query I
 SELECT value FROM qm_status() WHERE metric = 'rooms';
 ----
-3
+5
 
 query I
 SELECT display_name FROM citadel_rooms WHERE room_num = 100;

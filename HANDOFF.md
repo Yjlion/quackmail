@@ -22,8 +22,11 @@ Approved plan: deliver as three phased PRs.
 | Phase | Scope | Status |
 |---|---|---|
 | **1. SMTP rework** | inbound MX + authenticated submission + relay drainer | ✅ **done** — PR #6 (`smtp-rework` → `main`) |
-| **2. IMAP expansion** | STARTTLS+AUTHENTICATE, core RFC3501, folders + public rooms, extensions | ⬜ todo |
-| **3. Citadel features** | presence/IM, message ops, admin/config, client niceties | ⬜ todo |
+| **2. IMAP expansion** | STARTTLS+AUTHENTICATE, core RFC3501, folders + public rooms, extensions | ✅ **done** — `citadel-imap-parity` |
+| **3. Citadel features** | presence/IM, message ops, admin/config, client niceties | ✅ **done** (core) — `citadel-imap-parity` |
+
+Phases 2 & 3 were validated for **parity against a real Citadel Groupware
+server** running on `debian.lan` (the oracle) — see "Parity work" below.
 
 Scope guardrails (decided with the user): **ports stay non-privileged dev ports**
 (the module defines the service, the port is just config); **nothing is exposed
@@ -32,9 +35,37 @@ tested against a local sink — no real cert, no live outbound-to-internet).
 
 ## Branch / PR state
 
-- `main` contains the native-client interop fixes (`MSGP`, `GOTO` magic-alias
-  resolution) — PR #5, merged.
-- **PR #6** (`smtp-rework` → `main`): Phase 1 SMTP rework — open.
+- `main` contains Phase 1 SMTP rework (PR #6) and this handoff (PR #7), both merged.
+- **`citadel-imap-parity`**: Phase 2 (IMAP) + Phase 3 (Citadel) parity work, built
+  and verified live against the real Citadel on `debian.lan`.
+
+## Parity work (Phases 2 & 3 — `citadel-imap-parity`)
+
+Goal: QuackCit's Citadel text-client experience and IMAP behaviour match a stock
+Citadel Groupware install. A **real Citadel server on `debian.lan`** was used as
+the live oracle (probe scripts + captured fixtures under `test/parity/`).
+
+Results (verified on the box):
+- **Default rooms/floors** now match exactly — public Lobby/Aide/Global Address
+  Book/Trashcan + per-user Mail/Sent Items/Drafts/Trash/Calendar/Contacts/Notes/
+  Tasks, with the same `qr_flags` (e.g. personal rooms `16390`) and `default_view`.
+  QR_* constants realigned to Citadel's canonical bitmask.
+- **Native protocol**: greeting `200 <node> Citadel server ready.` (the pipe form
+  was rejected by the official client); added TIME, RWHO, SEXP/GEXP, CHEK, DELE,
+  MOVE; presence/IM via `citadel_sessions`/`citadel_express` tables.
+- **IMAP**: STARTTLS + AUTHENTICATE PLAIN/LOGIN, NAMESPACE, LIST/LSUB with
+  `INBOX`/`INBOX/<room>` + `<Floor>/<Room>` naming (byte-identical mailbox set to
+  the oracle), STATUS, real per-room UIDVALIDITY, SEARCH/UID SEARCH, APPEND
+  (APPENDUID), COPY/MOVE, CREATE/DELETE/RENAME, SUBSCRIBE.
+- Tests: `test/integration/test_imap.py` (new) + all existing integration tests +
+  `make test` sqllogictest pass.
+
+Known limitation: a **direct run of the official `citadel` text client against
+QuackCit could not be done on `debian.lan`** — that client hardcodes the Citadel
+TCP port **504** (privileged; owned by the running oracle, and `leo` lacks root to
+rebind it). Parity is instead established at the wire-protocol level (QuackCit's
+responses match the oracle) plus a full real-client session against the real
+server showing the identical room set QuackCit now seeds.
 
 ## Phase 1 — SMTP rework (done, see PR #6)
 
@@ -56,17 +87,36 @@ tested against a local sink — no real cert, no live outbound-to-internet).
 - Tests: `test/integration/test_smtp_in.py` (rewritten), `test_submission.py`,
   `test_relay.py` — all pass alongside `test_citadel.py`.
 
-## Deployment (server: mail.0011110.xyz)
+## Deployment (dev/test box: debian.lan — coexists with the real Citadel oracle)
 
-- SSH: `ssh -i ~/.ssh/quackmail_dev admin@mail.0011110.xyz` (sudo NOPASSWD).
-- Install: `/opt/quackcit/current/` (flat `.duckdb_extension` bundle + `duckdb`
-  CLI); launcher `/opt/quackcit/run_quackcit.py`; **persistent** systemd unit
-  `quackcit.service`. Runtime uses the venv python `~/venv/bin/python` (duckdb
-  1.5.4). DB at `/opt/quackcit/quackcit.duckdb`. Demo user `alice`/`secret`.
+`debian.lan` runs a real Citadel Groupware server (the parity oracle) on the
+standard ports (citadel 504, smtp 25/465/587, pop3 110/995, imap 143/993). **Do
+not stop or reconfigure it.** QuackCit runs side-by-side on high dev ports and its
+own DuckDB file — no collision, no root needed.
+
+- SSH: `ssh -i ~/.ssh/quackcit_dev leo@debian.lan` (config alias `quackcit`).
+  `leo` is in the `sudo` group but `/etc/sudoers` has a typo (`NOPASSED`) that
+  voids the rule, so `leo` effectively has **no sudo** — the whole toolchain is
+  user-local (do not "fix" sudoers; it's a system security file).
+- Toolchain (user-local, no root): `~/venv` with `pip install cmake ninja
+  duckdb==1.5.4` (pip bootstrapped via get-pip.py; Debian strips ensurepip).
+  System already has gcc/g++/git/make + OpenSSL dev headers.
+- Source: `~/quackmail` (branch `citadel-imap-parity`); build with
+  `PATH=~/venv/bin:$PATH GEN=ninja CMAKE_BUILD_PARALLEL_LEVEL=2 make release`
+  (`-j2` keeps peak RAM under the box's 3.8G; first DuckDB build ~20 min,
+  incremental rebuilds are fast).
+- Run: `QUACKCIT_DB=~/quackcit.duckdb ~/venv/bin/python deploy/run_quackcit.py`
+  (launch detached: `nohup setsid ... </dev/null &`). Seeds reference users
+  `admin/admin` (aide) and `leo/leo` to mirror the oracle for diffing.
 - Live ports (all `127.0.0.1`): citadel **5040**, smtp-in **2525**, submission
-  **2587** (STARTTLS), smtps **2465** (implicit TLS), pop3 **1110**, imap
-  **1143**; relay drainer → local sink **2600** (`~/smtp_sink.py`, started via
-  nohup — manual, not systemd).
+  **2587** (STARTTLS), smtps **2465** (implicit TLS), pop3 **1110**, imap **1143**
+  (STARTTLS).
+- Parity probes: `~/parity/cit_probe.py <host> <port> <user> <pass>` (native) and
+  `~/parity/imap_probe.py` (IMAP) — point them at 504/143 (oracle) vs 5040/1143
+  (QuackCit) to diff. Captured oracle fixtures live in `test/parity/real_citadel/`.
+
+  Note: `pkill -f run_quackcit` from an SSH one-liner kills your own shell (the
+  pattern matches the command line) — kill by PID or exclude `$$`.
 - Rollback: prior copies saved as `*.pre-p1bak` / `*.bak` in `/opt/quackcit/current/`.
 
 ## Build & deploy loop (extensions are **Linux-only** — build on the server)
