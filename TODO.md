@@ -43,11 +43,18 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
   - known divergences from the oracle, all deliberate: posting-related
     capabilities/flags, RFC-correct `205` for QUIT (Citadel sends `221`), and
     room ordering in `LIST` (ours follows floor/listorder)
-- [ ] **Phase 4 — XMPP** (`quackmail_xmpp`, 5222 / 5223)
-  - incremental XML stream tokenizer in core (no expat in the extension build)
-  - STARTTLS, SASL PLAIN, legacy `jabber:iq:auth`, bind, session, roster from
-    `citadel_sessions`, presence, `<message>` ↔ `citadel_express`, vcard-temp,
-    ping, disco#info, `503` fallback
+- [x] **Phase 4 — XMPP** (`quackmail_xmpp`, 5222/5223; dev 15222/15223 because
+      the oracle owns 5222 on the test box)
+  - [x] incremental XML stream tokenizer in core (no expat in the extension
+        build) + `net::ClientStream::WaitReadable`/`ReadAvailable` so a session
+        can push unsolicited stanzas
+  - [x] STARTTLS, SASL PLAIN, legacy `jabber:iq:auth`, bind, session, roster and
+        presence from `citadel_sessions`, `<message>` ↔ `citadel_express`,
+        vcard-temp, ping, disco, `503` fallback
+  - [x] verified against the oracle stanza by stanza; XMPP → native `GEXP`
+        confirmed live
+  - [ ] not implemented (Citadel does not have them either): MUC, offline
+        storage, stored rosters/subscriptions, s2s
 
 ## Backlog (carried from the roadmap)
 

@@ -1,0 +1,22 @@
+=== FEATURES ===
+<?xml version="1.0" encoding="UTF-8"?><stream:stream from="debian" id="00000010" version="1.0" xmlns:stream="http://etherx.jabber.org/streams" xmlns="jabber:client"><stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'></starttls><mechanisms xmlns="urn:ietf:params:xml:ns:xmpp-sasl"><mechanism>PLAIN</mechanism></mechanisms><auth xmlns="http://jabber.org/features/iq-auth"/><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"/><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></stream:features>
+=== AUTH ===
+<success xmlns="urn:ietf:params:xml:ns:xmpp-sasl"/>
+=== FEATURES2 ===
+<?xml version="1.0" encoding="UTF-8"?><stream:stream from="debian" id="00000010" version="1.0" xmlns:stream="http://etherx.jabber.org/streams" xmlns="jabber:client"><stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'></starttls><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"/><session xmlns="urn:ietf:params:xml:ns:xmpp-session"/></stream:features>
+=== BIND ===
+<iq type="result" id="b1"><bind xmlns="urn:ietf:params:xml:ns:xmpp-bind"><jid>admin@debian/probe</jid></bind></iq>
+=== SESSION ===
+<iq type="result" id="s1"></iq>
+=== ROSTER ===
+<iq type="result" from="admin@debian" id="r1"><query xmlns="jabber:iq:roster"></query></iq>
+=== PRESENCE ===
+
+=== VCARD ===
+<iq type="result" id="v1" to=""><vCard xmlns="vcard-temp"><fn>admin</fn><nickname>admin</nickname></vCard></iq>
+=== PING ===
+<iq type="result" id="p1"/>
+=== UNKNOWN-NS ===
+<iq type="error" from="debian" id="z1"><error code="503" type="cancel"><service-unavailable xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></iq>
+=== CLOSE ===
+</stream>

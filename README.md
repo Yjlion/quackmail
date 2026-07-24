@@ -43,6 +43,7 @@ extension.
 | `quackmail_pop3` | `qm_pop3_start/_stop/_status`, `qm_pop3s_*` | ✅ POP3 gateway (STLS + implicit TLS) → serves each user's Mail room |
 | `quackmail_imap` | `qm_imap_start/_stop/_status` | ✅ minimal IMAP4rev1 gateway → mailboxes = rooms |
 | `quackmail_nntp` | `qm_nntp_start/_stop/_status`, `qm_nntps_*` | ✅ NNTP reader **and poster** (119/563; dev 1119/1563) — rooms are newsgroups |
+| `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
 | `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
 | `quackmail_managesieve` | `qm_managesieve_start/_stop/_status` | 🚧 stub |
 | `quackmail_smtp_out` | `qm_smtp_out_start/_stop/_status` | 🚧 stub (outbound queue drainer) |
@@ -135,6 +136,20 @@ stored as ordinary Citadel messages, so an article posted over NNTP is readable
 from a Citadel client, the BBS shell, IMAP and POP3. (It also resolves
 `<message-id>` fetches and reports real `:bytes`/`:lines` in `OVER`, both of
 which Citadel punts on.)
+
+## Instant messaging (XMPP)
+
+`quackmail_xmpp` speaks client-to-server XMPP: STARTTLS, SASL `PLAIN` (and the
+legacy `jabber:iq:auth`), resource binding, sessions, `jabber:iq:roster`,
+presence, `vcard-temp`, `urn:xmpp:ping` and service discovery.
+
+Like Citadel, there is no stored roster: **the roster and presence list are the
+people currently logged in** — read from `citadel_sessions`, so XMPP clients,
+telnet users and native Citadel clients all see one another. A `<message>` is
+written to `citadel_express`, the same queue the native protocol's `SEXP`/`GEXP`
+uses, and queued messages are pushed to connected XMPP clients as `<message>`
+stanzas. Sending from XMPP and reading with `GEXP` from a Citadel client (or the
+BBS shell) works in both directions.
 
 ## Mail gateways
 

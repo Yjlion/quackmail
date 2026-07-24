@@ -27,6 +27,15 @@ public:
 	// not line-oriented (telnet option negotiation, XML streams).
 	bool ReadByte(char &c);
 
+	// Read whatever bytes are already available (up to max_bytes), without
+	// waiting for a line terminator. Returns false on EOF/error.
+	bool ReadAvailable(std::string &out, size_t max_bytes = 8192);
+
+	// Wait until input is available or the timeout expires. Returns true when a
+	// subsequent read will not block. Lets a protocol that must also push
+	// unsolicited output (XMPP) wake up periodically.
+	bool WaitReadable(int timeout_ms);
+
 	// Read an SMTP DATA payload: bytes up to a line containing only ".".
 	// Performs dot-unstuffing. Returns false on EOF/error or size overflow.
 	bool ReadDotStuffed(std::string &out, size_t max_bytes);

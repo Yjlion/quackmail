@@ -46,6 +46,11 @@ duckdb_extension_load(quackmail_nntp
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/nntp
 )
 
+# XMPP / XMPPS instant messaging (c2s), bridged to Citadel express messages.
+duckdb_extension_load(quackmail_xmpp
+    SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/xmpp
+)
+
 # Telnet / telnets BBS shell — the Citadel text-client experience, server-side.
 duckdb_extension_load(quackmail_telnet
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/telnet
