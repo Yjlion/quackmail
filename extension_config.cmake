@@ -40,3 +40,8 @@ duckdb_extension_load(quackmail_managesieve
 duckdb_extension_load(quackmail_pop3
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/pop3
 )
+
+# Telnet / telnets BBS shell — the Citadel text-client experience, server-side.
+duckdb_extension_load(quackmail_telnet
+    SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/telnet
+)

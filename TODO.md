@@ -19,15 +19,20 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## Next
 
-- [ ] **Phase 2 — telnet + telnets BBS shell** (`quackmail_telnet`, dev 2300 /
+- [x] **Phase 2 — telnet + telnets BBS shell** (`quackmail_telnet`, dev 2300 /
       2992, real 23/992 — the oracle has no telnet listener, so no collision)
-  - IAC option negotiation + line editing in `core/src/telnet.cpp`
-  - command table mirroring `/usr/local/citadel/citadel.rc`: login/new user,
-    `G`oto, `K`nown rooms, `U`ngoto, read `N`ew/`O`ld/`F`orward/`R`everse/
-    `L`ast five, `E`nter message, `W`ho is online, `P`age a user, `?`Help,
-    `T`erminate, `+`/`-`, and the `.` dot-command dispatcher
-  - parity from `/root/citadel/textclient/*.c` plus a pexpect capture of the real
-    client against the oracle
+  - [x] IAC option negotiation + line editing in `core/src/telnet.cpp`
+  - [x] presence/instant messages moved into core so telnet and native Citadel
+        sessions share the who-list and paging
+  - [x] commands from `citadel.rc`: login/new user, `G`oto, `K`nown rooms,
+        `U`ngoto, `M`ail, read `N`ew/`O`ld/`F`orward/`R`everse/`L`ast five,
+        `E`nter message, `W`ho is online, `P`age a user, `X` expert mode,
+        `?`Help, `T`erminate, and the `.` dot-command dispatcher
+  - [x] verified with the real `telnet` client; message posted over telnet reads
+        back over the native Citadel protocol
+  - [ ] still to fill in from `citadel.rc`: floors, zapped/anonymous/directory
+        room filters, `S`kip semantics distinct from `G`oto, registration/bio,
+        file transfer
 - [ ] **Phase 3 — NNTP + NNTPS** (`quackmail_nntp`, dev 1119 / 1563)
   - reader parity with the oracle (CAPABILITIES, AUTHINFO, LIST ACTIVE/
     NEWSGROUPS/OVERVIEW.FMT, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT, NEXT/LAST,

@@ -10,6 +10,8 @@ require quackmail_imap
 
 require quackmail_pop3
 
+require quackmail_telnet
+
 # Umbrella version + schema-backed status
 query I
 SELECT version FROM qm_version();
@@ -83,5 +85,26 @@ stopped
 
 query I
 SELECT note FROM qm_pop3s_stop();
+----
+stopped
+
+# The telnet BBS shell: plaintext and implicit-TLS listeners.
+query I
+SELECT note FROM qm_telnet_start('127.0.0.1', 12300);
+----
+started
+
+query I
+SELECT note FROM qm_telnets_start('127.0.0.1', 12992, implicit_tls => true);
+----
+started
+
+query I
+SELECT note FROM qm_telnet_stop();
+----
+stopped
+
+query I
+SELECT note FROM qm_telnets_stop();
 ----
 stopped

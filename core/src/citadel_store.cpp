@@ -3,6 +3,7 @@
 #include "duckdb/main/materialized_query_result.hpp"
 
 #include <algorithm>
+#include <ctime>
 #include <string>
 
 namespace quackmail {
@@ -51,6 +52,10 @@ int64_t AsBigint(const Value &v, int64_t dflt = 0) {
 
 std::string AsString(const Value &v) {
 	return v.IsNull() ? std::string() : v.ToString();
+}
+
+int64_t NowEpoch() {
+	return (int64_t)std::time(nullptr);
 }
 
 Room RowToRoom(MaterializedQueryResult &mat, idx_t row) {
@@ -180,11 +185,14 @@ void EnsureCitadelSchema(Connection &con) {
 			host       VARCHAR DEFAULT '',
 			room       VARCHAR DEFAULT '',
 			last_cmd   VARCHAR DEFAULT '',
+			client     VARCHAR DEFAULT '',
 			axlevel    BIGINT DEFAULT 0,
 			since      BIGINT DEFAULT 0,
 			last_seen  BIGINT DEFAULT 0
 		)
 	)");
+	// `client` was added after the table shipped; keep older database files working.
+	con.Query("ALTER TABLE citadel_sessions ADD COLUMN IF NOT EXISTS client VARCHAR DEFAULT ''");
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_express (
 			id        BIGINT PRIMARY KEY,
@@ -468,6 +476,102 @@ void EnsureUserRooms(Connection &con, const std::string &username) {
 			      {Value::BIGINT(d.view), Value::BIGINT(room_num)});
 		}
 	}
+}
+
+int64_t RegisterSession(Connection &con, const std::string &client) {
+	auto sid = ScalarP(con, "SELECT nextval('citadel_session_seq')", {});
+	if (sid.IsNull()) {
+		return 0;
+	}
+	int64_t id = sid.GetValue<int64_t>();
+	ExecP(con,
+	      "INSERT INTO citadel_sessions (session_id, client, since, last_seen) VALUES ($1, $2, $3, $3)",
+	      {Value::BIGINT(id), Value(client), Value::BIGINT(NowEpoch())});
+	return id;
+}
+
+void TouchSession(Connection &con, int64_t session_id, const std::string &username, const std::string &room,
+                  const std::string &last_cmd, int64_t axlevel) {
+	if (session_id == 0) {
+		return;
+	}
+	ExecP(con,
+	      "UPDATE citadel_sessions SET username=$1, room=$2, last_cmd=$3, axlevel=$4, last_seen=$5 "
+	      "WHERE session_id=$6",
+	      {Value(username), Value(room), Value(last_cmd), Value::BIGINT(axlevel), Value::BIGINT(NowEpoch()),
+	       Value::BIGINT(session_id)});
+}
+
+void UnregisterSession(Connection &con, int64_t session_id) {
+	if (session_id == 0) {
+		return;
+	}
+	ExecP(con, "DELETE FROM citadel_sessions WHERE session_id=$1", {Value::BIGINT(session_id)});
+}
+
+std::vector<SessionInfo> ListSessions(Connection &con) {
+	std::vector<SessionInfo> out;
+	auto r = con.Query("SELECT session_id, username, host, room, last_cmd, client, axlevel, since, last_seen "
+	                   "FROM citadel_sessions ORDER BY session_id");
+	if (r->HasError()) {
+		return out;
+	}
+	for (idx_t i = 0; i < r->RowCount(); i++) {
+		SessionInfo s;
+		s.session_id = AsBigint(r->GetValue(0, i));
+		s.username = r->GetValue(1, i).IsNull() ? "" : r->GetValue(1, i).ToString();
+		s.host = r->GetValue(2, i).IsNull() ? "" : r->GetValue(2, i).ToString();
+		s.room = r->GetValue(3, i).IsNull() ? "" : r->GetValue(3, i).ToString();
+		s.last_cmd = r->GetValue(4, i).IsNull() ? "" : r->GetValue(4, i).ToString();
+		s.client = r->GetValue(5, i).IsNull() ? "" : r->GetValue(5, i).ToString();
+		s.axlevel = AsBigint(r->GetValue(6, i));
+		s.since = AsBigint(r->GetValue(7, i));
+		s.last_seen = AsBigint(r->GetValue(8, i));
+		out.push_back(std::move(s));
+	}
+	return out;
+}
+
+bool SendExpress(Connection &con, const std::string &to, const std::string &from, const std::string &text) {
+	if (to.empty() || GetOrAssignUserNum(con, to) <= 0) {
+		return false;
+	}
+	auto id = ScalarP(con, "SELECT nextval('citadel_express_seq')", {});
+	if (id.IsNull()) {
+		return false;
+	}
+	ExecP(con,
+	      "INSERT INTO citadel_express (id, to_user, from_user, text, sent_at) VALUES ($1, $2, $3, $4, $5)",
+	      {id, Value(to), Value(from), Value(text), Value::BIGINT(NowEpoch())});
+	return true;
+}
+
+std::vector<Express> PendingExpress(Connection &con, const std::string &user) {
+	std::vector<Express> out;
+	if (user.empty()) {
+		return out;
+	}
+	auto r = ExecP(con,
+	               "SELECT id, from_user, text, sent_at FROM citadel_express "
+	               "WHERE lower(to_user)=lower($1) AND delivered=false ORDER BY id",
+	               {Value(user)});
+	if (!r) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		Express e;
+		e.id = AsBigint(mat.GetValue(0, i));
+		e.from_user = mat.GetValue(1, i).ToString();
+		e.text = mat.GetValue(2, i).ToString();
+		e.sent_at = AsBigint(mat.GetValue(3, i));
+		out.push_back(std::move(e));
+	}
+	return out;
+}
+
+void MarkExpressDelivered(Connection &con, int64_t id) {
+	ExecP(con, "UPDATE citadel_express SET delivered=true WHERE id=$1", {Value::BIGINT(id)});
 }
 
 RoomStats GetRoomStats(Connection &con, const std::string &username, int64_t room_num) {

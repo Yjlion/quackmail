@@ -89,6 +89,16 @@ bool ClientStream::ReadLine(std::string &line, size_t max_len) {
 	}
 }
 
+bool ClientStream::ReadByte(char &c) {
+	while (rpos_ >= rbuf_.size()) {
+		if (!FillBuffer()) {
+			return false;
+		}
+	}
+	c = rbuf_[rpos_++];
+	return true;
+}
+
 bool ClientStream::ReadDotStuffed(std::string &out, size_t max_bytes) {
 	out.clear();
 	std::string line;

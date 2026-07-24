@@ -42,6 +42,7 @@ extension.
 | `quackmail_smtp_in` | `qm_smtp_in_start/_stop/_status` | ✅ inbound SMTP gateway → delivers into Mail rooms (STARTTLS/implicit TLS + SASL AUTH + Sieve) |
 | `quackmail_pop3` | `qm_pop3_start/_stop/_status`, `qm_pop3s_*` | ✅ POP3 gateway (STLS + implicit TLS) → serves each user's Mail room |
 | `quackmail_imap` | `qm_imap_start/_stop/_status` | ✅ minimal IMAP4rev1 gateway → mailboxes = rooms |
+| `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
 | `quackmail_managesieve` | `qm_managesieve_start/_stop/_status` | 🚧 stub |
 | `quackmail_smtp_out` | `qm_smtp_out_start/_stop/_status` | 🚧 stub (outbound queue drainer) |
 
@@ -91,6 +92,32 @@ listings):
 
 Config-heavy admin verbs (`CONF`, `DOWN`, `SCDN`, `TERM`, `EXPI`), the Citadel
 network mesh, and instant messaging are deferred (see Roadmap).
+
+## The BBS shell (telnet)
+
+A real Citadel install has no telnet listener: the BBS experience comes from the
+`citadel` text client speaking the native protocol. `quackmail_telnet` *is* that
+client, running server-side, so a plain `telnet` gets the BBS — registration and
+login, the `<Room>>` prompt, and the menu from `citadel.rc`:
+
+```
+telnet localhost 2300
+```
+```
+QuackCit BBS - The Cloud
+
+Enter your name (or 'new' to register): alice
+Password:
+
+Lobby>  1 new of 1 messages
+Room cmds:    <K>nown rooms, <G>oto next room, <.G>oto a specific room, ...
+```
+
+Commands: `<G>`oto, `<K>`nown rooms, `<U>`ngoto, `<M>`ail, read `<N>`ew/`<O>`ld/
+`<F>`orward/`<R>`everse/`<L>`ast five, `<E>`nter a message, `<W>`ho is online,
+`<P>`age a user, `<X>` expert mode, `<?>` help, `<T>`erminate, and `.` commands
+(`.Goto <room>`). Sessions register in `citadel_sessions`, so telnet users and
+native Citadel clients see each other in the who-list and can page one another.
 
 ## Mail gateways
 

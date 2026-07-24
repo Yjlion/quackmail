@@ -23,6 +23,10 @@ public:
 	// on EOF/error or if max_len is exceeded.
 	bool ReadLine(std::string &line, size_t max_len = 4096);
 
+	// Read a single byte. Returns false on EOF/error. Used by protocols that are
+	// not line-oriented (telnet option negotiation, XML streams).
+	bool ReadByte(char &c);
+
 	// Read an SMTP DATA payload: bytes up to a line containing only ".".
 	// Performs dot-unstuffing. Returns false on EOF/error or size overflow.
 	bool ReadDotStuffed(std::string &out, size_t max_bytes);

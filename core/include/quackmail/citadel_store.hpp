@@ -128,6 +128,44 @@ int64_t GetOrCreateMailRoom(duckdb::Connection &con, const std::string &username
 // correct default_view. Idempotent; call on login / user creation.
 void EnsureUserRooms(duckdb::Connection &con, const std::string &username);
 
+// ---- live sessions (presence) -------------------------------------------
+// Sessions and instant messages live in DuckDB tables, not in process memory, so
+// every front-end (native Citadel, telnet, XMPP, ...) sees the same presence.
+struct SessionInfo {
+	int64_t session_id = 0;
+	std::string username;
+	std::string host;
+	std::string room;
+	std::string last_cmd;
+	std::string client; // e.g. "Citadel client protocol", "Telnet session"
+	int64_t axlevel = 0;
+	int64_t since = 0;
+	int64_t last_seen = 0;
+};
+
+// Register a connection and return its session id (0 on failure).
+int64_t RegisterSession(duckdb::Connection &con, const std::string &client);
+// Refresh the row after each command (also what makes the session visible in RWHO).
+void TouchSession(duckdb::Connection &con, int64_t session_id, const std::string &username,
+                  const std::string &room, const std::string &last_cmd, int64_t axlevel);
+void UnregisterSession(duckdb::Connection &con, int64_t session_id);
+std::vector<SessionInfo> ListSessions(duckdb::Connection &con);
+
+// ---- express (instant) messages -----------------------------------------
+struct Express {
+	int64_t id = 0;
+	std::string from_user;
+	std::string text;
+	int64_t sent_at = 0;
+};
+
+// Queue an instant message. Returns false if `to` is not a local user.
+bool SendExpress(duckdb::Connection &con, const std::string &to, const std::string &from,
+                 const std::string &text);
+// Undelivered messages for a user, oldest first.
+std::vector<Express> PendingExpress(duckdb::Connection &con, const std::string &user);
+void MarkExpressDelivered(duckdb::Connection &con, int64_t id);
+
 // ---- per-user room read state ------------------------------------------
 RoomStats GetRoomStats(duckdb::Connection &con, const std::string &username, int64_t room_num);
 void SetLastRead(duckdb::Connection &con, const std::string &username, int64_t room_num, int64_t msgnum);
