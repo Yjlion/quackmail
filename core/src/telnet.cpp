@@ -32,37 +32,47 @@ void Session::Negotiate() {
 	Send3(DO, OPT_NAWS);
 }
 
-int Session::GetChar() {
+bool Session::NextByte(unsigned char &u) {
+	if (pushback_ >= 0) {
+		u = (unsigned char)pushback_;
+		pushback_ = -1;
+		return true;
+	}
 	char c;
-	while (stream_.ReadByte(c)) {
-		unsigned char u = (unsigned char)c;
+	if (!stream_.ReadByte(c)) {
+		return false;
+	}
+	u = (unsigned char)c;
+	return true;
+}
+
+int Session::GetChar() {
+	unsigned char u;
+	while (NextByte(u)) {
 
 		if (u == IAC) {
-			char v;
-			if (!stream_.ReadByte(v)) {
+			unsigned char verb;
+			if (!NextByte(verb)) {
 				return -1;
 			}
-			unsigned char verb = (unsigned char)v;
 			if (verb == IAC) {
 				return IAC; // escaped 0xFF is literal data
 			}
 			if (verb == SB) {
 				// Skip the subnegotiation payload up to IAC SE.
-				char p, q;
-				while (stream_.ReadByte(p)) {
-					if ((unsigned char)p == IAC && stream_.ReadByte(q) &&
-					    (unsigned char)q == SE) {
+				unsigned char p, q;
+				while (NextByte(p)) {
+					if (p == IAC && NextByte(q) && q == SE) {
 						break;
 					}
 				}
 				continue;
 			}
 			if (verb == WILL || verb == WONT || verb == DO || verb == DONT) {
-				char o;
-				if (!stream_.ReadByte(o)) {
+				unsigned char opt;
+				if (!NextByte(opt)) {
 					return -1;
 				}
-				unsigned char opt = (unsigned char)o;
 				if (verb == DO) {
 					// The peer wants us to do something. We only ever offer
 					// ECHO and SGA; refuse everything else.
@@ -87,12 +97,27 @@ int Session::GetChar() {
 			continue; // other two-byte commands (NOP, AYT, ...) are ignored
 		}
 
-		// CR LF / CR NUL both mean "end of line": report the CR, swallow the
-		// partner byte on the next call.
+		// CR LF and CR NUL both mean "end of line": report the CR and swallow the
+		// partner byte here. Piping a CRLF file into a telnet client puts CR CR LF
+		// on the wire, which must still count as one line ending — but a genuine
+		// blank line (Enter pressed twice) must not be swallowed, so peek one byte
+		// to tell the two apart.
 		if (pending_cr_) {
 			pending_cr_ = false;
 			if (u == '\n' || u == 0) {
 				continue;
+			}
+			if (u == '\r') {
+				unsigned char next;
+				if (!NextByte(next)) {
+					return -1;
+				}
+				if (next == '\n' || next == 0) {
+					continue; // CR CR LF -> a single terminator
+				}
+				pushback_ = next;
+				pending_cr_ = true;
+				return '\r'; // a real second line ending
 			}
 		}
 		if (u == '\r') {

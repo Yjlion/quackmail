@@ -45,10 +45,13 @@ public:
 
 private:
 	void Send3(unsigned char verb, unsigned char option);
+	// Next raw byte, honouring the pushback slot. False on EOF.
+	bool NextByte(unsigned char &u);
 
 	net::ClientStream &stream_;
 	bool echo_ = false;
 	bool pending_cr_ = false; // a CR was consumed; swallow a following LF/NUL
+	int pushback_ = -1;       // one byte of lookahead (CR CR LF disambiguation)
 };
 
 } // namespace telnet
