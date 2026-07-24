@@ -13,6 +13,7 @@
 #include "quackmail/util.hpp"
 #include "quackmail/xmlstream.hpp"
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -74,9 +75,11 @@ std::string Esc(const std::string &s) {
 
 // The stream header plus the features available at this point in the session.
 void SendStreamHeader(net::ClientStream &stream, const Xmpp &s, ServerController &ctrl, int64_t session_id) {
+	// The stream id is an eight-digit hex session number, as Citadel writes it.
+	char sid[16];
+	std::snprintf(sid, sizeof sid, "%08llx", (unsigned long long)session_id);
 	Send(stream, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-	             "<stream:stream from=\"" + Esc(s.node) + "\" id=\"" +
-	                 std::to_string(session_id) +
+	             "<stream:stream from=\"" + Esc(s.node) + "\" id=\"" + sid +
 	                 "\" version=\"1.0\" xmlns:stream=\"http://etherx.jabber.org/streams\" "
 	                 "xmlns=\"jabber:client\">");
 	Send(stream, "<stream:features>");
