@@ -26,5 +26,17 @@ std::vector<std::string> FormatMsg0(const Message &msg, int mode);
 // (format 0/1) messages, or the first text/* MIME part for RFC822 (format 4).
 std::string BodyText(const Message &msg);
 
+// The RFC2822 Message-ID a Citadel server reports for a stored message:
+// "<XXXXXXXX-<msgnum>@<node>>", where XXXXXXXX is the message time in uppercase
+// hex. Messages that already carry an EUID containing '@' keep it verbatim.
+std::string MessageId(const Message &msg, const std::string &node);
+
+// Render a stored message as RFC822 (the "MT_RFC822" view a real Citadel server
+// serves over POP3/IMAP/NNTP). Format 4 messages are already RFC822 and are
+// returned as-is; native messages get the header block Citadel synthesizes:
+//   Return-Path / Date / Subject / To / References / Message-ID / From
+// followed by a blank line and the body. Lines are CRLF-terminated.
+std::string RenderRfc822(const Message &msg, const std::string &node);
+
 } // namespace citadel
 } // namespace quackmail

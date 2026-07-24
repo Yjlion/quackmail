@@ -8,6 +8,8 @@ require quackmail_smtp_in
 
 require quackmail_imap
 
+require quackmail_pop3
+
 # Umbrella version + schema-backed status
 query I
 SELECT version FROM qm_version();
@@ -54,5 +56,32 @@ started
 
 query I
 SELECT note FROM qm_imap_stop();
+----
+stopped
+
+# POP3 and POP3S are two listeners over one implementation (Citadel's 110/995
+# pair), so both control sets must work independently.
+query I
+SELECT note FROM qm_pop3_start('127.0.0.1', 11100);
+----
+started
+
+query I
+SELECT note FROM qm_pop3s_start('127.0.0.1', 11995, implicit_tls => true);
+----
+started
+
+query II
+SELECT (SELECT running FROM qm_pop3_status()), (SELECT running FROM qm_pop3s_status());
+----
+true	true
+
+query I
+SELECT note FROM qm_pop3_stop();
+----
+stopped
+
+query I
+SELECT note FROM qm_pop3s_stop();
 ----
 stopped

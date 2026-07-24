@@ -40,7 +40,7 @@ extension.
 | `quackmail` (umbrella) | `qm_version`, `qm_status`, `qm_user_add/remove`, `cit_room_add`, `cit_floor_add`, `qm_mime_*`, `qm_parse_date` | schema init, users, room/floor admin, MIME helpers |
 | `quackmail_citadel` | `cit_start/_stop/_status` | ✅ native Citadel protocol (TCP 504; dev default 5040) |
 | `quackmail_smtp_in` | `qm_smtp_in_start/_stop/_status` | ✅ inbound SMTP gateway → delivers into Mail rooms (STARTTLS/implicit TLS + SASL AUTH + Sieve) |
-| `quackmail_pop3` | `qm_pop3_start/_stop/_status` | ✅ POP3 gateway → serves each user's Mail room |
+| `quackmail_pop3` | `qm_pop3_start/_stop/_status`, `qm_pop3s_*` | ✅ POP3 gateway (STLS + implicit TLS) → serves each user's Mail room |
 | `quackmail_imap` | `qm_imap_start/_stop/_status` | ✅ minimal IMAP4rev1 gateway → mailboxes = rooms |
 | `quackmail_managesieve` | `qm_managesieve_start/_stop/_status` | 🚧 stub |
 | `quackmail_smtp_out` | `qm_smtp_out_start/_stop/_status` | 🚧 stub (outbound queue drainer) |
@@ -100,7 +100,10 @@ The standard-protocol extensions are front-ends onto the same room store:
   script, and delivers into their Mail room (or a `fileinto` room) as a
   `format_type = 4` message. AUTH/relay still require STARTTLS + SASL.
 - **`quackmail_pop3`** authenticates a user and serves their Mail room over
-  `USER/PASS/STAT/LIST/UIDL/RETR/DELE/RSET/QUIT`.
+  `USER/PASS/STLS/CAPA/STAT/LIST/UIDL/RETR/TOP/DELE/RSET/NOOP/LAST/QUIT` —
+  the same command set, response wording and UPDATE-state semantics as a stock
+  Citadel POP3 server. Two listeners like Citadel's: `qm_pop3` (110; dev 1110,
+  STLS) and `qm_pop3s` (995; dev 1995, implicit TLS).
 - **`quackmail_imap`** (minimal) maps mailboxes to rooms (`INBOX` → the user's
   Mail room) and supports `LOGIN/LIST/SELECT/FETCH/STORE/EXPUNGE`, reusing the
   `core/` MIME parser for `BODY[...]`/`ENVELOPE`.
