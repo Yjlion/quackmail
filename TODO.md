@@ -33,12 +33,16 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
   - [ ] still to fill in from `citadel.rc`: floors, zapped/anonymous/directory
         room filters, `S`kip semantics distinct from `G`oto, registration/bio,
         file transfer
-- [ ] **Phase 3 — NNTP + NNTPS** (`quackmail_nntp`, dev 1119 / 1563)
-  - reader parity with the oracle (CAPABILITIES, AUTHINFO, LIST ACTIVE/
-    NEWSGROUPS/OVERVIEW.FMT, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT, NEXT/LAST,
-    OVER/XOVER, DATE, HELP, STARTTLS)
-  - port `room_to_newsgroup`/`newsgroup_to_room` and `wildmat.c`
-  - **POST — beyond the oracle**, which answers `500`
+- [x] **Phase 3 — NNTP + NNTPS** (`quackmail_nntp`, dev 1119 / 1563)
+  - [x] reader parity with the oracle (CAPABILITIES, AUTHINFO, LIST ACTIVE/
+        NEWSGROUPS/OVERVIEW.FMT, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT,
+        NEXT/LAST, OVER/XOVER, NEWGROUPS, DATE, HELP, STARTTLS)
+  - [x] `RoomToNewsgroup`/`NewsgroupToRoom` + wildmat in core; personal room keys
+        padded to Citadel's `0000000002.Mail` form so group names match exactly
+  - [x] **POST**, plus `<message-id>` fetches and real `:bytes`/`:lines`
+  - known divergences from the oracle, all deliberate: posting-related
+    capabilities/flags, RFC-correct `205` for QUIT (Citadel sends `221`), and
+    room ordering in `LIST` (ours follows floor/listorder)
 - [ ] **Phase 4 — XMPP** (`quackmail_xmpp`, 5222 / 5223)
   - incremental XML stream tokenizer in core (no expat in the extension build)
   - STARTTLS, SASL PLAIN, legacy `jabber:iq:auth`, bind, session, roster from
