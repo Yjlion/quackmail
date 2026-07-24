@@ -199,8 +199,17 @@ def main():
         ctx.verify_mode = ssl.CERT_NONE
         tls = ctx.wrap_socket(s)
         tls.sendall(b"USER popuser\r\nPASS secret\r\nSTAT\r\nQUIT\r\n")
-        time.sleep(0.3)
-        assert b"is logged in" in tls.recv(4096)
+        tls.settimeout(2)
+        got = b""
+        try:
+            while b"Goodbye" not in got:
+                chunk = tls.recv(4096)
+                if not chunk:
+                    break
+                got += chunk
+        except OSError:
+            pass
+        assert b"is logged in" in got, got
         tls.close()
 
         # --- implicit TLS listener -----------------------------------------
