@@ -62,6 +62,15 @@ int64_t NowEpoch() {
 	return (int64_t)std::time(nullptr);
 }
 
+// A personal room's internal key. Citadel names these "<usernum>.<room>" with
+// the user number zero-padded to ten digits ("0000000002.Mail"), which is what
+// shows up on the wire in NNTP group names, so match it exactly.
+std::string MailboxRoomName(int64_t usernum, const std::string &display_name) {
+	char prefix[16];
+	std::snprintf(prefix, sizeof prefix, "%010lld", (long long)usernum);
+	return std::string(prefix) + "." + display_name;
+}
+
 Room RowToRoom(MaterializedQueryResult &mat, idx_t row) {
 	Room r;
 	r.room_num = AsBigint(mat.GetValue(0, row));
@@ -207,6 +216,13 @@ void EnsureCitadelSchema(Connection &con) {
 			delivered BOOLEAN DEFAULT false
 		)
 	)");
+
+	// Personal room keys used to be "<usernum>.<room>" without padding; Citadel
+	// pads the user number to ten digits and that name is visible over NNTP.
+	con.Query("UPDATE citadel_rooms "
+	          "SET name = lpad(mailbox_owner::VARCHAR, 10, '0') || '.' || display_name "
+	          "WHERE mailbox_owner > 0 "
+	          "  AND name <> lpad(mailbox_owner::VARCHAR, 10, '0') || '.' || display_name");
 
 	// Seed the base floor and system rooms (fixed ids -> idempotent, no seq churn).
 	// These mirror a stock Citadel install's public/system rooms (see LKRA on a
@@ -408,8 +424,7 @@ int64_t CreateRoom(Connection &con, const std::string &display_name, int64_t flo
 		err = "could not allocate room number";
 		return -1;
 	}
-	std::string internal =
-	    mailbox_owner > 0 ? std::to_string(mailbox_owner) + "." + display_name : display_name;
+	std::string internal = mailbox_owner > 0 ? MailboxRoomName(mailbox_owner, display_name) : display_name;
 	auto r = ExecP(con,
 	               "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, password, "
 	               "mailbox_owner) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -442,7 +457,7 @@ int64_t GetOrCreateUserRoom(Connection &con, const std::string &username, const 
 	if (usernum <= 0) {
 		return -1;
 	}
-	std::string internal = std::to_string(usernum) + "." + display_name;
+	std::string internal = MailboxRoomName(usernum, display_name);
 	auto existing = ScalarP(con, "SELECT room_num FROM citadel_rooms WHERE name = $1", {Value(internal)});
 	if (!existing.IsNull()) {
 		return existing.GetValue<int64_t>();
