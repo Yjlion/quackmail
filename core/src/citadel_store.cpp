@@ -3,6 +3,10 @@
 #include "duckdb/main/materialized_query_result.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <string>
 
@@ -476,6 +480,64 @@ void EnsureUserRooms(Connection &con, const std::string &username) {
 			      {Value::BIGINT(d.view), Value::BIGINT(room_num)});
 		}
 	}
+}
+
+namespace {
+
+// is_valid_newsgroup_name() from Citadel's serv_nntp.c.
+bool IsValidNewsgroupName(const std::string &name) {
+	if (name.size() >= 5 && strncasecmp(name.c_str(), "ctdl.", 5) == 0) {
+		return false;
+	}
+	bool has_letter = false;
+	int dots = 0;
+	for (unsigned char c : name) {
+		if (std::isalpha(c)) {
+			has_letter = true;
+		}
+		if (c == '.') {
+			++dots;
+		}
+		if (!(std::isalnum(c) || c == '.' || c == '+' || c == '-')) {
+			return false;
+		}
+	}
+	return has_letter && dots >= 1;
+}
+
+} // namespace
+
+std::string RoomToNewsgroup(const std::string &room_name) {
+	if (IsValidNewsgroupName(room_name)) {
+		return room_name;
+	}
+	std::string out = "ctdl.";
+	char hex[8];
+	for (unsigned char c : room_name) {
+		if (std::isalnum(c) || c == '.' || c == '-') {
+			out += (char)std::tolower(c);
+		} else {
+			std::snprintf(hex, sizeof hex, "+%02x", c);
+			out += hex;
+		}
+	}
+	return out;
+}
+
+std::string NewsgroupToRoom(const std::string &newsgroup) {
+	if (newsgroup.size() < 5 || strncasecmp(newsgroup.c_str(), "ctdl.", 5) != 0) {
+		return newsgroup; // not a converted name; pass through as-is
+	}
+	std::string out;
+	for (size_t i = 5; i < newsgroup.size(); i++) {
+		if (newsgroup[i] == '+' && i + 2 < newsgroup.size()) {
+			out += (char)std::strtol(newsgroup.substr(i + 1, 2).c_str(), nullptr, 16);
+			i += 2;
+		} else {
+			out += newsgroup[i];
+		}
+	}
+	return out;
 }
 
 int64_t RegisterSession(Connection &con, const std::string &client) {

@@ -41,6 +41,11 @@ duckdb_extension_load(quackmail_pop3
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/pop3
 )
 
+# NNTP / NNTPS news reader + poster (rooms are newsgroups).
+duckdb_extension_load(quackmail_nntp
+    SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/nntp
+)
+
 # Telnet / telnets BBS shell — the Citadel text-client experience, server-side.
 duckdb_extension_load(quackmail_telnet
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/telnet
