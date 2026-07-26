@@ -10,16 +10,22 @@
 
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/delivery.hpp"
+#include "quackmail/dkim.hpp"
 #include "quackmail/dns.hpp"
 #include "quackmail/mail_store.hpp"
+#include "quackmail/mailpolicy.hpp"
+#include "quackmail/mime.hpp"
 #include "quackmail/sasl.hpp"
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
 #include "quackmail/smtp_client.hpp"
 #include "quackmail/util.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -62,6 +68,61 @@ void SplitCommand(const std::string &line, std::string &verb, std::string &rest)
 	}
 }
 
+std::string LowerStr(std::string s) {
+	std::transform(s.begin(), s.end(), s.begin(),
+	               [](unsigned char c) { return (char)std::tolower(c); });
+	return s;
+}
+
+std::string DomainOf(const std::string &addr) {
+	auto at = addr.rfind('@');
+	return at == std::string::npos ? "" : LowerStr(addr.substr(at + 1));
+}
+
+std::string RfcDate() {
+	std::time_t now = std::time(nullptr);
+	std::tm tm_utc {};
+	gmtime_r(&now, &tm_utc);
+	char buf[64];
+	std::strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S +0000", &tm_utc);
+	return buf;
+}
+
+// Sign a submitted message with the key for its author domain, if we hold one.
+// The From: header domain is what receivers align against for DMARC, so it is
+// preferred over the envelope sender. Returns the message unchanged when no key
+// is configured — an unsigned message is still deliverable.
+std::string SignOutbound(Connection &con, const std::string &mail_from, const std::string &body) {
+	auto parsed = mime::Parse(body);
+	std::string domain;
+	if (!parsed.from.empty()) {
+		auto addrs = mime::ParseAddressList(parsed.from);
+		for (const auto &a : addrs) {
+			if (!a.addr.empty()) {
+				domain = DomainOf(a.addr);
+				break;
+			}
+		}
+	}
+	if (domain.empty()) {
+		domain = DomainOf(mail_from);
+	}
+	if (domain.empty()) {
+		return body;
+	}
+
+	policy::DkimKey key;
+	if (!policy::DkimKeyFor(con, domain, key) || key.private_key.empty()) {
+		return body;
+	}
+	std::string signed_body, err;
+	if (!dkim::Sign(body, key.domain.empty() ? domain : key.domain, key.selector, key.private_key,
+	                key.headers, signed_body, err)) {
+		return body; // signing failure must not block the mail
+	}
+	return signed_body;
+}
+
 // Authenticated submission (RFC 6409): require SASL AUTH (only after TLS), then
 // accept mail for any destination — deliver local recipients into their rooms
 // and enqueue remote recipients for the relay drainer.
@@ -72,11 +133,15 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 	bool tls_active = stream.IsTls();
 	bool authed = false;
 	std::string auth_user;
+	std::string helo;
 	std::string mail_from;
 	std::vector<std::string> rcpts;
 	bool have_mail = false;
 
-	stream.WriteLine("220 quackmail submission ready");
+	// The FQDN must lead the banner (RFC 5321 §4.2), so use the configured
+	// c_fqdn rather than a literal.
+	stream.WriteLine("220 " + citadel::GetConfig(con, "c_fqdn", "quackmail.test") +
+	                 " ESMTP QuackCit submission ready.");
 
 	std::string line;
 	while (stream.ReadLine(line, 8192)) {
@@ -84,6 +149,7 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 		SplitCommand(line, verb, rest);
 
 		if (verb == "EHLO") {
+			helo = rest;
 			stream.WriteLine("250-quackmail greets " + rest);
 			if (!tls_active && ctrl.StartTlsEnabled()) {
 				stream.WriteLine("250-STARTTLS");
@@ -93,6 +159,7 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 			}
 			stream.WriteLine("250 SIZE " + std::to_string(kMaxMessageBytes));
 		} else if (verb == "HELO") {
+			helo = rest;
 			stream.WriteLine("250 quackmail");
 		} else if (verb == "STARTTLS") {
 			if (tls_active) {
@@ -108,6 +175,7 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 				tls_active = true;
 				authed = false;
 				auth_user.clear();
+				helo.clear();
 				have_mail = false;
 				mail_from.clear();
 				rcpts.clear();
@@ -163,12 +231,37 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 				stream.WriteLine("503 Need MAIL and RCPT before DATA");
 				continue;
 			}
+			// Quota is checked before the message is read, so a user over their
+			// limit is turned away without transferring megabytes first. One
+			// unit is charged per envelope recipient.
+			auto quota = policy::CheckRate(con, auth_user, (int64_t)rcpts.size());
+			if (!quota.allowed) {
+				// 4xx, not 5xx: the message is fine, the user is merely early.
+				stream.WriteLine("451 4.7.1 " + quota.reason + "; retry in " +
+				                 std::to_string(quota.retry_after) + " seconds");
+				have_mail = false;
+				mail_from.clear();
+				rcpts.clear();
+				continue;
+			}
+
 			stream.WriteLine("354 End data with <CR><LF>.<CR><LF>");
 			std::string body;
 			if (!stream.ReadDotStuffed(body, kMaxMessageBytes)) {
 				stream.WriteLine("552 Message too large or read error");
 				return;
 			}
+
+			// Stamp the submission, then sign. Signing last means the
+			// DKIM-Signature sits at the very top, and both the locally
+			// delivered copy and every queued copy carry the same signature.
+			std::string received = "Received: from " + (helo.empty() ? std::string("unknown") : helo) +
+			                       " (submission, authenticated as " + auth_user + ")\r\n\tby " +
+			                       citadel::GetConfig(con, "c_fqdn", "quackmail.test") +
+			                       " (QuackCit) with " + (tls_active ? "ESMTPSA" : "ESMTPA") + ";\r\n\t" +
+			                       RfcDate() + "\r\n";
+			body = SignOutbound(con, mail_from, received + body);
+
 			// Local recipients are delivered directly; remote ones are queued.
 			std::vector<std::string> local_rcpts;
 			for (auto &r : rcpts) {
@@ -182,6 +275,13 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 			bool ok = true;
 			if (!local_rcpts.empty()) {
 				ok = deliver::LocalDeliver(con, mail_from, local_rcpts, body, err);
+			}
+			if (ok) {
+				// Charge the quota only for a message we actually accepted.
+				for (auto &r : rcpts) {
+					policy::RecordSend(con, auth_user, r, 1);
+				}
+				policy::PruneSendLog(con);
 			}
 			stream.WriteLine(ok ? "250 OK: message accepted" : "451 Local storage error");
 			have_mail = false;

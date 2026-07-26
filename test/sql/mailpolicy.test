@@ -1,0 +1,322 @@
+# name: test/sql/mailpolicy.test
+# description: site policy — domains, aliases, ACLs, DNSBL zones, DKIM keys, quotas
+# group: [quackmail]
+#
+# Everything here runs offline: the DKIM round trip verifies through the local
+# key table rather than DNS, which is exactly why dkim::Verify takes an
+# injectable key lookup.
+
+require quackmail
+
+# The policy tables are created by store::EnsureSchema, so simply loading the
+# umbrella is enough.
+query I
+SELECT count(*) FROM quackmail_domains;
+----
+0
+
+# ---- domains --------------------------------------------------------------
+
+query II
+SELECT ok, note FROM qm_domain_add('example.com', 'local');
+----
+true	domain added
+
+query II
+SELECT ok, note FROM qm_domain_add('relay.example', 'relay');
+----
+true	domain added
+
+# An unknown kind is rejected rather than silently stored.
+query II
+SELECT ok, note FROM qm_domain_add('bad.example', 'sometimes');
+----
+false	kind must be 'local' or 'relay'
+
+query III
+SELECT domain, kind, enabled FROM qm_domains() ORDER BY domain;
+----
+example.com	local	true
+relay.example	relay	true
+
+# Adding the same domain again updates it in place instead of duplicating.
+query I
+SELECT count(*) FROM qm_domain_add('example.com', 'relay');
+----
+1
+
+query I
+SELECT kind FROM qm_domains() WHERE domain = 'example.com';
+----
+relay
+
+query II
+SELECT ok, note FROM qm_domain_remove('relay.example');
+----
+true	domain removed
+
+query I
+SELECT count(*) FROM qm_domains();
+----
+1
+
+# ---- aliases --------------------------------------------------------------
+
+query II
+SELECT ok, note FROM qm_alias_add('sales@example.com', 'alice');
+----
+true	alias added
+
+query II
+SELECT ok, note FROM qm_alias_add('sales@example.com', 'bob');
+----
+true	alias added
+
+# A per-domain catch-all.
+query II
+SELECT ok, note FROM qm_alias_add('@example.com', 'admin');
+----
+true	alias added
+
+query I
+SELECT count(*) FROM qm_aliases();
+----
+3
+
+# Removing without a destination drops every mapping for that alias.
+query II
+SELECT ok, note FROM qm_alias_remove('sales@example.com', '');
+----
+true	alias removed
+
+query I
+SELECT count(*) FROM qm_aliases();
+----
+1
+
+# ---- access control -------------------------------------------------------
+
+query II
+SELECT ok, note FROM qm_acl_add('ip', '192.0.2.0/24', 'block', 'noisy range');
+----
+true	rule added
+
+query II
+SELECT ok, note FROM qm_acl_add('ip', '192.0.2.7', 'allow', 'except this host');
+----
+true	rule added
+
+query II
+SELECT ok, note FROM qm_acl_add('sender', '*@spam.example', 'block', '');
+----
+true	rule added
+
+# Scope and action are both validated.
+query II
+SELECT ok, note FROM qm_acl_add('nonsense', 'x', 'block', '');
+----
+false	scope must be one of: ip, sender, domain, rcpt, helo
+
+query II
+SELECT ok, note FROM qm_acl_add('ip', 'x', 'maybe', '');
+----
+false	action must be 'allow' or 'block'
+
+query III
+SELECT scope, pattern, action FROM qm_acl() ORDER BY id;
+----
+ip	192.0.2.0/24	block
+ip	192.0.2.7	allow
+sender	*@spam.example	block
+
+# ---- DNSBL zones ----------------------------------------------------------
+
+# Empty by default: a fresh install queries no third-party blocklist.
+query I
+SELECT count(*) FROM qm_rbl_zones();
+----
+0
+
+query II
+SELECT ok, note FROM qm_rbl_add('zen.spamhaus.org');
+----
+true	zone added
+
+query I
+SELECT zone FROM qm_rbl_zones();
+----
+zen.spamhaus.org
+
+query II
+SELECT ok, note FROM qm_rbl_remove('zen.spamhaus.org');
+----
+true	zone removed
+
+query I
+SELECT count(*) FROM qm_rbl_zones();
+----
+0
+
+# ---- rate limits ----------------------------------------------------------
+
+# The shipped default policy: 100 messages per 300s, 500 per 24h.
+query IIII
+SELECT username, burst_max, burst_secs, daily_max FROM qm_ratelimits();
+----
+(default)	100	300	500
+
+query II
+SELECT ok, note FROM qm_ratelimit_set('alice', 5, 60, 20);
+----
+true	rate limit set
+
+query IIII
+SELECT username, burst_max, burst_secs, daily_max FROM qm_ratelimits() ORDER BY username;
+----
+(default)	100	300	500
+alice	5	60	20
+
+# A user with no row of their own falls back to the default policy.
+query III
+SELECT username, burst_max, daily_max FROM qm_rate_status('carol');
+----
+carol	100	500
+
+# alice's own row wins over the default.
+query IIIII
+SELECT username, burst_used, burst_max, daily_used, daily_max FROM qm_rate_status('alice');
+----
+alice	0	5	0	20
+
+# Nothing sent yet, so she is under quota.
+query I
+SELECT allowed FROM qm_rate_status('alice');
+----
+true
+
+# Enforcement (filling the window and getting refused) is asserted in
+# test/integration/test_smtp_policy.py rather than here. It cannot be tested
+# from sqllogictest: these table functions open their own DuckDB connection,
+# and a row INSERTed by the test harness's connection is not visible to it.
+# The SMTP path is unaffected because a session's CheckRate and RecordSend
+# both run on the one connection the handler opens.
+
+query II
+SELECT ok, note FROM qm_ratelimit_set('alice', 0, 0, 0);
+----
+false	burst_secs must be positive
+
+# ---- DKIM: generate, sign, verify — all without DNS ------------------------
+
+query II
+SELECT ok, dns_name FROM qm_dkim_keygen('example.com', 'mail', 2048);
+----
+true	mail._domainkey.example.com
+
+# The generated record is the one to publish.
+query I
+SELECT dns_record LIKE 'v=DKIM1; k=rsa; p=%' FROM qm_dkim_keygen('signed.example', 'sel1', 2048);
+----
+true
+
+query III
+SELECT domain, selector, algo FROM qm_dkim_keys() ORDER BY domain;
+----
+example.com	mail	rsa-sha256
+signed.example	sel1	rsa-sha256
+
+# A message to sign, in CRLF form as it would arrive over SMTP.
+statement ok
+CREATE TABLE msg AS SELECT
+  'From: alice@signed.example' || chr(13) || chr(10) ||
+  'To: bob@example.net' || chr(13) || chr(10) ||
+  'Subject: hello' || chr(13) || chr(10) ||
+  'Date: Mon, 21 Jul 2026 10:00:00 +0000' || chr(13) || chr(10) ||
+  chr(13) || chr(10) ||
+  'This is the body.' || chr(13) || chr(10) AS raw;
+
+# Signing prepends a DKIM-Signature carrying the signing domain and selector.
+query I
+SELECT qm_dkim_sign(raw, 'signed.example') LIKE 'DKIM-Signature:%d=signed.example%s=sel1%' FROM msg;
+----
+true
+
+# The round trip: sign, then verify against the locally stored public key. No
+# DNS is consulted because policy::DkimKeyLookup finds the key in the table.
+query I
+SELECT qm_dkim_verify(qm_dkim_sign(raw, 'signed.example')) FROM msg;
+----
+pass
+
+# The per-signature breakdown (qm_dkim_verify_detail) cannot be exercised on a
+# signed message here: it is a table function, and DuckDB rejects a subquery as
+# a table function argument. The CLI reaches it with a bound parameter, which is
+# allowed; the unsigned case is asserted with a literal below.
+
+# Tamper with the body and the body hash no longer matches.
+query I
+SELECT qm_dkim_verify(
+  replace(qm_dkim_sign(raw, 'signed.example'), 'This is the body.', 'This is NOT the body.')
+) FROM msg;
+----
+fail
+
+# Tamper with a signed header and the signature itself no longer verifies.
+query I
+SELECT qm_dkim_verify(
+  replace(qm_dkim_sign(raw, 'signed.example'), 'Subject: hello', 'Subject: goodbye')
+) FROM msg;
+----
+fail
+
+# Signing a domain we hold no key for yields NULL rather than a bogus signature.
+query I
+SELECT qm_dkim_sign(raw, 'nokey.example') IS NULL FROM msg;
+----
+true
+
+# An unsigned message verifies to nothing at all.
+query I
+SELECT qm_dkim_verify('From: a@b.example' || chr(13) || chr(10) || chr(13) || chr(10) || 'hi');
+----
+none
+
+query II
+SELECT result, info FROM qm_dkim_verify_detail('From: a@b.example');
+----
+none	no DKIM-Signature
+
+query II
+SELECT ok, note FROM qm_dkim_key_remove('example.com', 'mail');
+----
+true	key removed
+
+# ---- enforcement toggles --------------------------------------------------
+#
+# The shipped posture: stamp every result, but reject only on the sender's own
+# DMARC policy or an explicit DNSBL listing.
+
+query II
+SELECT name, value FROM qm_config_get('qm_dmarc_enforce');
+----
+qm_dmarc_enforce	1
+
+query II
+SELECT name, value FROM qm_config_get('qm_spf_reject');
+----
+qm_spf_reject	0
+
+query II
+SELECT name, value FROM qm_config_get('qm_rbl_reject');
+----
+qm_rbl_reject	1
+
+query II
+SELECT ok, note FROM qm_config_set('qm_spf_reject', '1');
+----
+true	config set
+
+query II
+SELECT name, value FROM qm_config_get('qm_spf_reject');
+----
+qm_spf_reject	1

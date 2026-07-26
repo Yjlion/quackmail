@@ -37,16 +37,16 @@ extension.
 
 | Extension | Functions | Role |
 |---|---|---|
-| `quackmail` (umbrella) | `qm_version`, `qm_status`, `qm_user_add/remove`, `cit_room_add`, `cit_floor_add`, `qm_mime_*`, `qm_parse_date` | schema init, users, room/floor admin, MIME helpers |
+| `quackmail` (umbrella) | `qm_version`, `qm_status`, `qm_user_add/remove`, `cit_room_add`, `cit_floor_add`, `qm_mime_*`, `qm_parse_date`, and the site-policy admin functions (`qm_domain_*`, `qm_alias_*`, `qm_acl_*`, `qm_rbl_*`, `qm_dkim_*`, `qm_ratelimit_*`, `qm_config_*`) | schema init, users, room/floor admin, MIME helpers, policy administration |
 | `quackmail_citadel` | `cit_start/_stop/_status` | ✅ native Citadel protocol (TCP 504; dev default 5040) |
-| `quackmail_smtp_in` | `qm_smtp_in_start/_stop/_status` | ✅ inbound SMTP gateway → delivers into Mail rooms (STARTTLS/implicit TLS + SASL AUTH + Sieve) |
+| `quackmail_smtp_in` | `qm_smtp_in_start/_stop/_status`, `qm_lmtp_*` | ✅ inbound MX with SPF/DKIM/DMARC/DNSBL, hosted domains, aliases and allow/block rules — plus an LMTP local-injection listener (24; dev 2033) |
+| `quackmail_smtp_out` | `qm_smtp_submission_start/_stop/_status`, `qm_smtp_smtps_*`, `qm_smtp_relay_*` | ✅ authenticated submission (587/465; dev 2587/2465) with DKIM signing and per-user rate limiting, plus the outbound queue drainer |
 | `quackmail_pop3` | `qm_pop3_start/_stop/_status`, `qm_pop3s_*` | ✅ POP3 gateway (STLS + implicit TLS) → serves each user's Mail room |
 | `quackmail_imap` | `qm_imap_start/_stop/_status` | ✅ minimal IMAP4rev1 gateway → mailboxes = rooms |
+| `quackmail_managesieve` | `qm_managesieve_start/_stop/_status` | ✅ ManageSieve (RFC 5804, port 4190) — install the Sieve filters the delivery path applies |
 | `quackmail_nntp` | `qm_nntp_start/_stop/_status`, `qm_nntps_*` | ✅ NNTP reader **and poster** (119/563; dev 1119/1563) — rooms are newsgroups |
 | `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
 | `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
-| `quackmail_managesieve` | `qm_managesieve_start/_stop/_status` | 🚧 stub |
-| `quackmail_smtp_out` | `qm_smtp_out_start/_stop/_status` | 🚧 stub (outbound queue drainer) |
 
 `*_start(host, port)` also accepts named params: `tls_cert`, `tls_key`,
 `implicit_tls`, `starttls`. With `starttls => true` and no cert paths, a
@@ -77,6 +77,91 @@ be pointed into several rooms). Created idempotently on load by
 
 Also present: `quackmail_users` (credentials), `quackmail_sieve_scripts`,
 `quackmail_outbound` (relay queue).
+
+### Site policy
+
+Mail policy is a second set of tables, created alongside the rest and read by
+both SMTP front-ends. All of it is empty by default: a fresh install accepts
+mail only for `c_fqdn`, queries no blocklist, and signs nothing.
+
+| Table | Purpose |
+|---|---|
+| `quackmail_domains` | Domains we accept mail for beyond `c_fqdn`: `kind` is `local` (deliver here) or `relay`, plus the default `dkim_selector`. |
+| `quackmail_aliases` | `alias` → `destination`. Several rows for one alias fan out to several users; `@example.com` is that domain's catch-all. A destination that is not a local user is **forwarded** onto the outbound queue — not open relay, since the mail is addressed to a domain we host and an admin configured that target explicitly. Chains are followed, with a depth cap so a cycle cannot hang `RCPT`. |
+| `quackmail_acl` | Allow/block rules over `scope` ∈ {`ip`, `sender`, `domain`, `rcpt`, `helo`}. Patterns are globs; `ip` also takes CIDR. **Allow always beats block**, so a narrow allow carves an exception out of a broad block. |
+| `quackmail_rbl_zones` | DNSBL zones to query, in order. Empty by default — blocklist checking is opt-in. |
+| `quackmail_dkim_keys` | Outbound signing keys. The private half is stored here, so the database file's permissions are the security boundary for it. |
+| `quackmail_rate_limits` | Per-user send quotas; the row with an empty username is the default (100 per 300 s, 500 per 24 h). |
+| `quackmail_send_log` | The sliding window the limiter counts over. |
+| `quackmail_inbound_log` | What the inbound checks decided, per recipient: SPF/DKIM/DMARC/DNSBL verdicts and the disposition. |
+
+## Mail authentication
+
+### Inbound
+
+`quackmail_smtp_in` runs each check at the protocol stage where it belongs: the
+IP rules at connect, the HELO rule at EHLO, SPF at `MAIL FROM`, the recipient
+rules and the DNSBL at `RCPT TO` (deferred so an allow-listed recipient such as
+postmaster stays reachable from a listed address), and DKIM + DMARC over the
+message bytes exactly as received. Every accepted message is then stamped with
+`Received:`, `Authentication-Results:` and `Received-SPF:` — prepended *after*
+verification, so they cannot disturb a signature.
+
+The shipped posture is to report everything and reject little:
+
+| Config key | Default | Effect |
+|---|---|---|
+| `qm_dmarc_enforce` | `1` | honour the sender's own published policy: `p=reject` → 550, `p=quarantine` → filed into `qm_quarantine_room` |
+| `qm_rbl_reject` | `1` | refuse a client listed by a configured DNSBL (none are configured by default) |
+| `qm_spf_reject` | `0` | SPF hard-fail alone does not reject — forwarded mail fails SPF routinely |
+| `qm_dkim_reject` | `0` | a broken signature alone does not reject; DMARC decides what it means |
+| `qm_quarantine_room` | `Junk` | where quarantined mail is filed |
+
+Change any of them with `quackcitadm.sh config set qm_spf_reject 1`.
+
+*Known limitation:* no Public Suffix List is bundled, so DMARC's organizational
+domain is approximated as the last two labels plus a table of common
+multi-label suffixes (`co.uk`, `com.au`, …). Under an unlisted multi-label
+suffix, relaxed alignment comes out stricter than a PSL-backed implementation —
+never looser, so it cannot turn a Fail into a Pass.
+
+### Outbound
+
+Submitted mail is signed with the key for its `From:` header domain (falling
+back to the envelope sender's domain, then to the organizational domain, so one
+key covers subdomains). Signing happens once at submission, so the locally
+delivered copy and every queued copy carry the same signature.
+
+```bash
+deploy/quackcitadm.sh dkim keygen example.com mail
+```
+
+That generates a 2048-bit key, stores it, and prints the TXT record to publish
+at `mail._domainkey.example.com`. Confirm it with
+`dig +short TXT mail._domainkey.example.com`, then check a signed message with
+`deploy/quackcitadm.sh dkim verify /path/to/message.eml`.
+
+Rate limiting charges **one unit per envelope recipient**, so a message to 50
+addresses spends 50. Over-quota submissions get `451` — transient, so a
+well-behaved client retries rather than bouncing the mail.
+
+```bash
+deploy/quackcitadm.sh ratelimit set '' 100 300 500   # the default policy
+deploy/quackcitadm.sh ratelimit set bulkmailer 500 300 5000
+deploy/quackcitadm.sh ratelimit status alice
+```
+
+### LMTP
+
+`qm_lmtp_start` opens an RFC 2033 listener for **trusted local injection**. It
+greets with `LHLO`, emits one reply per recipient after `DATA`, and **performs
+no sender authentication and no spam filtering at all** — no SPF, DKIM, DMARC,
+DNSBL or access rules. Domain routing, alias expansion and the recipient's
+Sieve filter still apply, because those are addressing rather than filtering.
+
+Anything that can reach this socket can inject mail as anyone. It binds to
+loopback regardless of `QUACKCIT_HOST` unless `QUACKCIT_HOST_LMTP` overrides it.
+Do not expose it.
 
 ## Native Citadel protocol
 
@@ -155,9 +240,15 @@ BBS shell) works in both directions.
 
 The standard-protocol extensions are front-ends onto the same room store:
 
-- **`quackmail_smtp_in`** parses each inbound message, runs the recipient's Sieve
+- **`quackmail_smtp_in`** authenticates the sender (SPF/DKIM/DMARC/DNSBL), routes
+  the recipient through the hosted-domain and alias tables, runs their Sieve
   script, and delivers into their Mail room (or a `fileinto` room) as a
-  `format_type = 4` message. AUTH/relay still require STARTTLS + SASL.
+  `format_type = 4` message. See [Mail authentication](#mail-authentication).
+  It offers no AUTH and never relays — submission lives in `quackmail_smtp_out`.
+- **`quackmail_managesieve`** lets users install those Sieve scripts over RFC
+  5804 (`PUTSCRIPT`/`SETACTIVE`/`GETSCRIPT`/…), validating each one against the
+  same parser the delivery path uses, so a script that installs is a script
+  that runs.
 - **`quackmail_pop3`** authenticates a user and serves their Mail room over
   `USER/PASS/STLS/CAPA/STAT/LIST/UIDL/RETR/TOP/DELE/RSET/NOOP/LAST/QUIT` —
   the same command set, response wording and UPDATE-state semantics as a stock
@@ -259,14 +350,63 @@ CALL qm_smtp_in_start('127.0.0.1', 2525, starttls => true);
 CALL qm_pop3_start('127.0.0.1', 1110);
 ```
 
+## Running and administering a server
+
+`deploy/` has two scripts. Both read `deploy/quackcit.conf` (override the path
+with `QUACKCIT_CONF`), where the database location, bind address, TLS material
+and every port live. Values already in the environment win, so one-off
+overrides work.
+
+```bash
+deploy/quackcit.sh start          # background, PID file, log file
+deploy/quackcit.sh status
+deploy/quackcit.sh logs 100
+deploy/quackcit.sh stop
+
+QUACKCIT_PORT_SMTP_IN=25 deploy/quackcit.sh foreground   # run in this terminal
+```
+
+`quackcitadm.sh` administers the server — users, domains, aliases, access
+rules, DKIM keys, quotas, Sieve scripts, the outbound queue and server config:
+
+```bash
+deploy/quackcitadm.sh user add alice s3cret
+deploy/quackcitadm.sh domain add example.com
+deploy/quackcitadm.sh alias add sales@example.com alice
+deploy/quackcitadm.sh alias add @example.com catchall     # domain catch-all
+deploy/quackcitadm.sh acl block ip 192.0.2.0/24 'noisy range'
+deploy/quackcitadm.sh acl allow ip 192.0.2.7 'except this host'
+deploy/quackcitadm.sh rbl add zen.spamhaus.org
+deploy/quackcitadm.sh dkim keygen example.com mail
+deploy/quackcitadm.sh ratelimit status alice
+deploy/quackcitadm.sh queue list
+deploy/quackcitadm.sh help
+```
+
+It works whether or not the server is running. **DuckDB allows a single
+read-write process per database file**, so while the server holds it the script
+cannot simply open the file; it sends the statement over the launcher's admin
+socket instead, and falls back to opening the database directly when the server
+is stopped. That socket accepts arbitrary SQL, so it is created mode 0600 and
+should not live on a shared filesystem.
+
 ## Tests
 
 ```bash
-make test                                   # sqllogictest: load/start/stop/status, admin fns, MIME
+make test                                   # sqllogictest: load/start/stop/status, admin fns, MIME,
+                                            #   site policy (test/sql/mailpolicy.test) and the
+                                            #   Sieve parser (test/sql/sieve.test)
 pip install duckdb==1.5.4
-python3 test/integration/test_citadel.py    # native protocol: NEWU->GOTO->ENT0->MSGS->MSG0
-python3 test/integration/test_smtp_in.py    # SMTP STARTTLS+AUTH delivery -> Mail room -> POP3 RETR
+python3 test/integration/test_citadel.py     # native protocol: NEWU->GOTO->ENT0->MSGS->MSG0
+python3 test/integration/test_smtp_in.py     # MX: recipient validation, domains, aliases, ACLs -> POP3
+python3 test/integration/test_smtp_policy.py # outbound DKIM signing + per-user rate limiting
+python3 test/integration/test_lmtp.py        # LMTP per-recipient replies, no spam checks
+python3 test/integration/test_managesieve.py # ManageSieve round trip, then the filter routes delivery
 ```
+
+The DKIM tests run entirely offline: `dkim::Verify` takes an injectable key
+lookup, and `policy::DkimKeyLookup` resolves locally stored keys before falling
+back to DNS, so a sign→verify round trip needs no resolver.
 
 ## Roadmap
 
@@ -275,8 +415,12 @@ python3 test/integration/test_smtp_in.py    # SMTP STARTTLS+AUTH delivery -> Mai
 - **Citadel breadth**: `CONF`/config verbs, message expiry/purge (`EXPI`),
   instant messaging (`SEXP`/`GEXP`), address books / vCard rooms, and the
   Citadel network mesh (inter-node message replication).
-- **SMTP/LMTP**: LMTP (2033), submission (6409), enhanced codes (2034),
-  pipelining (2920), CHUNKING/BDAT (3030), 8BITMIME (6152), and the `smtp_out`
-  relay/queue drainer.
-- **Hardening**: SCRAM-SHA-256 SASL (5802/7677), bcrypt/argon2 hashing, the full
-  Sieve feature set, charset transcoding beyond UTF-8/Latin-1, and DKIM/SPF/DMARC.
+- **SMTP**: PIPELINING (2920), CHUNKING/BDAT (3030), and DSN (3461).
+- **Mail authentication depth**: a bundled Public Suffix List for exact DMARC
+  organizational-domain resolution, DMARC aggregate (`rua`) reporting, ARC
+  (8617) so forwarded mail survives, and MTA-STS / DANE for outbound transport.
+- **Hardening**: SCRAM-SHA-256 SASL (5802/7677), bcrypt/argon2 hashing, and
+  charset transcoding beyond UTF-8/Latin-1.
+- **Sieve**: the variables (5229), regex, vacation (5230) and imap4flags (5232)
+  extensions; the parser covers the RFC 5228 core plus `reject`, `envelope`,
+  `body` and `copy` today.

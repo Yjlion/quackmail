@@ -3,15 +3,27 @@
 #include "quackmail_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/common/vector_operations/binary_executor.hpp"
+#include "duckdb/common/vector_operations/unary_executor.hpp"
+#include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 
 #include "quackmail/auth.hpp"
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/dkim.hpp"
+#include "quackmail/dmarc.hpp"
 #include "quackmail/mail_store.hpp"
+#include "quackmail/mailpolicy.hpp"
 #include "quackmail/mime.hpp"
+#include "quackmail/rbl.hpp"
+#include "quackmail/sieve.hpp"
+#include "quackmail/spf.hpp"
 
+#include <cstdlib>
 #include <ctime>
+#include <vector>
 
 namespace duckdb {
 
@@ -30,6 +42,34 @@ enum class UmbrellaKind {
 	MIME_PARTS,
 	CIT_ROOM_ADD,
 	CIT_FLOOR_ADD,
+	// Site policy administration — what the deploy/quackcitadm.sh CLI drives.
+	DOMAIN_ADD,
+	DOMAIN_REMOVE,
+	DOMAIN_LIST,
+	ALIAS_ADD,
+	ALIAS_REMOVE,
+	ALIAS_LIST,
+	ACL_ADD,
+	ACL_REMOVE,
+	ACL_LIST,
+	RBL_ADD,
+	RBL_REMOVE,
+	RBL_LIST,
+	RBL_CHECK,
+	DKIM_KEYGEN,
+	DKIM_KEY_ADD,
+	DKIM_KEY_REMOVE,
+	DKIM_KEY_LIST,
+	DKIM_VERIFY,
+	RATELIMIT_SET,
+	RATELIMIT_LIST,
+	RATE_STATUS,
+	SPF_CHECK,
+	DMARC_CHECK,
+	SIEVE_CHECK,
+	CONFIG_GET,
+	CONFIG_SET,
+	CONFIG_LIST,
 };
 
 struct RowsBindData : public FunctionData {
@@ -144,6 +184,231 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 			gstate->rows.push_back({Value(p.section), Value(p.content_type), Value(p.charset),
 			                        Value(p.encoding), Value::BIGINT(p.size_bytes), Value(p.filename),
 			                        Value(p.content)});
+		}
+		break;
+	}
+
+	// ---- domains --------------------------------------------------------
+	case UmbrellaKind::DOMAIN_ADD: {
+		std::string err;
+		bool ok = quackmail::policy::AddDomain(con, bind.args[0], bind.args[1], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "domain added" : err)});
+		break;
+	}
+	case UmbrellaKind::DOMAIN_REMOVE: {
+		std::string err;
+		bool ok = quackmail::policy::RemoveDomain(con, bind.args[0], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "domain removed" : err)});
+		break;
+	}
+	case UmbrellaKind::DOMAIN_LIST: {
+		for (auto &d : quackmail::policy::ListDomains(con)) {
+			gstate->rows.push_back({Value(d.domain), Value(d.kind), Value::BOOLEAN(d.enabled),
+			                        Value(d.dkim_selector), Value(d.note)});
+		}
+		break;
+	}
+
+	// ---- aliases --------------------------------------------------------
+	case UmbrellaKind::ALIAS_ADD: {
+		std::string err;
+		bool ok = quackmail::policy::AddAlias(con, bind.args[0], bind.args[1], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "alias added" : err)});
+		break;
+	}
+	case UmbrellaKind::ALIAS_REMOVE: {
+		std::string err;
+		bool ok = quackmail::policy::RemoveAlias(con, bind.args[0], bind.args[1], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "alias removed" : err)});
+		break;
+	}
+	case UmbrellaKind::ALIAS_LIST: {
+		auto r = con.Query("SELECT alias, destination, enabled FROM quackmail_aliases ORDER BY alias");
+		if (!r->HasError()) {
+			for (idx_t i = 0; i < r->RowCount(); i++) {
+				gstate->rows.push_back({r->GetValue(0, i), r->GetValue(1, i), r->GetValue(2, i)});
+			}
+		}
+		break;
+	}
+
+	// ---- access control -------------------------------------------------
+	case UmbrellaKind::ACL_ADD: {
+		std::string err;
+		bool ok = quackmail::policy::AddAcl(con, bind.args[0], bind.args[1], bind.args[2],
+		                                    bind.args.size() > 3 ? bind.args[3] : "", err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "rule added" : err)});
+		break;
+	}
+	case UmbrellaKind::ACL_REMOVE: {
+		std::string err;
+		bool ok = quackmail::policy::RemoveAcl(con, std::atoll(bind.args[0].c_str()), err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "rule removed" : err)});
+		break;
+	}
+	case UmbrellaKind::ACL_LIST: {
+		auto r = con.Query("SELECT id, scope, pattern, action, enabled, note FROM quackmail_acl "
+		                   "ORDER BY id");
+		if (!r->HasError()) {
+			for (idx_t i = 0; i < r->RowCount(); i++) {
+				gstate->rows.push_back({r->GetValue(0, i), r->GetValue(1, i), r->GetValue(2, i),
+				                        r->GetValue(3, i), r->GetValue(4, i), r->GetValue(5, i)});
+			}
+		}
+		break;
+	}
+
+	// ---- DNSBL ----------------------------------------------------------
+	case UmbrellaKind::RBL_ADD: {
+		std::string err;
+		bool ok = quackmail::policy::AddRblZone(con, bind.args[0], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "zone added" : err)});
+		break;
+	}
+	case UmbrellaKind::RBL_REMOVE: {
+		std::string err;
+		bool ok = quackmail::policy::RemoveRblZone(con, bind.args[0], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "zone removed" : err)});
+		break;
+	}
+	case UmbrellaKind::RBL_LIST: {
+		for (auto &z : quackmail::policy::RblZones(con)) {
+			gstate->rows.push_back({Value(z)});
+		}
+		break;
+	}
+	case UmbrellaKind::RBL_CHECK: {
+		quackmail::rbl::Hit hit;
+		quackmail::rbl::Check(bind.args[0], quackmail::policy::RblZones(con), hit);
+		gstate->rows.push_back(
+		    {Value::BOOLEAN(hit.listed), Value(hit.zone), Value(hit.code), Value(hit.reason)});
+		break;
+	}
+
+	// ---- DKIM -----------------------------------------------------------
+	case UmbrellaKind::DKIM_KEYGEN: {
+		std::string dns_record, err;
+		int bits = bind.args.size() > 2 ? std::atoi(bind.args[2].c_str()) : 2048;
+		bool ok = quackmail::policy::GenerateDkimKey(con, bind.args[0], bind.args[1], bits, dns_record,
+		                                             err);
+		// The DNS name is returned alongside the record so the value can be
+		// pasted straight into a zone file.
+		gstate->rows.push_back({Value::BOOLEAN(ok),
+		                        Value(bind.args[1] + "._domainkey." + bind.args[0]),
+		                        Value(ok ? dns_record : err)});
+		break;
+	}
+	case UmbrellaKind::DKIM_KEY_ADD: {
+		std::string err;
+		bool ok = quackmail::policy::AddDkimKey(con, bind.args[0], bind.args[1], bind.args[2], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "key stored" : err)});
+		break;
+	}
+	case UmbrellaKind::DKIM_KEY_REMOVE: {
+		std::string err;
+		bool ok = quackmail::policy::RemoveDkimKey(con, bind.args[0], bind.args[1], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "key removed" : err)});
+		break;
+	}
+	case UmbrellaKind::DKIM_KEY_LIST: {
+		// The private half is deliberately never returned here.
+		for (auto &k : quackmail::policy::ListDkimKeys(con)) {
+			gstate->rows.push_back({Value(k.domain), Value(k.selector), Value(k.algo),
+			                        Value::BOOLEAN(k.enabled),
+			                        Value(quackmail::dkim::DnsRecord(k.public_key))});
+		}
+		break;
+	}
+	case UmbrellaKind::DKIM_VERIFY: {
+		auto results = quackmail::dkim::Verify(bind.args[0], quackmail::policy::DkimKeyLookup(con));
+		if (results.empty()) {
+			gstate->rows.push_back({Value("none"), Value(""), Value(""), Value("no DKIM-Signature")});
+		}
+		for (auto &r : results) {
+			gstate->rows.push_back({Value(quackmail::dkim::ResultName(r.result)), Value(r.domain),
+			                        Value(r.selector), Value(r.info)});
+		}
+		break;
+	}
+
+	// ---- rate limits ----------------------------------------------------
+	case UmbrellaKind::RATELIMIT_SET: {
+		std::string err;
+		bool ok = quackmail::policy::SetRateLimit(con, bind.args[0], std::atoll(bind.args[1].c_str()),
+		                                          std::atoll(bind.args[2].c_str()),
+		                                          std::atoll(bind.args[3].c_str()), err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "rate limit set" : err)});
+		break;
+	}
+	case UmbrellaKind::RATELIMIT_LIST: {
+		for (auto &rl : quackmail::policy::ListRateLimits(con)) {
+			gstate->rows.push_back({Value(rl.username.empty() ? "(default)" : rl.username),
+			                        Value::BIGINT(rl.burst_max), Value::BIGINT(rl.burst_secs),
+			                        Value::BIGINT(rl.daily_max), Value::BOOLEAN(rl.enabled)});
+		}
+		break;
+	}
+	case UmbrellaKind::RATE_STATUS: {
+		// CheckRate always charges at least one message, so `allowed` answers
+		// "could this user send right now?" rather than "are they exactly at
+		// the limit?" — which is the question an admin is actually asking.
+		auto v = quackmail::policy::CheckRate(con, bind.args[0], 0);
+		gstate->rows.push_back({Value(bind.args[0]), Value::BIGINT(v.burst_used),
+		                        Value::BIGINT(v.limit.burst_max), Value::BIGINT(v.daily_used),
+		                        Value::BIGINT(v.limit.daily_max), Value::BOOLEAN(v.allowed),
+		                        Value(v.reason)});
+		break;
+	}
+
+	// ---- diagnostics ----------------------------------------------------
+	case UmbrellaKind::SPF_CHECK: {
+		quackmail::spf::Eval eval;
+		quackmail::spf::Check(bind.args[0], bind.args[1], bind.args[2], eval);
+		gstate->rows.push_back({Value(quackmail::spf::ResultName(eval.result)), Value(eval.domain),
+		                        Value(eval.explanation), Value(eval.record)});
+		break;
+	}
+	case UmbrellaKind::DMARC_CHECK: {
+		// No SPF/DKIM input: this reports the published policy for a domain,
+		// which is what an admin wants when checking their own DNS.
+		std::vector<quackmail::dkim::VerifyResult> none;
+		auto eval = quackmail::dmarc::Evaluate(bind.args[0], "", quackmail::spf::Result::None, none);
+		gstate->rows.push_back({Value(quackmail::dmarc::ResultName(eval.result)),
+		                        Value(quackmail::dmarc::PolicyName(eval.policy)),
+		                        Value(eval.policy_domain), Value(eval.record), Value(eval.info)});
+		break;
+	}
+	case UmbrellaKind::SIEVE_CHECK: {
+		std::string err;
+		bool ok = quackmail::sieve::Check(bind.args[0], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "script is valid" : err)});
+		break;
+	}
+
+	// ---- config ---------------------------------------------------------
+	case UmbrellaKind::CONFIG_GET: {
+		gstate->rows.push_back(
+		    {Value(bind.args[0]), Value(quackmail::citadel::GetConfig(con, bind.args[0], ""))});
+		break;
+	}
+	case UmbrellaKind::CONFIG_SET: {
+		auto stmt = con.Prepare("INSERT INTO citadel_config (name, value) VALUES ($1, $2) "
+		                        "ON CONFLICT (name) DO UPDATE SET value = excluded.value");
+		bool ok = !stmt->HasError();
+		if (ok) {
+			vector<Value> params = {Value(bind.args[0]), Value(bind.args[1])};
+			auto r = stmt->Execute(params, false);
+			ok = !r->HasError();
+		}
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "config set" : "could not set config")});
+		break;
+	}
+	case UmbrellaKind::CONFIG_LIST: {
+		auto r = con.Query("SELECT name, value FROM citadel_config ORDER BY name");
+		if (!r->HasError()) {
+			for (idx_t i = 0; i < r->RowCount(); i++) {
+				gstate->rows.push_back({r->GetValue(0, i), r->GetValue(1, i)});
+			}
 		}
 		break;
 	}
@@ -284,6 +549,147 @@ unique_ptr<FunctionData> CitFloorAddBind(ClientContext &, TableFunctionBindInput
 	return std::move(b);
 }
 
+// ---------------------------------------------------------------------------
+// Policy administration: one generic bind for all of it.
+//
+// These functions differ only in their kind and their result columns, so the
+// shape is carried on the TableFunction's function_info rather than repeated in
+// a bind function each. Every positional argument becomes a string in `args`.
+// ---------------------------------------------------------------------------
+
+struct PolicyInfo : public TableFunctionInfo {
+	UmbrellaKind kind = UmbrellaKind::VERSION;
+	vector<string> column_names;
+	vector<LogicalType> column_types;
+};
+
+unique_ptr<FunctionData> PolicyBind(ClientContext &, TableFunctionBindInput &input,
+                                    vector<LogicalType> &return_types, vector<string> &names) {
+	auto info = reinterpret_cast<PolicyInfo *>(input.info.get());
+	auto b = make_uniq<RowsBindData>();
+	b->kind = info->kind;
+	for (auto &in : input.inputs) {
+		b->args.push_back(in.IsNull() ? std::string() : in.ToString());
+	}
+	names = info->column_names;
+	return_types = info->column_types;
+	return std::move(b);
+}
+
+// Register one policy function with explicit parameter types. Numeric
+// arguments are declared BIGINT rather than VARCHAR so that hand-written SQL
+// reads naturally -- DuckDB will not implicitly convert an INTEGER literal to
+// VARCHAR, so a VARCHAR signature would force qm_ratelimit_set('a','5','60').
+// The shell CLI casts its bound string parameters at the call site.
+void RegisterPolicyFn(ExtensionLoader &loader, const std::string &name, UmbrellaKind kind,
+                      vector<LogicalType> params, vector<string> column_names,
+                      vector<LogicalType> column_types) {
+	TableFunction f(name, params, RowsFunc, PolicyBind, RowsInit);
+	auto info = make_shared_ptr<PolicyInfo>();
+	info->kind = kind;
+	info->column_names = std::move(column_names);
+	info->column_types = std::move(column_types);
+	f.function_info = std::move(info);
+	loader.RegisterFunction(f);
+}
+
+// The two column shapes most of these share.
+const vector<string> kOkNote = {"ok", "note"};
+const vector<LogicalType> kOkNoteTypes = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
+
+// ---------------------------------------------------------------------------
+// Scalar DKIM helpers.
+//
+// DuckDB requires table-function arguments to be constant-foldable, so the
+// table-function forms cannot be composed — `qm_dkim_verify(qm_dkim_sign(...))`
+// is only expressible if both are scalar. These are the composable versions;
+// qm_dkim_verify_detail below still gives the per-signature breakdown.
+// ---------------------------------------------------------------------------
+
+// These need a database connection to reach the key table. The handle is
+// captured at bind time and read back through the bound expression, which is
+// the stable way for a scalar function to get at it.
+struct DbBindData : public FunctionData {
+	DatabaseInstance *db = nullptr;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<DbBindData>(*this);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return db == other.Cast<DbBindData>().db;
+	}
+};
+
+unique_ptr<FunctionData> DbBind(ClientContext &context, ScalarFunction &,
+                                vector<unique_ptr<Expression>> &) {
+	auto b = make_uniq<DbBindData>();
+	b->db = context.db.get();
+	return std::move(b);
+}
+
+DatabaseInstance &BoundDb(ExpressionState &state) {
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	return *func_expr.bind_info->Cast<DbBindData>().db;
+}
+
+// qm_dkim_sign(message, domain) -> the message with a DKIM-Signature prepended,
+// or NULL when no key is configured for the domain or signing fails.
+void DkimSignScalar(DataChunk &args, ExpressionState &state, Vector &result) {
+	// Read-only: the schema already exists (LoadInternal creates it), and
+	// running DDL from inside an executing query would start a write
+	// transaction underneath the one already in flight.
+	Connection con(BoundDb(state));
+
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t raw, string_t domain, ValidityMask &mask, idx_t idx) {
+		    std::string message = raw.GetString();
+		    std::string dom = domain.GetString();
+		    quackmail::policy::DkimKey key;
+		    if (!quackmail::policy::DkimKeyFor(con, dom, key) || key.private_key.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    std::string out, err;
+		    if (!quackmail::dkim::Sign(message, dom, key.selector, key.private_key, key.headers, out,
+		                               err)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_dkim_verify(message) -> the overall result keyword. A message with several
+// signatures passes if any one of them does, which is what RFC 6376 §6.1 says
+// a verifier should conclude.
+void DkimVerifyScalar(DataChunk &args, ExpressionState &state, Vector &result) {
+	Connection con(BoundDb(state)); // read-only; see DkimSignScalar
+	auto lookup = quackmail::policy::DkimKeyLookup(con);
+
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t raw) {
+		auto results = quackmail::dkim::Verify(raw.GetString(), lookup);
+		if (results.empty()) {
+			return StringVector::AddString(result, "none");
+		}
+		for (auto &r : results) {
+			if (r.result == quackmail::dkim::Result::Pass) {
+				return StringVector::AddString(result, "pass");
+			}
+		}
+		return StringVector::AddString(result, quackmail::dkim::ResultName(results[0].result));
+	});
+}
+
+// qm_sieve_valid(script) -> whether the script parses. Scalar so it composes
+// with a table of scripts.
+void SieveValidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, bool>(args.data[0], result, args.size(), [&](string_t script) {
+		std::string err;
+		return quackmail::sieve::Check(script.GetString(), err);
+	});
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	// Ensure the shared schema exists as soon as the umbrella loads.
 	Connection con(loader.GetDatabaseInstance());
@@ -315,6 +721,75 @@ void LoadInternal(ExtensionLoader &loader) {
 	    TableFunction("qm_parse_date", {LogicalType::VARCHAR}, RowsFunc, ParseDateBind, RowsInit));
 	loader.RegisterFunction(
 	    TableFunction("qm_mime_parts", {LogicalType::VARCHAR}, RowsFunc, MimePartsBind, RowsInit));
+
+	// ---- site policy administration (driven by deploy/quackcitadm.sh) ----
+	const auto V = LogicalType::VARCHAR;
+	const auto B = LogicalType::BOOLEAN;
+	const auto I = LogicalType::BIGINT;
+
+	// Hosted domains.
+	RegisterPolicyFn(loader, "qm_domain_add", UmbrellaKind::DOMAIN_ADD, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_domain_remove", UmbrellaKind::DOMAIN_REMOVE, {V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_domains", UmbrellaKind::DOMAIN_LIST, {},
+	                 {"domain", "kind", "enabled", "dkim_selector", "note"}, {V, V, B, V, V});
+
+	// Aliases and catch-alls.
+	RegisterPolicyFn(loader, "qm_alias_add", UmbrellaKind::ALIAS_ADD, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_alias_remove", UmbrellaKind::ALIAS_REMOVE, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_aliases", UmbrellaKind::ALIAS_LIST, {},
+	                 {"alias", "destination", "enabled"}, {V, V, B});
+
+	// Allow / block lists.
+	RegisterPolicyFn(loader, "qm_acl_add", UmbrellaKind::ACL_ADD, {V, V, V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_acl_remove", UmbrellaKind::ACL_REMOVE, {I}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_acl", UmbrellaKind::ACL_LIST, {},
+	                 {"id", "scope", "pattern", "action", "enabled", "note"}, {I, V, V, V, B, V});
+
+	// DNSBL zones.
+	RegisterPolicyFn(loader, "qm_rbl_add", UmbrellaKind::RBL_ADD, {V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_rbl_remove", UmbrellaKind::RBL_REMOVE, {V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_rbl_zones", UmbrellaKind::RBL_LIST, {}, {"zone"}, {V});
+	RegisterPolicyFn(loader, "qm_rbl_check", UmbrellaKind::RBL_CHECK, {V},
+	                 {"listed", "zone", "code", "reason"}, {B, V, V, V});
+
+	// DKIM keys and diagnostics.
+	RegisterPolicyFn(loader, "qm_dkim_keygen", UmbrellaKind::DKIM_KEYGEN, {V, V, I},
+	                 {"ok", "dns_name", "dns_record"}, {B, V, V});
+	RegisterPolicyFn(loader, "qm_dkim_key_add", UmbrellaKind::DKIM_KEY_ADD, {V, V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_dkim_key_remove", UmbrellaKind::DKIM_KEY_REMOVE, {V, V}, kOkNote,
+	                 kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_dkim_keys", UmbrellaKind::DKIM_KEY_LIST, {},
+	                 {"domain", "selector", "algo", "enabled", "dns_record"}, {V, V, V, B, V});
+	RegisterPolicyFn(loader, "qm_dkim_verify_detail", UmbrellaKind::DKIM_VERIFY, {V},
+	                 {"result", "domain", "selector", "info"}, {V, V, V, V});
+
+	// Scalar forms, so signing and verifying can be composed in one query.
+	loader.RegisterFunction(ScalarFunction("qm_dkim_sign", {V, V}, V, DkimSignScalar, DbBind));
+	loader.RegisterFunction(ScalarFunction("qm_dkim_verify", {V}, V, DkimVerifyScalar, DbBind));
+	// Parsing needs no database access.
+	loader.RegisterFunction(ScalarFunction("qm_sieve_valid", {V}, B, SieveValidScalar));
+
+	// Per-user send quotas.
+	RegisterPolicyFn(loader, "qm_ratelimit_set", UmbrellaKind::RATELIMIT_SET, {V, I, I, I}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_ratelimits", UmbrellaKind::RATELIMIT_LIST, {},
+	                 {"username", "burst_max", "burst_secs", "daily_max", "enabled"},
+	                 {V, I, I, I, B});
+	RegisterPolicyFn(loader, "qm_rate_status", UmbrellaKind::RATE_STATUS, {V},
+	                 {"username", "burst_used", "burst_max", "daily_used", "daily_max", "allowed",
+	                  "note"},
+	                 {V, I, I, I, I, B, V});
+
+	// Diagnostics an admin runs against live DNS.
+	RegisterPolicyFn(loader, "qm_spf_check", UmbrellaKind::SPF_CHECK, {V, V, V},
+	                 {"result", "domain", "explanation", "record"}, {V, V, V, V});
+	RegisterPolicyFn(loader, "qm_dmarc_check", UmbrellaKind::DMARC_CHECK, {V},
+	                 {"result", "policy", "policy_domain", "record", "info"}, {V, V, V, V, V});
+	RegisterPolicyFn(loader, "qm_sieve_check", UmbrellaKind::SIEVE_CHECK, {V}, kOkNote, kOkNoteTypes);
+
+	// Server config (c_fqdn, the qm_*_reject enforcement toggles, ...).
+	RegisterPolicyFn(loader, "qm_config_get", UmbrellaKind::CONFIG_GET, {V}, {"name", "value"}, {V, V});
+	RegisterPolicyFn(loader, "qm_config_set", UmbrellaKind::CONFIG_SET, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_config", UmbrellaKind::CONFIG_LIST, {}, {"name", "value"}, {V, V});
 }
 
 } // namespace

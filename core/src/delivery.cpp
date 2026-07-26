@@ -1,10 +1,12 @@
 #include "quackmail/delivery.hpp"
 
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/mail_store.hpp"
 #include "quackmail/mime.hpp"
 #include "quackmail/sieve.hpp"
 #include "quackmail/util.hpp"
 
+#include <algorithm>
 #include <ctime>
 
 namespace quackmail {
@@ -24,41 +26,76 @@ static std::string HeaderValue(const mime::ParsedMessage &parsed, const std::str
 }
 
 bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vector<std::string> &rcpts,
-                  const std::string &body, std::string &err) {
+                  const std::string &body, const Options &opts, Outcome &out) {
+	out = Outcome();
 	auto parsed = mime::Parse(body);
 
-	// Resolve the delivery room for each local recipient (deduplicated).
+	// Resolve the delivery rooms across all recipients (deduplicated: one stored
+	// message is pointed into every destination room).
 	std::vector<int64_t> rooms;
 	auto add_room = [&](int64_t room) {
 		if (room < 0) {
 			return;
 		}
-		for (int64_t r : rooms) {
-			if (r == room) {
-				return;
-			}
+		if (std::find(rooms.begin(), rooms.end(), room) == rooms.end()) {
+			rooms.push_back(room);
 		}
-		rooms.push_back(room);
 	};
 
 	for (const std::string &rcpt : rcpts) {
 		std::string user = util::LocalPart(rcpt);
-		std::string folder = "Mail";
+
+		// A site-level quarantine overrides the user's own filter: the point is
+		// to keep suspect mail out of the inbox even if a rule would file it there.
+		if (!opts.folder_override.empty()) {
+			add_room(citadel::GetOrCreateUserRoom(con, user, opts.folder_override));
+			continue;
+		}
+
 		std::string script = sieve::LoadActiveScript(con, user);
-		if (!script.empty()) {
-			auto action = sieve::Evaluate(script, parsed);
-			if (action.type == sieve::Action::DISCARD) {
-				continue; // silently dropped by the user's filter
-			}
-			if (action.type == sieve::Action::FILEINTO && !action.folder.empty()) {
-				folder = action.folder;
+		if (script.empty()) {
+			add_room(citadel::GetOrCreateMailRoom(con, user));
+			continue;
+		}
+
+		sieve::Envelope env(mail_from, rcpt);
+		auto result = sieve::Evaluate(script, parsed, body, env);
+
+		std::string reject = result.RejectReason();
+		if (!reject.empty()) {
+			out.rejected.emplace_back(rcpt, reject);
+			continue;
+		}
+		if (result.IsDiscard()) {
+			out.discarded.push_back(rcpt);
+			continue;
+		}
+
+		for (const auto &action : result.actions) {
+			switch (action.type) {
+			case sieve::Action::KEEP:
+				add_room(citadel::GetOrCreateMailRoom(con, user));
+				break;
+			case sieve::Action::FILEINTO:
+				add_room(citadel::GetOrCreateUserRoom(
+				    con, user, action.folder.empty() ? "Mail" : action.folder));
+				break;
+			case sieve::Action::REDIRECT:
+				// Forwarding goes through the same queue the submission service
+				// uses, so retries and backoff are handled in one place.
+				if (!action.address.empty()) {
+					store::EnqueueOutbound(con, mail_from, action.address, body);
+				}
+				break;
+			case sieve::Action::DISCARD:
+			case sieve::Action::REJECT:
+				break; // handled above
 			}
 		}
-		add_room(citadel::GetOrCreateUserRoom(con, user, folder));
 	}
 
 	if (rooms.empty()) {
-		return true; // nothing to deliver (all recipients filtered out)
+		return true; // nothing to store (filtered out, redirected, or rejected)
 	}
 
 	citadel::Message msg;
@@ -85,7 +122,18 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 	int64_t epoch = 0;
 	msg.msgtime = mime::ParseDate(HeaderValue(parsed, "Date"), epoch) ? epoch : (int64_t)std::time(nullptr);
 
-	return citadel::InsertMessage(con, msg, rooms, err) >= 0;
+	out.msgnum = citadel::InsertMessage(con, msg, rooms, out.err);
+	out.ok = out.msgnum >= 0;
+	return out.ok;
+}
+
+bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vector<std::string> &rcpts,
+                  const std::string &body, std::string &err) {
+	Options opts;
+	Outcome out;
+	bool ok = LocalDeliver(con, mail_from, rcpts, body, opts, out);
+	err = out.err;
+	return ok;
 }
 
 } // namespace deliver

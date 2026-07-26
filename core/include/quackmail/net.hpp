@@ -57,6 +57,12 @@ public:
 		return fd_;
 	}
 
+	// The connected client's address in presentation form ("192.0.2.1",
+	// "2001:db8::1"), or "" if it cannot be determined. ConnHandler only ever
+	// receives the stream, so this is how SPF and DNSBL checks reach the peer
+	// address. IPv4-mapped IPv6 addresses are unwrapped to plain IPv4.
+	std::string PeerIp() const;
+
 private:
 	ssize_t RawRead(char *buf, size_t n);
 	bool RawWrite(const char *buf, size_t n);

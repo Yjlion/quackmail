@@ -1,6 +1,7 @@
 #include "quackmail/mail_store.hpp"
 
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/mailpolicy.hpp"
 
 #include "duckdb/main/materialized_query_result.hpp"
 
@@ -79,6 +80,11 @@ void EnsureSchema(Connection &con) {
 	// The Citadel room/floor/message model is the message store. Create it here
 	// so every extension gets the full schema on load, regardless of load order.
 	citadel::EnsureCitadelSchema(con);
+
+	// Site policy (domains, aliases, ACLs, DNSBL zones, DKIM keys, quotas).
+	// Must follow the Citadel schema: it seeds enforcement defaults into
+	// citadel_config.
+	policy::EnsureSchema(con);
 }
 
 void EnqueueOutbound(Connection &con, const std::string &from_addr, const std::string &rcpt,

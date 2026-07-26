@@ -44,6 +44,11 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/sasl.cpp
         ${QUACKMAIL_CORE_DIR}/src/dns.cpp
         ${QUACKMAIL_CORE_DIR}/src/smtp_client.cpp
+        ${QUACKMAIL_CORE_DIR}/src/spf.cpp
+        ${QUACKMAIL_CORE_DIR}/src/dkim.cpp
+        ${QUACKMAIL_CORE_DIR}/src/dmarc.cpp
+        ${QUACKMAIL_CORE_DIR}/src/rbl.cpp
+        ${QUACKMAIL_CORE_DIR}/src/mailpolicy.cpp
     )
     # Linked into loadable .so extensions, so it must be position independent.
     set_target_properties(quackmail_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
