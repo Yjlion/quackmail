@@ -106,7 +106,15 @@ README table.
   `Cast<MaterializedQueryResult>()` for row access.
 - DuckDB **table function arguments must be constant-foldable**, so table
   functions cannot be nested. Anything that needs to compose (`qm_dkim_sign` →
-  `qm_dkim_verify`) has to be a scalar function.
+  `qm_dkim_verify`) has to be a scalar function. Numeric arguments should be
+  declared `BIGINT`, not `VARCHAR` — DuckDB will not implicitly convert an
+  `INTEGER` literal to `VARCHAR`, so a VARCHAR signature forces callers to
+  quote every number.
+- The umbrella's table functions open **their own `Connection`**, so rows
+  written by sqllogictest's harness connection are invisible to them. Assert
+  configuration in `test/sql/`, but assert *enforcement* (rate limits, delivery)
+  in `test/integration/`. Protocol handlers are unaffected: each session does
+  all its reads and writes on the one connection it opens.
 - The admin CLI cannot open the database while the server is running — DuckDB
   permits one read-write process per file. `deploy/quackcitadm.sh` goes through
   the launcher's Unix socket instead; see `deploy/quackcit_admin.py`.

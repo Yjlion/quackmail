@@ -194,15 +194,12 @@ SELECT allowed FROM qm_rate_status('alice');
 ----
 true
 
-# Fill the burst window and she is over it.
-statement ok
-INSERT INTO quackmail_send_log (username, rcpt)
-SELECT 'alice', 'x@example.com' FROM range(5);
-
-query III
-SELECT burst_used, daily_used, allowed FROM qm_rate_status('alice');
-----
-5	5	false
+# Enforcement (filling the window and getting refused) is asserted in
+# test/integration/test_smtp_policy.py rather than here. It cannot be tested
+# from sqllogictest: these table functions open their own DuckDB connection,
+# and a row INSERTed by the test harness's connection is not visible to it.
+# The SMTP path is unaffected because a session's CheckRate and RecordSend
+# both run on the one connection the handler opens.
 
 query II
 SELECT ok, note FROM qm_ratelimit_set('alice', 0, 0, 0);
