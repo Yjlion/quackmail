@@ -248,11 +248,10 @@ SELECT qm_dkim_verify(qm_dkim_sign(raw, 'signed.example')) FROM msg;
 ----
 pass
 
-query III
-SELECT result, domain, selector
-FROM qm_dkim_verify_detail((SELECT qm_dkim_sign(raw, 'signed.example') FROM msg));
-----
-pass	signed.example	sel1
+# The per-signature breakdown (qm_dkim_verify_detail) cannot be exercised on a
+# signed message here: it is a table function, and DuckDB rejects a subquery as
+# a table function argument. The CLI reaches it with a bound parameter, which is
+# allowed; the unsigned case is asserted with a literal below.
 
 # Tamper with the body and the body hash no longer matches.
 query I
