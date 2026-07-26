@@ -215,9 +215,9 @@ def main():
         for subject in ("[list] weekly digest", "an ordinary note"):
             m = MIMEText("body\n")
             m["Subject"] = subject
-            m["From"] = "sender@example.com"
+            m["From"] = "sender@example.invalid"
             m["To"] = "alice@quackmail.test"
-            s.sendmail("sender@example.com", ["alice@quackmail.test"], m.as_string())
+            s.sendmail("sender@example.invalid", ["alice@quackmail.test"], m.as_string())
         s.quit()
     finally:
         con.execute("CALL qm_smtp_in_stop()").fetchall()

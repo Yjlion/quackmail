@@ -55,7 +55,7 @@ def main():
     assert con.execute("SELECT ok FROM qm_user_add('alice', 'secret')").fetchone()[0]
 
     ok, dns_name, record = con.execute(
-        "SELECT ok, dns_name, dns_record FROM qm_dkim_keygen('quackmail.test', 'mail', '2048')"
+        "SELECT ok, dns_name, dns_record FROM qm_dkim_keygen('quackmail.test', 'mail', 2048)"
     ).fetchone()
     assert ok, f"key generation failed: {record}"
     assert dns_name == "mail._domainkey.quackmail.test", dns_name

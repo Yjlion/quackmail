@@ -224,7 +224,9 @@ void EnsureSchema(Connection &con) {
 			rbl         VARCHAR,
 			disposition VARCHAR,
 			detail      VARCHAR,
-			at          TIMESTAMP DEFAULT now()
+			-- not `at`: that is a SQL keyword (AT TIME ZONE) and the
+			-- CREATE fails outright.
+			logged_at   TIMESTAMP DEFAULT now()
 		)
 	)");
 

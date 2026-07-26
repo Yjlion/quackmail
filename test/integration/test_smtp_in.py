@@ -49,17 +49,17 @@ def main():
     try:
         msg = MIMEText("This is the body.\n")
         msg["Subject"] = "Hello QuackMail"
-        msg["From"] = "bob@example.com"
+        msg["From"] = "bob@example.invalid"
         msg["To"] = "alice@quackmail.test"
-        msg["Message-ID"] = "<test-123@example.com>"
+        msg["Message-ID"] = "<test-123@example.invalid>"
 
         # Known local user -> accepted.
         s = smtplib.SMTP(HOST, SMTP_PORT, timeout=10)
-        s.sendmail("bob@example.com", ["alice@quackmail.test"], msg.as_string())
+        s.sendmail("bob@example.invalid", ["alice@quackmail.test"], msg.as_string())
 
         # Unknown local user -> 550 5.1.1.
         try:
-            s.sendmail("bob@example.com", ["nobody@quackmail.test"], msg.as_string())
+            s.sendmail("bob@example.invalid", ["nobody@quackmail.test"], msg.as_string())
             raise AssertionError("unknown local user should be rejected")
         except smtplib.SMTPRecipientsRefused as e:
             code = list(e.recipients.values())[0][0]
@@ -67,7 +67,7 @@ def main():
 
         # Foreign domain -> 550 5.7.1 relay denied.
         try:
-            s.sendmail("bob@example.com", ["stranger@elsewhere.example"], msg.as_string())
+            s.sendmail("bob@example.invalid", ["stranger@elsewhere.example"], msg.as_string())
             raise AssertionError("foreign domain should be relay-denied")
         except smtplib.SMTPRecipientsRefused as e:
             code, text = list(e.recipients.values())[0]
@@ -80,7 +80,7 @@ def main():
         "SELECT author, subject, format_type FROM citadel_messages"
     ).fetchall()
     assert len(rows) == 1, f"expected exactly 1 delivered message, got {rows}"
-    assert rows[0][0] == "bob@example.com" and rows[0][1] == "Hello QuackMail" and rows[0][2] == 4, rows[0]
+    assert rows[0][0] == "bob@example.invalid" and rows[0][1] == "Hello QuackMail" and rows[0][2] == 4, rows[0]
 
     # Every accepted message is stamped with what the inbound checks concluded.
     stored = con.execute("SELECT decode(raw) FROM citadel_messages").fetchone()[0]
@@ -92,7 +92,7 @@ def main():
 
     # The audit trail records one row per accepted recipient.
     logged = con.execute(
-        "SELECT rcpt, disposition FROM quackmail_inbound_log ORDER BY at"
+        "SELECT rcpt, disposition FROM quackmail_inbound_log ORDER BY logged_at"
     ).fetchall()
     assert ("alice@quackmail.test", "accept") in logged, logged
 
@@ -149,13 +149,13 @@ def check_policy(con):
             s.sendmail(sender, [rcpt], m.as_string())
 
         # The newly hosted domain is accepted; the alias fans out to two users.
-        send("outside@example.com", "team@extra.test", "To the team")
+        send("outside@example.invalid", "team@extra.test", "To the team")
 
         # An address with no alias falls through to the domain catch-all.
-        send("outside@example.com", "whoever@extra.test", "To the catch-all")
+        send("outside@example.invalid", "whoever@extra.test", "To the catch-all")
 
         # An alias pointing off-site is accepted and queued for forwarding.
-        send("outside@example.com", "fwd@extra.test", "To be forwarded")
+        send("outside@example.invalid", "fwd@extra.test", "To be forwarded")
 
         # A blocked sender is refused at MAIL FROM, before any recipient.
         try:
@@ -167,7 +167,7 @@ def check_policy(con):
 
         # A domain we do not host is still relay-denied.
         try:
-            send("outside@example.com", "someone@unhosted.test", "Should not relay")
+            send("outside@example.invalid", "someone@unhosted.test", "Should not relay")
             raise AssertionError("unhosted domain should be relay-denied")
         except smtplib.SMTPRecipientsRefused as e:
             code, text = list(e.recipients.values())[0]
