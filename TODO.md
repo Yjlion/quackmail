@@ -30,8 +30,23 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
         admin socket while the server holds the database file)
   - [x] `test/sql/mailpolicy.test`, `test/sql/sieve.test`, and integration tests
         for policy, LMTP and ManageSieve; README refreshed
-  - [ ] build + run the tests on `debian.lan`, probe SPF/DKIM/DMARC against
-        real DNS and the Citadel oracle, then open the PR
+  - [x] built on `debian.lan`; `make test` (211 assertions) and all 12
+        integration tests green, including the 8 pre-existing ones
+  - [x] probed against real DNS: SPF follows `redirect=` and matches ip4 CIDRs
+        (gmail.com → pass/softfail/none), DMARC reads live policies
+        (google.com `p=reject`, gmail.com `p=none; sp=quarantine`), DKIM
+        fetches a real two-segment TXT key (github.com/s1), DNSBL detects
+        Spamhaus's 127.0.0.2 test entry with its code and reason
+  - [x] `deploy/` scripts exercised end to end: admin CLI works with the server
+        both up (0600 socket) and down, every listener binds its configured port
+  - [x] cross-read against the Citadel oracle on port 25 — fixed the SMTP
+        banner to lead with the configured FQDN, as Citadel requires
+  - [x] PR #14 opened
+  - [ ] remaining oracle divergences, all cosmetic and deliberate for now:
+        Citadel's EHLO reply is `250-Hello <helo> (<rdns> [<ip>])` where ours is
+        `250-quackmail greets <helo>` (matching would need a reverse-DNS lookup
+        per connection); Citadel offers `HELP` and advertises `AUTH` on port 25,
+        where our MX deliberately offers neither
 
 ## Shipped
 
