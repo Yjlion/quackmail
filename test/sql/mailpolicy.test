@@ -212,13 +212,13 @@ false	burst_secs must be positive
 # ---- DKIM: generate, sign, verify — all without DNS ------------------------
 
 query II
-SELECT ok, dns_name FROM qm_dkim_keygen('example.com', 'mail', '2048');
+SELECT ok, dns_name FROM qm_dkim_keygen('example.com', 'mail', 2048);
 ----
 true	mail._domainkey.example.com
 
 # The generated record is the one to publish.
 query I
-SELECT dns_record LIKE 'v=DKIM1; k=rsa; p=%' FROM qm_dkim_keygen('signed.example', 'sel1', '2048');
+SELECT dns_record LIKE 'v=DKIM1; k=rsa; p=%' FROM qm_dkim_keygen('signed.example', 'sel1', 2048);
 ----
 true
 

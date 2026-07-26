@@ -88,7 +88,7 @@ true
 # Comments in both forms, and a multi-line text: block.
 query I
 SELECT qm_sieve_valid('
-# a hash comment
+    # a hash comment, indented so sqllogictest does not eat it
 /* a block
    comment */
 require ["reject"];

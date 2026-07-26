@@ -102,7 +102,7 @@ cmd_acl() {
         allow|block)
             need 2 "$@"
             q4 "SELECT ok, note FROM qm_acl_add(?, ?, ?, ?)" "$1" "$2" "$action" "${3:-}" ;;
-        remove) need 1 "$@"; q1 "SELECT ok, note FROM qm_acl_remove(?)" "$1" ;;
+        remove) need 1 "$@"; q1 "SELECT ok, note FROM qm_acl_remove(CAST(? AS BIGINT))" "$1" ;;
         list)   q0 "SELECT * FROM qm_acl()" ;;
         *) die "unknown acl command '$action' (allow|block|remove|list)" ;;
     esac
@@ -125,7 +125,7 @@ cmd_dkim() {
         keygen)
             need 2 "$@"
             echo "Generating a ${3:-2048}-bit key for $1 (selector $2)..."
-            q3 "SELECT ok, dns_name, dns_record FROM qm_dkim_keygen(?, ?, ?)" "$1" "$2" "${3:-2048}"
+            q3 "SELECT ok, dns_name, dns_record FROM qm_dkim_keygen(?, ?, CAST(? AS BIGINT))" "$1" "$2" "${3:-2048}"
             echo
             echo "Publish that record as a TXT record at the name shown above,"
             echo "then verify with:  dig +short TXT $2._domainkey.$1"
@@ -145,7 +145,7 @@ cmd_ratelimit() {
     case "$action" in
         set)
             need 4 "$@"
-            q4 "SELECT ok, note FROM qm_ratelimit_set(?, ?, ?, ?)" "$1" "$2" "$3" "$4" ;;
+            q4 "SELECT ok, note FROM qm_ratelimit_set(?, CAST(? AS BIGINT), CAST(? AS BIGINT), CAST(? AS BIGINT))" "$1" "$2" "$3" "$4" ;;
         list)   q0 "SELECT * FROM qm_ratelimits()" ;;
         status) need 1 "$@"; q1 "SELECT * FROM qm_rate_status(?)" "$1" ;;
         *) die "unknown ratelimit command '$action' (set|list|status)" ;;

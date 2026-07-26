@@ -576,10 +576,14 @@ unique_ptr<FunctionData> PolicyBind(ClientContext &, TableFunctionBindInput &inp
 	return std::move(b);
 }
 
-// Register one policy function: `arity` VARCHAR parameters, the given columns.
-void RegisterPolicyFn(ExtensionLoader &loader, const std::string &name, UmbrellaKind kind, int arity,
-                      vector<string> column_names, vector<LogicalType> column_types) {
-	vector<LogicalType> params(arity, LogicalType::VARCHAR);
+// Register one policy function with explicit parameter types. Numeric
+// arguments are declared BIGINT rather than VARCHAR so that hand-written SQL
+// reads naturally -- DuckDB will not implicitly convert an INTEGER literal to
+// VARCHAR, so a VARCHAR signature would force qm_ratelimit_set('a','5','60').
+// The shell CLI casts its bound string parameters at the call site.
+void RegisterPolicyFn(ExtensionLoader &loader, const std::string &name, UmbrellaKind kind,
+                      vector<LogicalType> params, vector<string> column_names,
+                      vector<LogicalType> column_types) {
 	TableFunction f(name, params, RowsFunc, PolicyBind, RowsInit);
 	auto info = make_shared_ptr<PolicyInfo>();
 	info->kind = kind;
@@ -724,39 +728,39 @@ void LoadInternal(ExtensionLoader &loader) {
 	const auto I = LogicalType::BIGINT;
 
 	// Hosted domains.
-	RegisterPolicyFn(loader, "qm_domain_add", UmbrellaKind::DOMAIN_ADD, 2, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_domain_remove", UmbrellaKind::DOMAIN_REMOVE, 1, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_domains", UmbrellaKind::DOMAIN_LIST, 0,
+	RegisterPolicyFn(loader, "qm_domain_add", UmbrellaKind::DOMAIN_ADD, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_domain_remove", UmbrellaKind::DOMAIN_REMOVE, {V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_domains", UmbrellaKind::DOMAIN_LIST, {},
 	                 {"domain", "kind", "enabled", "dkim_selector", "note"}, {V, V, B, V, V});
 
 	// Aliases and catch-alls.
-	RegisterPolicyFn(loader, "qm_alias_add", UmbrellaKind::ALIAS_ADD, 2, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_alias_remove", UmbrellaKind::ALIAS_REMOVE, 2, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_aliases", UmbrellaKind::ALIAS_LIST, 0,
+	RegisterPolicyFn(loader, "qm_alias_add", UmbrellaKind::ALIAS_ADD, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_alias_remove", UmbrellaKind::ALIAS_REMOVE, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_aliases", UmbrellaKind::ALIAS_LIST, {},
 	                 {"alias", "destination", "enabled"}, {V, V, B});
 
 	// Allow / block lists.
-	RegisterPolicyFn(loader, "qm_acl_add", UmbrellaKind::ACL_ADD, 4, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_acl_remove", UmbrellaKind::ACL_REMOVE, 1, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_acl", UmbrellaKind::ACL_LIST, 0,
+	RegisterPolicyFn(loader, "qm_acl_add", UmbrellaKind::ACL_ADD, {V, V, V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_acl_remove", UmbrellaKind::ACL_REMOVE, {I}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_acl", UmbrellaKind::ACL_LIST, {},
 	                 {"id", "scope", "pattern", "action", "enabled", "note"}, {I, V, V, V, B, V});
 
 	// DNSBL zones.
-	RegisterPolicyFn(loader, "qm_rbl_add", UmbrellaKind::RBL_ADD, 1, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_rbl_remove", UmbrellaKind::RBL_REMOVE, 1, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_rbl_zones", UmbrellaKind::RBL_LIST, 0, {"zone"}, {V});
-	RegisterPolicyFn(loader, "qm_rbl_check", UmbrellaKind::RBL_CHECK, 1,
+	RegisterPolicyFn(loader, "qm_rbl_add", UmbrellaKind::RBL_ADD, {V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_rbl_remove", UmbrellaKind::RBL_REMOVE, {V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_rbl_zones", UmbrellaKind::RBL_LIST, {}, {"zone"}, {V});
+	RegisterPolicyFn(loader, "qm_rbl_check", UmbrellaKind::RBL_CHECK, {V},
 	                 {"listed", "zone", "code", "reason"}, {B, V, V, V});
 
 	// DKIM keys and diagnostics.
-	RegisterPolicyFn(loader, "qm_dkim_keygen", UmbrellaKind::DKIM_KEYGEN, 3,
+	RegisterPolicyFn(loader, "qm_dkim_keygen", UmbrellaKind::DKIM_KEYGEN, {V, V, I},
 	                 {"ok", "dns_name", "dns_record"}, {B, V, V});
-	RegisterPolicyFn(loader, "qm_dkim_key_add", UmbrellaKind::DKIM_KEY_ADD, 3, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_dkim_key_remove", UmbrellaKind::DKIM_KEY_REMOVE, 2, kOkNote,
+	RegisterPolicyFn(loader, "qm_dkim_key_add", UmbrellaKind::DKIM_KEY_ADD, {V, V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_dkim_key_remove", UmbrellaKind::DKIM_KEY_REMOVE, {V, V}, kOkNote,
 	                 kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_dkim_keys", UmbrellaKind::DKIM_KEY_LIST, 0,
+	RegisterPolicyFn(loader, "qm_dkim_keys", UmbrellaKind::DKIM_KEY_LIST, {},
 	                 {"domain", "selector", "algo", "enabled", "dns_record"}, {V, V, V, B, V});
-	RegisterPolicyFn(loader, "qm_dkim_verify_detail", UmbrellaKind::DKIM_VERIFY, 1,
+	RegisterPolicyFn(loader, "qm_dkim_verify_detail", UmbrellaKind::DKIM_VERIFY, {V},
 	                 {"result", "domain", "selector", "info"}, {V, V, V, V});
 
 	// Scalar forms, so signing and verifying can be composed in one query.
@@ -766,26 +770,26 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_sieve_valid", {V}, B, SieveValidScalar));
 
 	// Per-user send quotas.
-	RegisterPolicyFn(loader, "qm_ratelimit_set", UmbrellaKind::RATELIMIT_SET, 4, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_ratelimits", UmbrellaKind::RATELIMIT_LIST, 0,
+	RegisterPolicyFn(loader, "qm_ratelimit_set", UmbrellaKind::RATELIMIT_SET, {V, I, I, I}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_ratelimits", UmbrellaKind::RATELIMIT_LIST, {},
 	                 {"username", "burst_max", "burst_secs", "daily_max", "enabled"},
 	                 {V, I, I, I, B});
-	RegisterPolicyFn(loader, "qm_rate_status", UmbrellaKind::RATE_STATUS, 1,
+	RegisterPolicyFn(loader, "qm_rate_status", UmbrellaKind::RATE_STATUS, {V},
 	                 {"username", "burst_used", "burst_max", "daily_used", "daily_max", "allowed",
 	                  "note"},
 	                 {V, I, I, I, I, B, V});
 
 	// Diagnostics an admin runs against live DNS.
-	RegisterPolicyFn(loader, "qm_spf_check", UmbrellaKind::SPF_CHECK, 3,
+	RegisterPolicyFn(loader, "qm_spf_check", UmbrellaKind::SPF_CHECK, {V, V, V},
 	                 {"result", "domain", "explanation", "record"}, {V, V, V, V});
-	RegisterPolicyFn(loader, "qm_dmarc_check", UmbrellaKind::DMARC_CHECK, 1,
+	RegisterPolicyFn(loader, "qm_dmarc_check", UmbrellaKind::DMARC_CHECK, {V},
 	                 {"result", "policy", "policy_domain", "record", "info"}, {V, V, V, V, V});
-	RegisterPolicyFn(loader, "qm_sieve_check", UmbrellaKind::SIEVE_CHECK, 1, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_sieve_check", UmbrellaKind::SIEVE_CHECK, {V}, kOkNote, kOkNoteTypes);
 
 	// Server config (c_fqdn, the qm_*_reject enforcement toggles, ...).
-	RegisterPolicyFn(loader, "qm_config_get", UmbrellaKind::CONFIG_GET, 1, {"name", "value"}, {V, V});
-	RegisterPolicyFn(loader, "qm_config_set", UmbrellaKind::CONFIG_SET, 2, kOkNote, kOkNoteTypes);
-	RegisterPolicyFn(loader, "qm_config", UmbrellaKind::CONFIG_LIST, 0, {"name", "value"}, {V, V});
+	RegisterPolicyFn(loader, "qm_config_get", UmbrellaKind::CONFIG_GET, {V}, {"name", "value"}, {V, V});
+	RegisterPolicyFn(loader, "qm_config_set", UmbrellaKind::CONFIG_SET, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_config", UmbrellaKind::CONFIG_LIST, {}, {"name", "value"}, {V, V});
 }
 
 } // namespace
