@@ -138,7 +138,10 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 	std::vector<std::string> rcpts;
 	bool have_mail = false;
 
-	stream.WriteLine("220 quackmail submission ready");
+	// The FQDN must lead the banner (RFC 5321 §4.2), so use the configured
+	// c_fqdn rather than a literal.
+	stream.WriteLine("220 " + citadel::GetConfig(con, "c_fqdn", "quackmail.test") +
+	                 " ESMTP QuackCit submission ready.");
 
 	std::string line;
 	while (stream.ReadLine(line, 8192)) {

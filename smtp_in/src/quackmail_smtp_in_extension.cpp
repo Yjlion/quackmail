@@ -211,7 +211,11 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 		s.ip_allowlisted = verdict == policy::AclVerdict::Allow;
 	}
 
-	stream.WriteLine(lmtp ? "220 quackmail LMTP ready" : "220 quackmail ESMTP ready");
+	// RFC 5321 §4.2 and Citadel's own serv_smtp.c both require the server's
+	// FQDN to be the first token after the reply code, so it must be the
+	// configured c_fqdn rather than a literal.
+	stream.WriteLine("220 " + authserv + (lmtp ? " LMTP QuackCit server ready."
+	                                           : " ESMTP QuackCit server ready."));
 
 	std::string line;
 	while (stream.ReadLine(line, 8192)) {
