@@ -477,41 +477,69 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				}
 			};
 
-			if (lmtp) {
-				for (const auto &r : s.rcpts) {
-					enqueue_forwards(r);
-					if (r.destinations.empty()) {
-						// Purely a forwarding alias; nothing is stored here.
-						log_one(r.envelope, "accept", "forwarded");
-						stream.WriteLine("250 2.0.0 <" + r.envelope + "> forwarded");
-						continue;
+			// One delivery for the whole transaction, in both modes: the store is
+			// reference-counted, so a message to several local users is stored
+			// once and pointed into each room. Delivering per recipient would
+			// store a duplicate copy per recipient.
+			std::vector<std::string> targets;
+			for (const auto &r : s.rcpts) {
+				enqueue_forwards(r);
+				targets.insert(targets.end(), r.destinations.begin(), r.destinations.end());
+			}
+			deliver::Outcome outcome;
+			bool ok = targets.empty()
+			              ? true // everything was forwarded; nothing to store
+			              : deliver::LocalDeliver(con, s.mail_from, targets, stored, opts, outcome);
+
+			// The per-recipient Sieve verdicts come back keyed by destination,
+			// so an envelope recipient is refused only if every destination it
+			// expanded to was refused.
+			auto reject_reason = [&](const Recipient &r) -> std::string {
+				if (r.destinations.empty()) {
+					return "";
+				}
+				std::string reason;
+				for (const auto &dest : r.destinations) {
+					bool found = false;
+					for (const auto &rej : outcome.rejected) {
+						if (rej.first == dest) {
+							found = true;
+							reason = rej.second;
+							break;
+						}
 					}
-					deliver::Outcome outcome;
-					bool ok = deliver::LocalDeliver(con, s.mail_from, r.destinations, stored, opts, outcome);
-					if (!ok) {
-						log_one(r.envelope, "defer", outcome.err);
-						stream.WriteLine("451 4.3.0 <" + r.envelope + "> local storage error");
-					} else if (!outcome.rejected.empty()) {
-						log_one(r.envelope, "reject", outcome.rejected[0].second);
-						stream.WriteLine("550 5.7.1 <" + r.envelope + "> " + outcome.rejected[0].second);
-					} else {
-						log_one(r.envelope, quarantine ? "quarantine" : "accept", "");
-						stream.WriteLine("250 2.0.0 <" + r.envelope + "> delivered");
+					if (!found) {
+						return ""; // at least one destination accepted it
 					}
 				}
-			} else {
-				std::vector<std::string> targets;
-				for (const auto &r : s.rcpts) {
-					enqueue_forwards(r);
-					targets.insert(targets.end(), r.destinations.begin(), r.destinations.end());
+				return reason;
+			};
+
+			for (const auto &r : s.rcpts) {
+				std::string refused = ok ? reject_reason(r) : "";
+				const char *disposition = !ok ? "defer"
+				                              : (!refused.empty() ? "reject"
+				                                                  : (quarantine ? "quarantine" : "accept"));
+				log_one(r.envelope, disposition,
+				        !ok ? outcome.err : (r.destinations.empty() ? "forwarded" : refused));
+
+				// LMTP owes one reply per envelope recipient; SMTP sends a
+				// single reply for the transaction, emitted after this loop.
+				if (!lmtp) {
+					continue;
 				}
-				deliver::Outcome outcome;
-				bool ok = targets.empty()
-				              ? true // everything was forwarded; nothing to store
-				              : deliver::LocalDeliver(con, s.mail_from, targets, stored, opts, outcome);
-				for (const auto &r : s.rcpts) {
-					log_one(r.envelope, ok ? (quarantine ? "quarantine" : "accept") : "defer", outcome.err);
+				if (!ok) {
+					stream.WriteLine("451 4.3.0 <" + r.envelope + "> local storage error");
+				} else if (!refused.empty()) {
+					stream.WriteLine("550 5.7.1 <" + r.envelope + "> " + refused);
+				} else if (r.destinations.empty()) {
+					stream.WriteLine("250 2.0.0 <" + r.envelope + "> forwarded");
+				} else {
+					stream.WriteLine("250 2.0.0 <" + r.envelope + "> delivered");
 				}
+			}
+
+			if (!lmtp) {
 				if (!ok) {
 					stream.WriteLine("451 4.3.0 Local storage error");
 				} else if (!outcome.rejected.empty()) {

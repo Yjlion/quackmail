@@ -152,9 +152,18 @@ def main():
     ).fetchall()
     assert verdicts == [("", "")], f"LMTP must not run sender authentication, got {verdicts}"
 
-    # Three messages stored; the aliased one reached both users' Mail rooms.
+    # Three messages stored, not four: the two-recipient delivery is stored once
+    # and pointed into both Mail rooms, the same reference-counted model the MX
+    # path uses. Per-recipient LMTP *replies* do not mean per-recipient copies.
     stored = con.execute("SELECT count(*) FROM citadel_messages").fetchone()[0]
     assert stored == 3, f"expected 3 stored messages, got {stored}"
+
+    shared = con.execute(
+        "SELECT count(*) FROM citadel_room_msgs rm "
+        "JOIN citadel_messages m ON m.msgnum = rm.msgnum "
+        "WHERE m.subject = 'Two recipients'"
+    ).fetchone()[0]
+    assert shared == 2, f"one stored message should point into 2 rooms, got {shared}"
 
     alias_rooms = con.execute(
         "SELECT count(DISTINCT r.mailbox_owner) FROM citadel_room_msgs rm "
