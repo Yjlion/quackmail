@@ -34,6 +34,12 @@ struct Session {
 	std::string pending_user; // set by USER, consumed by PASS
 	int64_t usernum = 0;
 	int64_t axlevel = 4;
+	// Captured at login, for the PASS/NEWU reply. `last_call` is deliberately
+	// the *previous* login: it is what the client prints as "Last login:".
+	int64_t flags = 0; // US_* bitmask
+	int64_t times_called = 0;
+	int64_t num_posts = 0;
+	int64_t last_call = 0;
 	bool have_room = false;
 	citadel::Room room;      // current room when have_room
 	int64_t session_id = 0;  // row in citadel_sessions (presence/RWHO)
@@ -118,9 +124,20 @@ std::string RoomListLine(const citadel::Room &r) {
 	       std::to_string(r.default_view) + "|0";
 }
 
-// The PASS/NEWU success line: name|axlevel|timescalled|posts|?|usernum|lastcall.
-std::string LoginLine(const Session &s) {
-	return "200 " + s.username + "|" + std::to_string(s.axlevel) + "|0|0|0|" + std::to_string(s.usernum) + "|0";
+// The PASS/NEWU success line:
+//   name|axlevel|timescalled|posts|flags|usernum|lastcall|email
+//
+// Field 5 is the US_* bitmask, and it is not decoration: the official text
+// client reads its expert-mode and floor-mode settings straight out of it. A
+// hardcoded 0 here means a user who turns on expert mode from the BBS shell or
+// the web console still gets the full menu in the real client. Verified
+// against the oracle, which answers `leo|4|0|0|10800|2|<epoch>|leo@debian`.
+std::string LoginLine(Connection &con, const Session &s) {
+	return "200 " + s.username + "|" + std::to_string(s.axlevel) + "|" +
+	       std::to_string(s.times_called) + "|" + std::to_string(s.num_posts) + "|" +
+	       std::to_string(s.flags) + "|" + std::to_string(s.usernum) + "|" +
+	       std::to_string(s.last_call) + "|" + s.username + "@" +
+	       citadel::GetConfig(con, "c_fqdn", "");
 }
 
 // Finish logging a user in: populate session, ensure a usernum + Mail room.
@@ -132,9 +149,19 @@ void CompleteLogin(Connection &con, Session &s, std::string username) {
 	s.pending_user.clear();
 	s.usernum = citadel::GetOrAssignUserNum(con, username);
 	s.axlevel = citadel::GetAxLevel(con, username);
+	// Read the user record before stamping this call, so `last_call` still
+	// holds the previous one — that is what the client shows as "Last login:".
+	citadel::UserInfo info;
+	if (citadel::GetUser(con, username, info)) {
+		s.flags = info.flags;
+		s.times_called = info.times_called;
+		s.num_posts = info.num_posts;
+		s.last_call = info.last_call;
+	}
 	// Provision the full default room set (Mail, Sent Items, Calendar, ...) the
 	// way a real Citadel server does on first login.
 	citadel::EnsureUserRooms(con, username);
+	citadel::RecordCall(con, username);
 }
 
 void HandleGoto(Connection &con, Session &s, net::ClientStream &stream, const std::vector<std::string> &p) {
@@ -671,7 +698,7 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				stream.WriteLine("530 Send USER first.");
 			} else if (auth::Verify(con, s.pending_user, rest)) {
 				CompleteLogin(con, s, s.pending_user);
-				stream.WriteLine(LoginLine(s));
+				stream.WriteLine(LoginLine(con, s));
 			} else {
 				stream.WriteLine("500 Wrong password.");
 			}
@@ -687,7 +714,7 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 					stream.WriteLine("550 " + err);
 				} else {
 					CompleteLogin(con, s, name);
-					stream.WriteLine(LoginLine(s));
+					stream.WriteLine(LoginLine(con, s));
 				}
 			}
 		} else if (verb == "SETP") {
