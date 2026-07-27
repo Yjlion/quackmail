@@ -31,6 +31,12 @@ public:
 	// waiting for a line terminator. Returns false on EOF/error.
 	bool ReadAvailable(std::string &out, size_t max_bytes = 8192);
 
+	// Read exactly n bytes. Returns false (with out holding whatever arrived) on
+	// EOF, error or timeout. This is what a Content-Length body needs: it cannot
+	// be built out of ReadAvailable from outside, because that clears `out` on
+	// every call and cannot see the internal buffer.
+	bool ReadN(std::string &out, size_t n);
+
 	// Wait until input is available or the timeout expires. Returns true when a
 	// subsequent read will not block. Lets a protocol that must also push
 	// unsolicited output (XMPP) wake up periodically.
@@ -49,6 +55,13 @@ public:
 	bool AcceptTls(SSL_CTX *ctx, std::string &err);
 	// Upgrade an outbound connection to TLS (client side, for the relay drainer).
 	bool ConnectTls(SSL_CTX *ctx, std::string &err);
+
+	// Apply SO_RCVTIMEO / SO_SNDTIMEO, so a peer that opens a socket and then
+	// stops talking cannot hold a connection thread forever. Opt-in and off by
+	// default: the mail and XMPP handlers deliberately sit idle for minutes, and
+	// only HTTP (where every connection is one short request) wants this.
+	// 0 disables the corresponding timeout. Returns false if setsockopt failed.
+	bool SetTimeouts(int read_ms, int write_ms);
 
 	bool IsTls() const {
 		return ssl_ != nullptr;

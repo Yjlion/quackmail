@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <utility>
 
 namespace quackmail {
 namespace citadel {
@@ -107,6 +108,27 @@ void EnsureCitadelSchema(Connection &con) {
 			num_posts     BIGINT DEFAULT 0,
 			last_call     TIMESTAMP,
 			created_at    TIMESTAMP DEFAULT now()
+		)
+	)");
+
+	// Terminal geometry was added after the table shipped; keep older files working.
+	con.Query("ALTER TABLE citadel_users ADD COLUMN IF NOT EXISTS screenwidth INTEGER DEFAULT 80");
+	con.Query("ALTER TABLE citadel_users ADD COLUMN IF NOT EXISTS screenheight INTEGER DEFAULT 24");
+
+	// Citadel's REGI/GREG registration record plus the EBIO/RBIO biography. Kept
+	// out of citadel_users because it is optional and much wider than the rest.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_user_reg (
+			username  VARCHAR PRIMARY KEY,
+			real_name VARCHAR DEFAULT '',
+			street    VARCHAR DEFAULT '',
+			city      VARCHAR DEFAULT '',
+			state     VARCHAR DEFAULT '',
+			zipcode   VARCHAR DEFAULT '',
+			phone     VARCHAR DEFAULT '',
+			email     VARCHAR DEFAULT '',
+			country   VARCHAR DEFAULT '',
+			bio       VARCHAR DEFAULT ''
 		)
 	)");
 
@@ -276,6 +298,170 @@ int64_t GetAxLevel(Connection &con, const std::string &username) {
 	return v.IsNull() ? 4 : v.GetValue<int64_t>();
 }
 
+namespace {
+
+// citadel_users joined with the credential row, in UserInfo field order. The
+// credential table is the authority on existence, so this is a LEFT JOIN from
+// quackmail_users: a user always shows up, even before a Citadel record exists.
+constexpr const char *kUserSelect =
+    "SELECT q.username, coalesce(c.usernum, 0), coalesce(c.axlevel, 4), coalesce(c.flags, 0), "
+    "coalesce(c.times_called, 0), coalesce(c.num_posts, 0), "
+    "coalesce(epoch(c.last_call), 0)::BIGINT, coalesce(q.enabled, false), "
+    "coalesce(c.screenwidth, 80)::BIGINT, coalesce(c.screenheight, 24)::BIGINT "
+    "FROM quackmail_users q LEFT JOIN citadel_users c ON c.username = q.username";
+
+UserInfo RowToUser(MaterializedQueryResult &mat, idx_t row) {
+	UserInfo u;
+	u.username = AsString(mat.GetValue(0, row));
+	u.usernum = AsBigint(mat.GetValue(1, row));
+	u.axlevel = AsBigint(mat.GetValue(2, row), 4);
+	u.flags = AsBigint(mat.GetValue(3, row));
+	u.times_called = AsBigint(mat.GetValue(4, row));
+	u.num_posts = AsBigint(mat.GetValue(5, row));
+	u.last_call = AsBigint(mat.GetValue(6, row));
+	auto en = mat.GetValue(7, row);
+	u.enabled = !en.IsNull() && en.GetValue<bool>();
+	u.screenwidth = AsBigint(mat.GetValue(8, row), 80);
+	u.screenheight = AsBigint(mat.GetValue(9, row), 24);
+	return u;
+}
+
+} // namespace
+
+std::vector<UserInfo> ListUsers(Connection &con) {
+	std::vector<UserInfo> out;
+	auto r = con.Query(std::string(kUserSelect) + " ORDER BY q.username");
+	if (r->HasError()) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		out.push_back(RowToUser(mat, i));
+	}
+	return out;
+}
+
+bool GetUser(Connection &con, const std::string &username, UserInfo &out) {
+	auto r = ExecP(con, std::string(kUserSelect) + " WHERE q.username = $1", {Value(username)});
+	if (!r) {
+		return false;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	if (mat.RowCount() < 1) {
+		return false;
+	}
+	out = RowToUser(mat, 0);
+	return true;
+}
+
+bool SetAxLevel(Connection &con, const std::string &username, int64_t axlevel, std::string &err) {
+	if (axlevel < 0 || axlevel > 6) {
+		err = "access level must be 0-6";
+		return false;
+	}
+	// GetOrAssignUserNum both validates that this is a real local user and
+	// materializes the citadel_users row the UPDATE needs.
+	if (GetOrAssignUserNum(con, username) <= 0) {
+		err = "no such user";
+		return false;
+	}
+	auto r = ExecP(con, "UPDATE citadel_users SET axlevel = $2 WHERE username = $1",
+	               {Value(username), Value::BIGINT(axlevel)});
+	if (!r) {
+		err = "update failed";
+		return false;
+	}
+	return true;
+}
+
+bool SetUserFlags(Connection &con, const std::string &username, int64_t flags) {
+	if (GetOrAssignUserNum(con, username) <= 0) {
+		return false;
+	}
+	return ExecP(con, "UPDATE citadel_users SET flags = $2 WHERE username = $1",
+	             {Value(username), Value::BIGINT(flags)}) != nullptr;
+}
+
+bool SetScreenSize(Connection &con, const std::string &username, int64_t width, int64_t height) {
+	if (GetOrAssignUserNum(con, username) <= 0) {
+		return false;
+	}
+	// Clamp to something a terminal could plausibly be, so a bogus NAWS
+	// subnegotiation cannot make the pager divide oddly or wrap at zero.
+	width = std::max<int64_t>(20, std::min<int64_t>(width, 1000));
+	height = std::max<int64_t>(5, std::min<int64_t>(height, 500));
+	return ExecP(con, "UPDATE citadel_users SET screenwidth = $2, screenheight = $3 WHERE username = $1",
+	             {Value(username), Value::BIGINT(width), Value::BIGINT(height)}) != nullptr;
+}
+
+void RecordCall(Connection &con, const std::string &username) {
+	if (GetOrAssignUserNum(con, username) <= 0) {
+		return;
+	}
+	ExecP(con, "UPDATE citadel_users SET times_called = times_called + 1, last_call = now() "
+	           "WHERE username = $1",
+	      {Value(username)});
+}
+
+bool GetRegistration(Connection &con, const std::string &username, Registration &out) {
+	auto r = ExecP(con,
+	               "SELECT real_name, street, city, state, zipcode, phone, email, country, bio "
+	               "FROM citadel_user_reg WHERE username = $1",
+	               {Value(username)});
+	if (!r) {
+		return false;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	if (mat.RowCount() < 1) {
+		return false;
+	}
+	out.real_name = AsString(mat.GetValue(0, 0));
+	out.street = AsString(mat.GetValue(1, 0));
+	out.city = AsString(mat.GetValue(2, 0));
+	out.state = AsString(mat.GetValue(3, 0));
+	out.zipcode = AsString(mat.GetValue(4, 0));
+	out.phone = AsString(mat.GetValue(5, 0));
+	out.email = AsString(mat.GetValue(6, 0));
+	out.country = AsString(mat.GetValue(7, 0));
+	out.bio = AsString(mat.GetValue(8, 0));
+	return true;
+}
+
+bool SetRegistration(Connection &con, const std::string &username, const Registration &reg) {
+	if (GetOrAssignUserNum(con, username) <= 0) {
+		return false;
+	}
+	auto r = ExecP(con,
+	               "INSERT INTO citadel_user_reg "
+	               "(username, real_name, street, city, state, zipcode, phone, email, country, bio) "
+	               "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
+	               "ON CONFLICT (username) DO UPDATE SET real_name = excluded.real_name, "
+	               "street = excluded.street, city = excluded.city, state = excluded.state, "
+	               "zipcode = excluded.zipcode, phone = excluded.phone, email = excluded.email, "
+	               "country = excluded.country, bio = excluded.bio",
+	               {Value(username), Value(reg.real_name), Value(reg.street), Value(reg.city), Value(reg.state),
+	                Value(reg.zipcode), Value(reg.phone), Value(reg.email), Value(reg.country), Value(reg.bio)});
+	if (!r) {
+		return false;
+	}
+	// Filling in registration is what sets US_REGIS, exactly as cmd_regi does.
+	UserInfo u;
+	if (GetUser(con, username, u)) {
+		SetUserFlags(con, username, u.flags | US_REGIS);
+	}
+	return true;
+}
+
+bool SetBio(Connection &con, const std::string &username, const std::string &bio) {
+	if (GetOrAssignUserNum(con, username) <= 0) {
+		return false;
+	}
+	return ExecP(con,
+	             "INSERT INTO citadel_user_reg (username, bio) VALUES ($1, $2) "
+	             "ON CONFLICT (username) DO UPDATE SET bio = excluded.bio",
+	             {Value(username), Value(bio)}) != nullptr;
+}
+
 bool IsLocalUser(Connection &con, const std::string &addr) {
 	auto at = addr.find('@');
 	std::string local = (at == std::string::npos) ? addr : addr.substr(0, at);
@@ -316,6 +502,25 @@ std::vector<Floor> ListFloors(Connection &con) {
 	return out;
 }
 
+bool GetFloor(Connection &con, int64_t floor_num, Floor &out) {
+	auto r = ExecP(con,
+	               "SELECT f.floor_num, f.name, "
+	               "(SELECT count(*) FROM citadel_rooms r WHERE r.floor_num = f.floor_num) "
+	               "FROM citadel_floors f WHERE f.floor_num = $1",
+	               {Value::BIGINT(floor_num)});
+	if (!r) {
+		return false;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	if (mat.RowCount() < 1) {
+		return false;
+	}
+	out.floor_num = AsBigint(mat.GetValue(0, 0));
+	out.name = AsString(mat.GetValue(1, 0));
+	out.room_count = AsBigint(mat.GetValue(2, 0));
+	return true;
+}
+
 int64_t CreateFloor(Connection &con, const std::string &name, std::string &err) {
 	auto num = ScalarP(con, "SELECT nextval('citadel_floor_seq')", {});
 	if (num.IsNull()) {
@@ -328,6 +533,47 @@ int64_t CreateFloor(Connection &con, const std::string &name, std::string &err) 
 		return -1;
 	}
 	return num.GetValue<int64_t>();
+}
+
+bool RenameFloor(Connection &con, int64_t floor_num, const std::string &name, std::string &err) {
+	if (name.empty()) {
+		err = "floor name may not be empty";
+		return false;
+	}
+	Floor f;
+	if (!GetFloor(con, floor_num, f)) {
+		err = "no such floor";
+		return false;
+	}
+	if (!ExecP(con, "UPDATE citadel_floors SET name = $2 WHERE floor_num = $1",
+	           {Value::BIGINT(floor_num), Value(name)})) {
+		err = "update failed";
+		return false;
+	}
+	return true;
+}
+
+bool KillFloor(Connection &con, int64_t floor_num, std::string &err) {
+	if (floor_num == 0) {
+		err = "cannot delete the main floor";
+		return false;
+	}
+	Floor f;
+	if (!GetFloor(con, floor_num, f)) {
+		err = "no such floor";
+		return false;
+	}
+	// Citadel refuses to delete a floor that still holds rooms rather than
+	// silently orphaning them onto floor 0.
+	if (f.room_count > 0) {
+		err = "floor still contains rooms";
+		return false;
+	}
+	if (!ExecP(con, "DELETE FROM citadel_floors WHERE floor_num = $1", {Value::BIGINT(floor_num)})) {
+		err = "delete failed";
+		return false;
+	}
+	return true;
 }
 
 bool GetRoomByNum(Connection &con, int64_t room_num, Room &out) {
@@ -380,21 +626,34 @@ std::vector<Room> ListRooms(Connection &con, const std::string &username, int64_
                             const std::string &which) {
 	std::vector<Room> out;
 	int64_t usernum = username.empty() ? 0 : GetOrAssignUserNum(con, username);
-	bool is_aide = !username.empty() && GetAxLevel(con, username) >= 6;
+	bool is_aide = !username.empty() && GetAxLevel(con, username) >= kAideAxLevel;
+	bool want_zapped = (which == "zapped");
 
 	std::string sql = std::string("SELECT ") + kRoomCols +
-	                  " FROM citadel_rooms WHERE (mailbox_owner = 0 OR mailbox_owner = $1)";
+	                  " FROM citadel_rooms r WHERE (r.mailbox_owner = 0 OR r.mailbox_owner = $1)";
 	if (!is_aide) {
 		// Hide other people's private rooms from non-aides, but always show a
 		// user their own mailbox rooms (which are themselves flagged private).
-		sql += " AND ((qr_flags & 4) = 0 OR mailbox_owner = $1)";
+		sql += " AND ((r.qr_flags & 4) = 0 OR r.mailbox_owner = $1)";
+	}
+	// A zapped room is one the user has forgotten: it drops out of every listing
+	// except the one that exists to show them.
+	if (!username.empty()) {
+		sql += want_zapped ? " AND EXISTS (" : " AND NOT EXISTS (";
+		sql += "SELECT 1 FROM citadel_room_state s WHERE s.username = $2 AND s.room_num = r.room_num "
+		       "AND (s.flags & 1) <> 0)";
+	} else if (want_zapped) {
+		return out; // nobody to have zapped anything
 	}
 	if (floor >= 0) {
-		sql += " AND floor_num = $2";
+		sql += username.empty() ? " AND r.floor_num = $2" : " AND r.floor_num = $3";
 	}
-	sql += " ORDER BY floor_num, listorder, display_name";
+	sql += " ORDER BY r.floor_num, r.listorder, r.display_name";
 
 	duckdb::vector<Value> params = {Value::BIGINT(usernum)};
+	if (!username.empty()) {
+		params.push_back(Value(username));
+	}
 	if (floor >= 0) {
 		params.push_back(Value::BIGINT(floor));
 	}
@@ -403,16 +662,25 @@ std::vector<Room> ListRooms(Connection &con, const std::string &username, int64_
 		return out;
 	}
 	auto &mat = r->Cast<MaterializedQueryResult>();
+	std::vector<Room> rooms;
 	for (idx_t i = 0; i < mat.RowCount(); i++) {
-		Room room = RowToRoom(mat, i);
-		if (which == "new" || which == "old") {
-			auto stats = GetRoomStats(con, username, room.room_num);
-			bool has_new = stats.new_count > 0;
-			if ((which == "new") != has_new) {
-				continue;
-			}
+		rooms.push_back(RowToRoom(mat, i));
+	}
+	if (which != "new" && which != "old") {
+		return rooms;
+	}
+	// One stats query for the whole list rather than three or four per room.
+	std::vector<int64_t> nums;
+	nums.reserve(rooms.size());
+	for (auto &room : rooms) {
+		nums.push_back(room.room_num);
+	}
+	auto stats = RoomStatsBulk(con, username, nums);
+	for (size_t i = 0; i < rooms.size(); i++) {
+		bool has_new = stats[i].new_count > 0;
+		if ((which == "new") == has_new) {
+			out.push_back(std::move(rooms[i]));
 		}
-		out.push_back(std::move(room));
 	}
 	return out;
 }
@@ -435,6 +703,42 @@ int64_t CreateRoom(Connection &con, const std::string &display_name, int64_t flo
 		return -1;
 	}
 	return num.GetValue<int64_t>();
+}
+
+bool UpdateRoom(Connection &con, const Room &room, std::string &err) {
+	Room existing;
+	if (!GetRoomByNum(con, room.room_num, existing)) {
+		err = "no such room";
+		return false;
+	}
+	if (room.display_name.empty()) {
+		err = "room name may not be empty";
+		return false;
+	}
+	if (room.floor_num != existing.floor_num) {
+		Floor f;
+		if (!GetFloor(con, room.floor_num, f)) {
+			err = "no such floor";
+			return false;
+		}
+	}
+	// The internal key is derived, never edited directly: personal rooms keep
+	// Citadel's zero-padded "<usernum>.<room>" form, public rooms are named by
+	// their display name.
+	std::string internal = existing.mailbox_owner > 0
+	                           ? MailboxRoomName(existing.mailbox_owner, room.display_name)
+	                           : room.display_name;
+	auto r = ExecP(con,
+	               "UPDATE citadel_rooms SET name = $2, display_name = $3, floor_num = $4, qr_flags = $5, "
+	               "password = $6, listorder = $7, default_view = $8, info = $9 WHERE room_num = $1",
+	               {Value::BIGINT(room.room_num), Value(internal), Value(room.display_name),
+	                Value::BIGINT(room.floor_num), Value::BIGINT(room.qr_flags), Value(room.password),
+	                Value::BIGINT(room.listorder), Value::BIGINT(room.default_view), Value(room.info)});
+	if (!r) {
+		err = "a room with that name already exists";
+		return false;
+	}
+	return true;
 }
 
 bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
@@ -668,6 +972,61 @@ RoomStats GetRoomStats(Connection &con, const std::string &username, int64_t roo
 	return s;
 }
 
+std::vector<RoomStats> RoomStatsBulk(Connection &con, const std::string &username,
+                                     const std::vector<int64_t> &room_nums) {
+	std::vector<RoomStats> out(room_nums.size());
+	if (room_nums.empty()) {
+		return out;
+	}
+	// The room numbers come from our own tables, never from a client, so
+	// inlining them is safe — and it keeps this to one query instead of the
+	// three or four per room GetRoomStats would cost.
+	std::string in_list;
+	for (size_t i = 0; i < room_nums.size(); i++) {
+		if (i) {
+			in_list += ",";
+		}
+		in_list += std::to_string(room_nums[i]);
+	}
+	std::string sql =
+	    "WITH lr AS (SELECT room_num, last_read FROM citadel_room_state WHERE username = $1) "
+	    "SELECT r.room_num, coalesce(lr.last_read, 0), "
+	    "(SELECT count(*) FROM citadel_room_msgs m WHERE m.room_num = r.room_num), "
+	    "(SELECT coalesce(max(m.msgnum), 0) FROM citadel_room_msgs m WHERE m.room_num = r.room_num), "
+	    "(SELECT count(*) FROM citadel_room_msgs m WHERE m.room_num = r.room_num "
+	    " AND m.msgnum > coalesce(lr.last_read, 0)) "
+	    "FROM citadel_rooms r LEFT JOIN lr ON lr.room_num = r.room_num "
+	    "WHERE r.room_num IN (" +
+	    in_list + ")";
+
+	auto r = ExecP(con, sql, {Value(username)});
+	if (!r) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	// Index the result by room number: the IN list does not preserve our order,
+	// and a room could have been deleted between listing and counting.
+	std::vector<std::pair<int64_t, RoomStats>> rows;
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		RoomStats s;
+		int64_t num = AsBigint(mat.GetValue(0, i));
+		s.last_read = AsBigint(mat.GetValue(1, i));
+		s.total = AsBigint(mat.GetValue(2, i));
+		s.highest = AsBigint(mat.GetValue(3, i));
+		s.new_count = AsBigint(mat.GetValue(4, i));
+		rows.emplace_back(num, s);
+	}
+	for (size_t i = 0; i < room_nums.size(); i++) {
+		for (auto &row : rows) {
+			if (row.first == room_nums[i]) {
+				out[i] = row.second;
+				break;
+			}
+		}
+	}
+	return out;
+}
+
 void SetLastRead(Connection &con, const std::string &username, int64_t room_num, int64_t msgnum) {
 	if (username.empty()) {
 		return;
@@ -676,6 +1035,71 @@ void SetLastRead(Connection &con, const std::string &username, int64_t room_num,
 	      "INSERT INTO citadel_room_state (username, room_num, last_read) VALUES ($1, $2, $3) "
 	      "ON CONFLICT (username, room_num) DO UPDATE SET last_read = excluded.last_read",
 	      {Value(username), Value::BIGINT(room_num), Value::BIGINT(msgnum)});
+}
+
+bool ZapRoom(Connection &con, const std::string &username, int64_t room_num, bool zapped, std::string &err) {
+	if (username.empty()) {
+		err = "not logged in";
+		return false;
+	}
+	if (zapped && room_num == kLobbyRoom) {
+		// Citadel refuses this: the Lobby is where <G>oto lands when nothing
+		// else has unread messages, so forgetting it would strand the user.
+		err = "you cannot zap the Lobby";
+		return false;
+	}
+	auto r = ExecP(con,
+	               "INSERT INTO citadel_room_state (username, room_num, flags) VALUES ($1, $2, $3) "
+	               "ON CONFLICT (username, room_num) DO UPDATE SET flags = "
+	               "CASE WHEN $3 <> 0 THEN citadel_room_state.flags | 1 ELSE citadel_room_state.flags & ~1 END",
+	               {Value(username), Value::BIGINT(room_num), Value::BIGINT(zapped ? RS_ZAPPED : 0)});
+	if (!r) {
+		err = "could not update room state";
+		return false;
+	}
+	return true;
+}
+
+bool IsZapped(Connection &con, const std::string &username, int64_t room_num) {
+	if (username.empty()) {
+		return false;
+	}
+	auto v = ScalarP(con, "SELECT flags FROM citadel_room_state WHERE username = $1 AND room_num = $2",
+	                 {Value(username), Value::BIGINT(room_num)});
+	return (AsBigint(v) & RS_ZAPPED) != 0;
+}
+
+bool RoomUnlocked(Connection &con, const std::string &username, const Room &room) {
+	if (!(room.qr_flags & QR_PASSWORDED) || room.password.empty()) {
+		return true;
+	}
+	if (username.empty()) {
+		return false;
+	}
+	// The owner of a personal room never needs its password.
+	if (room.mailbox_owner > 0 && room.mailbox_owner == GetOrAssignUserNum(con, username)) {
+		return true;
+	}
+	auto v = ScalarP(con, "SELECT flags FROM citadel_room_state WHERE username = $1 AND room_num = $2",
+	                 {Value(username), Value::BIGINT(room.room_num)});
+	return (AsBigint(v) & RS_UNLOCKED) != 0;
+}
+
+bool UnlockRoom(Connection &con, const std::string &username, const Room &room,
+                const std::string &password) {
+	if (username.empty()) {
+		return false;
+	}
+	if (!(room.qr_flags & QR_PASSWORDED) || room.password.empty()) {
+		return true;
+	}
+	if (password != room.password) {
+		return false;
+	}
+	return ExecP(con,
+	             "INSERT INTO citadel_room_state (username, room_num, flags) VALUES ($1, $2, 2) "
+	             "ON CONFLICT (username, room_num) DO UPDATE SET flags = citadel_room_state.flags | 2",
+	             {Value(username), Value::BIGINT(room.room_num)}) != nullptr;
 }
 
 int64_t InsertMessage(Connection &con, const Message &msg, const std::vector<int64_t> &rooms, std::string &err) {
@@ -795,6 +1219,58 @@ bool LoadMessage(Connection &con, int64_t msgnum, Message &out) {
 	out.origin_room = AsString(mat.GetValue(10, 0));
 	Value raw_v = mat.GetValue(11, 0);
 	out.raw = raw_v.IsNull() ? std::string() : duckdb::StringValue::Get(raw_v);
+	return true;
+}
+
+bool MessageInRoom(Connection &con, int64_t room_num, int64_t msgnum) {
+	auto v = ScalarP(con, "SELECT 1 FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2",
+	                 {Value::BIGINT(room_num), Value::BIGINT(msgnum)});
+	return !v.IsNull();
+}
+
+bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::string &err) {
+	if (!MessageInRoom(con, room_num, msgnum)) {
+		err = "message not found in this room";
+		return false;
+	}
+	// Only the room pointer goes: the message row may still be pointed into
+	// other rooms (a mail message lives in both Mail and Sent Items).
+	if (!ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2",
+	           {Value::BIGINT(room_num), Value::BIGINT(msgnum)})) {
+		err = "delete failed";
+		return false;
+	}
+	return true;
+}
+
+bool MoveMessage(Connection &con, int64_t from_room, int64_t to_room, int64_t msgnum, bool is_copy,
+                 std::string &err) {
+	if (!MessageInRoom(con, from_room, msgnum)) {
+		err = "message not found in this room";
+		return false;
+	}
+	Room target;
+	if (!GetRoomByNum(con, to_room, target)) {
+		err = "no such target room";
+		return false;
+	}
+	if (from_room == to_room) {
+		return true; // nothing to do; a copy onto itself is a no-op
+	}
+	if (!ExecP(con, "INSERT OR IGNORE INTO citadel_room_msgs (room_num, msgnum) VALUES ($1, $2)",
+	           {Value::BIGINT(to_room), Value::BIGINT(msgnum)})) {
+		err = "insert failed";
+		return false;
+	}
+	ExecP(con, "UPDATE citadel_rooms SET highest_msg = greatest(highest_msg, $2) WHERE room_num = $1",
+	      {Value::BIGINT(to_room), Value::BIGINT(msgnum)});
+	if (!is_copy) {
+		if (!ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2",
+		           {Value::BIGINT(from_room), Value::BIGINT(msgnum)})) {
+			err = "delete failed";
+			return false;
+		}
+	}
 	return true;
 }
 

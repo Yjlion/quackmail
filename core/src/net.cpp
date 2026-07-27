@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 #include <openssl/err.h>
 
@@ -112,6 +113,43 @@ bool ClientStream::ReadAvailable(std::string &out, size_t max_bytes) {
 	out.assign(rbuf_, rpos_, n);
 	rpos_ += n;
 	return true;
+}
+
+bool ClientStream::ReadN(std::string &out, size_t n) {
+	out.clear();
+	out.reserve(n);
+	while (out.size() < n) {
+		if (rpos_ >= rbuf_.size() && !FillBuffer()) {
+			return false;
+		}
+		size_t take = std::min(n - out.size(), rbuf_.size() - rpos_);
+		out.append(rbuf_, rpos_, take);
+		rpos_ += take;
+	}
+	return true;
+}
+
+bool ClientStream::SetTimeouts(int read_ms, int write_ms) {
+	if (fd_ < 0) {
+		return false;
+	}
+	auto apply = [this](int optname, int ms) {
+		struct timeval tv {};
+		tv.tv_sec = ms / 1000;
+		tv.tv_usec = (ms % 1000) * 1000;
+		return ::setsockopt(fd_, SOL_SOCKET, optname, &tv, sizeof(tv)) == 0;
+	};
+	bool ok = true;
+	if (read_ms >= 0) {
+		ok = apply(SO_RCVTIMEO, read_ms) && ok;
+	}
+	if (write_ms >= 0) {
+		ok = apply(SO_SNDTIMEO, write_ms) && ok;
+	}
+	// A timeout makes recv() fail with EAGAIN, and SSL_read() return <= 0.
+	// RawRead turns both into -1, which every caller already treats as EOF —
+	// so a stalled peer simply loses its connection.
+	return ok;
 }
 
 bool ClientStream::WaitReadable(int timeout_ms) {

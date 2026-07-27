@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cctype>
 
+#include <openssl/crypto.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
+
 namespace quackmail {
 namespace util {
 
@@ -64,9 +68,78 @@ std::string Upper(const std::string &s) {
 	return out;
 }
 
+std::string Lower(const std::string &s) {
+	std::string out = s;
+	std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
+	return out;
+}
+
 std::string LocalPart(const std::string &addr) {
 	auto at = addr.find('@');
 	return at == std::string::npos ? addr : addr.substr(0, at);
+}
+
+bool RandomBytes(size_t n, std::string &out) {
+	out.assign(n, '\0');
+	if (n == 0) {
+		return true;
+	}
+	return RAND_bytes(reinterpret_cast<unsigned char *>(&out[0]), (int)n) == 1;
+}
+
+std::string RandomHex(size_t bytes) {
+	std::string raw;
+	if (!RandomBytes(bytes, raw)) {
+		return std::string();
+	}
+	static const char kHex[] = "0123456789abcdef";
+	std::string out;
+	out.reserve(bytes * 2);
+	for (unsigned char c : raw) {
+		out += kHex[c >> 4];
+		out += kHex[c & 0x0F];
+	}
+	return out;
+}
+
+std::string RandomBase64Url(size_t bytes) {
+	std::string raw;
+	if (!RandomBytes(bytes, raw)) {
+		return std::string();
+	}
+	std::string b64 = Base64Encode(raw);
+	std::string out;
+	out.reserve(b64.size());
+	for (char c : b64) {
+		if (c == '=') {
+			continue; // unpadded: the token travels in a cookie
+		}
+		out += (c == '+') ? '-' : (c == '/') ? '_' : c;
+	}
+	return out;
+}
+
+std::string Sha256Hex(const std::string &in) {
+	unsigned char digest[SHA256_DIGEST_LENGTH];
+	SHA256(reinterpret_cast<const unsigned char *>(in.data()), in.size(), digest);
+	static const char kHex[] = "0123456789abcdef";
+	std::string out;
+	out.reserve(sizeof(digest) * 2);
+	for (unsigned char c : digest) {
+		out += kHex[c >> 4];
+		out += kHex[c & 0x0F];
+	}
+	return out;
+}
+
+bool SecureEquals(const std::string &a, const std::string &b) {
+	if (a.size() != b.size()) {
+		return false;
+	}
+	if (a.empty()) {
+		return true;
+	}
+	return CRYPTO_memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
 } // namespace util

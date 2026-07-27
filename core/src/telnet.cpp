@@ -1,5 +1,8 @@
 #include "quackmail/telnet.hpp"
 
+#include <cstdlib>
+#include <string>
+
 namespace quackmail {
 namespace telnet {
 namespace {
@@ -46,6 +49,55 @@ bool Session::NextByte(unsigned char &u) {
 	return true;
 }
 
+// IAC SB <option> <payload...> IAC SE. Only NAWS carries anything we want:
+// two 16-bit big-endian values, width then height. Everything else is drained
+// and discarded.
+void Session::ReadSubnegotiation() {
+	std::string payload;
+	unsigned char p, q;
+	bool first = true;
+	unsigned char option = 0;
+	while (NextByte(p)) {
+		if (p == IAC) {
+			if (!NextByte(q)) {
+				return;
+			}
+			if (q == SE) {
+				break;
+			}
+			if (q == IAC) {
+				payload.push_back((char)IAC); // escaped 0xFF inside the payload
+				continue;
+			}
+			continue; // an unexpected command inside SB; ignore it
+		}
+		if (first) {
+			option = p;
+			first = false;
+			continue;
+		}
+		payload.push_back((char)p);
+		if (payload.size() > 64) {
+			payload.resize(64); // nothing we parse is longer than this
+		}
+	}
+	if (option == OPT_NAWS && payload.size() >= 4) {
+		int w = ((unsigned char)payload[0] << 8) | (unsigned char)payload[1];
+		int h = ((unsigned char)payload[2] << 8) | (unsigned char)payload[3];
+		if (w > 0 && h > 0) {
+			SetSize(w, h);
+			have_naws_ = true;
+		}
+	}
+}
+
+void Session::SetSize(int width, int height) {
+	// Clamp to something a terminal could plausibly be, so a bogus or hostile
+	// NAWS cannot make the pager divide by a silly number.
+	width_ = width < 20 ? 20 : (width > 1000 ? 1000 : width);
+	height_ = height < 5 ? 5 : (height > 500 ? 500 : height);
+}
+
 int Session::GetChar() {
 	unsigned char u;
 	while (NextByte(u)) {
@@ -59,13 +111,7 @@ int Session::GetChar() {
 				return IAC; // escaped 0xFF is literal data
 			}
 			if (verb == SB) {
-				// Skip the subnegotiation payload up to IAC SE.
-				unsigned char p, q;
-				while (NextByte(p)) {
-					if (p == IAC && NextByte(q) && q == SE) {
-						break;
-					}
-				}
+				ReadSubnegotiation();
 				continue;
 			}
 			if (verb == WILL || verb == WONT || verb == DO || verb == DONT) {
@@ -172,6 +218,96 @@ void Session::Write(const std::string &text) {
 		}
 	}
 	stream_.Write(out);
+}
+
+// ---- prompting -------------------------------------------------------------
+
+bool Session::Prompt(const std::string &question, std::string &out, const std::string &dflt) {
+	Write(question);
+	if (!ReadLine(out)) {
+		return false;
+	}
+	if (out.empty()) {
+		out = dflt;
+	}
+	return true;
+}
+
+bool Session::YesNo(const std::string &question, bool dflt, bool &out) {
+	std::string reply;
+	if (!Prompt(question + (dflt ? " [Yes]: " : " [No]: "), reply)) {
+		return false;
+	}
+	if (reply.empty()) {
+		out = dflt;
+	} else {
+		out = reply[0] == 'y' || reply[0] == 'Y';
+	}
+	return true;
+}
+
+bool Session::PromptInt(const std::string &question, int64_t dflt, int64_t &out) {
+	std::string reply;
+	if (!Prompt(question + " [" + std::to_string(dflt) + "]: ", reply)) {
+		return false;
+	}
+	if (reply.empty()) {
+		out = dflt;
+		return true;
+	}
+	char *end = nullptr;
+	long long v = std::strtoll(reply.c_str(), &end, 10);
+	out = (end && *end == '\0') ? (int64_t)v : dflt;
+	return true;
+}
+
+// ---- paging ----------------------------------------------------------------
+
+void Session::SetPageSize(int rows) {
+	page_rows_ = rows > 2 ? rows : 0;
+	page_used_ = 0;
+}
+
+bool Session::MorePrompt() {
+	Write("<more> ");
+	int ch = GetChar();
+	// Erase the prompt so the paused screen does not keep it.
+	Write("\r          \r");
+	if (ch < 0) {
+		return false;
+	}
+	// Citadel's convention: S(top) or Q(uit) abandons the listing, anything
+	// else continues.
+	return !(ch == 's' || ch == 'S' || ch == 'q' || ch == 'Q' || ch == 3);
+}
+
+bool Session::Page(const std::string &text) {
+	if (page_rows_ <= 0) {
+		Write(text);
+		return true;
+	}
+	// Count the wrapped height of each line, not just the newlines, or a long
+	// paragraph scrolls straight past the pause.
+	size_t pos = 0;
+	while (pos <= text.size()) {
+		size_t nl = text.find('\n', pos);
+		std::string line = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+		Write(line);
+		if (nl == std::string::npos) {
+			return true; // no trailing newline: leave the cursor where it is
+		}
+		Write("\n");
+		int rows = (int)(line.size() / (size_t)width_) + 1;
+		page_used_ += rows;
+		if (page_used_ >= page_rows_ - 1) {
+			page_used_ = 0;
+			if (!MorePrompt()) {
+				return false;
+			}
+		}
+		pos = nl + 1;
+	}
+	return true;
 }
 
 } // namespace telnet
