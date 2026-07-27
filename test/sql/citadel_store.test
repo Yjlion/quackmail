@@ -1,0 +1,56 @@
+# name: test/sql/citadel_store.test
+# description: Schema added for zapped rooms, user preferences and registration
+# group: [quackmail]
+
+require quackmail
+
+require quackmail_citadel
+
+# The registration record REGI/GREG and the BBS shell's <.E>nter re<G>istration
+# write. Eight fields in Citadel's own order, plus the EBIO/RBIO biography.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 'citadel_user_reg';
+----
+1
+
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index)
+FROM duckdb_columns() WHERE table_name = 'citadel_user_reg';
+----
+username,real_name,street,city,state,zipcode,phone,email,country,bio
+
+# Terminal geometry is added to an existing table, so it must survive an
+# upgrade of a database file that predates it.
+query I
+SELECT count(*) FROM duckdb_columns()
+WHERE table_name = 'citadel_users' AND column_name IN ('screenwidth', 'screenheight');
+----
+2
+
+# citadel_room_state.flags is where RS_ZAPPED lives. It shipped in the original
+# schema unused; confirm it is still there and still defaults to 0.
+query I
+SELECT count(*) FROM duckdb_columns()
+WHERE table_name = 'citadel_room_state' AND column_name = 'flags';
+----
+1
+
+statement ok
+INSERT INTO citadel_room_state (username, room_num, last_read) VALUES ('nobody', 0, 0);
+
+query II
+SELECT last_read, flags FROM citadel_room_state WHERE username = 'nobody';
+----
+0	0
+
+statement ok
+DELETE FROM citadel_room_state WHERE username = 'nobody';
+
+# The schema is idempotent: loading a second extension re-runs EnsureCitadelSchema,
+# which must not duplicate or reset anything.
+require quackmail_telnet
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 'citadel_user_reg';
+----
+1

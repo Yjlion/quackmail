@@ -249,6 +249,143 @@ void HandleMsg2(Connection &con, net::ClientStream &stream, const std::vector<st
 	WriteListing(stream, lines);
 }
 
+// REGI — the client sends the registration as a listing, in the field order
+// cmd_regi() reads it in the real server (serv_vcard.c): name, address, city,
+// state, zip, telephone, e-mail, country. The same record the BBS shell's
+// <.E>nter re<G>istration and the web console's preferences page write.
+void HandleRegi(Connection &con, Session &s, net::ClientStream &stream) {
+	if (!s.authed) {
+		stream.WriteLine("530 You must log in first.");
+		return;
+	}
+	stream.WriteLine("400 Send registration...");
+	std::vector<std::string> fields;
+	std::string line;
+	while (stream.ReadLine(line, 8192)) {
+		if (line == "000") {
+			break;
+		}
+		if (fields.size() < 8) {
+			fields.push_back(line);
+		}
+	}
+	auto at = [&fields](size_t i) { return i < fields.size() ? fields[i] : std::string(); };
+
+	citadel::Registration reg;
+	citadel::GetRegistration(con, s.username, reg);
+	reg.real_name = at(0);
+	reg.street = at(1);
+	reg.city = at(2);
+	reg.state = at(3);
+	reg.zipcode = at(4);
+	reg.phone = at(5);
+	reg.email = at(6);
+	if (!at(7).empty()) {
+		reg.country = at(7);
+	}
+	citadel::SetRegistration(con, s.username, reg);
+}
+
+// GREG <user> — read registration back. A user may read their own; an aide may
+// read anyone's.
+void HandleGreg(Connection &con, Session &s, net::ClientStream &stream, const std::vector<std::string> &p) {
+	if (!s.authed) {
+		stream.WriteLine("530 You must log in first.");
+		return;
+	}
+	std::string who = Field(p, 0);
+	if (who.empty()) {
+		who = s.username;
+	}
+	if (who != s.username && s.axlevel < citadel::kAideAxLevel) {
+		stream.WriteLine("540 Higher access required.");
+		return;
+	}
+	citadel::UserInfo info;
+	if (!citadel::GetUser(con, who, info)) {
+		stream.WriteLine("550 No such user.");
+		return;
+	}
+	citadel::Registration reg;
+	citadel::GetRegistration(con, who, reg);
+	stream.WriteLine("100 " + who);
+	// The field order GREG reports in the real server.
+	std::vector<std::string> lines = {std::to_string(info.usernum),
+	                                  reg.real_name,
+	                                  reg.street,
+	                                  reg.city,
+	                                  reg.state,
+	                                  reg.zipcode,
+	                                  reg.phone,
+	                                  std::to_string(info.axlevel),
+	                                  reg.email,
+	                                  reg.country};
+	for (auto &l : lines) {
+		stream.WriteLine(l);
+	}
+	stream.WriteLine("000");
+}
+
+// EBIO / RBIO — the free-text biography that lives beside the registration.
+void HandleEbio(Connection &con, Session &s, net::ClientStream &stream) {
+	if (!s.authed) {
+		stream.WriteLine("530 You must log in first.");
+		return;
+	}
+	stream.WriteLine("400 Send new bio; terminate with '000'.");
+	std::string bio, line;
+	while (stream.ReadLine(line, 8192)) {
+		if (line == "000") {
+			break;
+		}
+		if (bio.size() + line.size() + 1 > 64 * 1024) {
+			continue; // keep draining, but stop growing
+		}
+		bio += line;
+		bio += '\n';
+	}
+	citadel::SetBio(con, s.username, bio);
+}
+
+void HandleRbio(Connection &con, Session &s, net::ClientStream &stream, const std::vector<std::string> &p) {
+	std::string who = Field(p, 0);
+	if (who.empty()) {
+		who = s.username;
+	}
+	citadel::Registration reg;
+	if (!citadel::GetRegistration(con, who, reg) || reg.bio.empty()) {
+		stream.WriteLine("550 No bio on file.");
+		return;
+	}
+	std::vector<std::string> lines;
+	size_t pos = 0;
+	while (pos < reg.bio.size()) {
+		size_t nl = reg.bio.find('\n', pos);
+		lines.push_back(reg.bio.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos));
+		if (nl == std::string::npos) {
+			break;
+		}
+		pos = nl + 1;
+	}
+	WriteListing(stream, lines);
+}
+
+// LIST — the user directory. US_UNLISTED hides an entry from everyone but an
+// aide, which is exactly what the BBS shell's <.R>ead <U>ser listing honours.
+void HandleList(Connection &con, Session &s, net::ClientStream &stream) {
+	std::vector<std::string> lines;
+	for (auto &u : citadel::ListUsers(con)) {
+		if ((u.flags & citadel::US_UNLISTED) && s.axlevel < citadel::kAideAxLevel &&
+		    u.username != s.username) {
+			continue;
+		}
+		lines.push_back(u.username + "|" + std::to_string(u.axlevel) + "|" +
+		                std::to_string(u.usernum) + "|" + std::to_string(u.last_call) + "|" +
+		                std::to_string(u.times_called) + "|" + std::to_string(u.num_posts));
+	}
+	WriteListing(stream, lines);
+}
+
 void HandleEnt0(Connection &con, Session &s, net::ClientStream &stream, const std::vector<std::string> &p) {
 	if (!s.authed) {
 		stream.WriteLine("530 You must log in first.");
@@ -709,9 +846,12 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				stream.WriteLine("540 Not in a room.");
 			} else {
 				int64_t msgnum = ToInt(Field(p, 0), -1);
-				ExecParams(con, "DELETE FROM citadel_room_msgs WHERE room_num=$1 AND msgnum=$2",
-				           {Value::BIGINT(s.room.room_num), Value::BIGINT(msgnum)});
-				stream.WriteLine("200 Message deleted.");
+				std::string err;
+				if (!citadel::DeleteMessage(con, s.room.room_num, msgnum, err)) {
+					stream.WriteLine("550 " + err);
+				} else {
+					stream.WriteLine("200 Message deleted.");
+				}
 			}
 		} else if (verb == "MOVE") {
 			// MOVE <msgnum>|<target_room>|<is_copy>  — move/copy a message.
@@ -721,18 +861,25 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				int64_t msgnum = ToInt(Field(p, 0), -1);
 				citadel::Room target;
 				bool is_copy = ToInt(Field(p, 2), 0) != 0;
+				std::string err;
 				if (!citadel::ResolveRoom(con, s.username, Field(p, 1), target)) {
 					stream.WriteLine("550 No such room.");
+				} else if (!citadel::MoveMessage(con, s.room.room_num, target.room_num, msgnum, is_copy, err)) {
+					stream.WriteLine("550 " + err);
 				} else {
-					ExecParams(con, "INSERT OR IGNORE INTO citadel_room_msgs (room_num, msgnum) VALUES ($1, $2)",
-					           {Value::BIGINT(target.room_num), Value::BIGINT(msgnum)});
-					if (!is_copy) {
-						ExecParams(con, "DELETE FROM citadel_room_msgs WHERE room_num=$1 AND msgnum=$2",
-						           {Value::BIGINT(s.room.room_num), Value::BIGINT(msgnum)});
-					}
 					stream.WriteLine("200 Message " + std::string(is_copy ? "copied." : "moved."));
 				}
 			}
+		} else if (verb == "REGI") {
+			HandleRegi(con, s, stream);
+		} else if (verb == "GREG") {
+			HandleGreg(con, s, stream, p);
+		} else if (verb == "EBIO") {
+			HandleEbio(con, s, stream);
+		} else if (verb == "RBIO") {
+			HandleRbio(con, s, stream, p);
+		} else if (verb == "LIST") {
+			HandleList(con, s, stream);
 		} else if (verb == "INFO") {
 			WriteListing(stream, InfoLines(con));
 		} else if (verb == "MSGP") {
