@@ -103,7 +103,7 @@ jobs:
           # The loadable extensions (original names, so `LOAD` is simple).
           for ext in quackmail quackmail_citadel quackmail_smtp_in quackmail_smtp_out \
                      quackmail_imap quackmail_managesieve quackmail_pop3 \
-                     quackmail_telnet quackmail_nntp quackmail_xmpp; do
+                     quackmail_telnet quackmail_nntp quackmail_xmpp quackmail_http; do
             cp "build/release/extension/${ext}/${ext}.duckdb_extension" "${out}/"
           done
 
@@ -142,7 +142,8 @@ jobs:
 
           Extensions: quackmail (umbrella), quackmail_citadel (native Citadel
           protocol), quackmail_smtp_in, quackmail_smtp_out, quackmail_imap,
-          quackmail_managesieve, quackmail_pop3.
+          quackmail_managesieve, quackmail_pop3, quackmail_telnet,
+          quackmail_nntp, quackmail_xmpp, quackmail_http (webmail + admin).
           EOF
 
           tar -C dist -czf "dist/${bundle}.tar.gz" "${bundle}"

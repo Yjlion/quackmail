@@ -65,6 +65,11 @@ SERVICES = [
     ("NNTPS",        "quackmail_nntp",         "qm_nntps",            1563,  "implicit"),
     ("XMPP",         "quackmail_xmpp",         "qm_xmpp",             15222, "starttls"),
     ("XMPPS",        "quackmail_xmpp",         "qm_xmpps",            15223, "implicit"),
+    # The web front-end. HTTP redirects to HTTPS unless qm_web_force_https is
+    # turned off (the reverse-proxy mode), so on a box with no certificate set
+    # QUACKCIT_ENABLE_HTTPS=0 and qm_web_force_https=0.
+    ("HTTP",         "quackmail_http",         "qm_http",             8080,  "none"),
+    ("HTTPS",        "quackmail_http",         "qm_https",            8443,  "implicit"),
 ]
 
 # Users seeded on first run. Mirrors the reference Citadel box (admin/admin at

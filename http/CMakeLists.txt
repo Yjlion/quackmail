@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.5)
+
+set(TARGET_NAME quackmail_http)
+include(${CMAKE_CURRENT_LIST_DIR}/../core/quackmail_core.cmake)
+
+set(EXTENSION_NAME ${TARGET_NAME}_extension)
+set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
+
+project(${TARGET_NAME})
+set(CMAKE_CXX_STANDARD "17" CACHE STRING "C++ standard to enforce")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include_directories(src/include ${QUACKMAIL_CORE_INCLUDE})
+
+# Unlike the other modules, this one is more than one translation unit: a web
+# front-end is many screens, and one file would be unreadable. build_static_extension
+# and build_loadable_extension are varargs, so a list works. Note that handlers
+# therefore live in `namespace duckdb::qmweb`, not an anonymous namespace —
+# see src/include/web.hpp.
+set(EXTENSION_SOURCES
+    src/quackmail_http_extension.cpp
+    src/web_router.cpp
+    src/web_chrome.cpp
+    src/web_auth.cpp
+    src/web_bbs.cpp
+    src/web_mail.cpp
+    src/web_prefs.cpp
+    src/web_admin_users.cpp
+    src/web_admin_policy.cpp
+    src/web_admin_ops.cpp
+)
+
+build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
+build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+
+quackmail_link(${EXTENSION_NAME})
+quackmail_link(${LOADABLE_EXTENSION_NAME})
+
+install(
+  TARGETS ${EXTENSION_NAME}
+  EXPORT "${DUCKDB_EXPORT_SET}"
+  LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
+  ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")

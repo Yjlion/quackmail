@@ -18,6 +18,8 @@ require quackmail_nntp
 
 require quackmail_xmpp
 
+require quackmail_http
+
 # Umbrella version + schema-backed status
 query I
 SELECT version FROM qm_version();
@@ -188,5 +190,32 @@ stopped
 
 query I
 SELECT note FROM qm_xmpps_stop();
+----
+stopped
+
+# The web front-end: a plaintext listener (which redirects to HTTPS unless
+# qm_web_force_https is turned off) and an implicit-TLS one.
+query I
+SELECT note FROM qm_http_start('127.0.0.1', 18080);
+----
+started
+
+query I
+SELECT note FROM qm_https_start('127.0.0.1', 18443, implicit_tls => true);
+----
+started
+
+query II
+SELECT (SELECT running FROM qm_http_status()), (SELECT running FROM qm_https_status());
+----
+true	true
+
+query I
+SELECT note FROM qm_http_stop();
+----
+stopped
+
+query I
+SELECT note FROM qm_https_stop();
 ----
 stopped
