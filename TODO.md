@@ -131,8 +131,9 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
         padded to Citadel's `0000000002.Mail` form so group names match exactly
   - [x] **POST**, plus `<message-id>` fetches and real `:bytes`/`:lines`
   - known divergences from the oracle, all deliberate: posting-related
-    capabilities/flags, RFC-correct `205` for QUIT (Citadel sends `221`), and
-    room ordering in `LIST` (ours follows floor/listorder)
+    capabilities/flags, and RFC-correct `205` for QUIT (Citadel sends `221`).
+    Room ordering was also on this list until Phase 6 traced it to `cmd_lkra`
+    walking the room database in key order; `ListRooms` now matches.
 - [x] **Phase 4 — XMPP** (PR #13; `quackmail_xmpp`, 5222/5223; dev 15222/15223
       because the oracle owns 5222 on the test box)
   - [x] incremental XML stream tokenizer in core (no expat in the extension

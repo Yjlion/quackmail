@@ -123,6 +123,13 @@ QuackCit (login banner, `<K>nown rooms`, no spurious errors).
   and `EscapeHtml` second. The other order lets `=?utf-8?B?PHNjcmlwdD4=?=`
   decode back into a live tag *after* escaping has run — and message headers
   come from inbound SMTP, i.e. from anyone.
+- **Room listings are ordered by the internal key, not by listorder.** The real
+  server's `cmd_lkra` just walks the room database, so rooms arrive in key
+  order; personal rooms are keyed `0000000002.Calendar`, and digits sort ahead
+  of letters, which is why every mailbox precedes the public rooms. Confirmed
+  against the oracle for both a plain user and an aide. `listorder` is stored
+  and reported but deliberately not used for sorting — the real server ignores
+  it when listing, and clients group by floor themselves.
 - **Toggle wording comes from the text client, not from taste.** `<X>` prints
   `Expert mode now ON/OFF` and `;C` prints `Floor mode now ON/OFF`, both from
   `textclient/user_functions.c:861-876`; `<Q>` follows `client_chat.c:204`

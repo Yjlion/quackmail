@@ -648,7 +648,14 @@ std::vector<Room> ListRooms(Connection &con, const std::string &username, int64_
 	if (floor >= 0) {
 		sql += username.empty() ? " AND r.floor_num = $2" : " AND r.floor_num = $3";
 	}
-	sql += " ORDER BY r.floor_num, r.listorder, r.display_name";
+	// Ordered by the internal key, which is what a real Citadel server does:
+	// cmd_lkra simply walks the room database, so rooms come back in key order.
+	// Personal rooms are keyed "<usernum zero-padded to 10>.<name>", so digits
+	// sort ahead of letters and every mailbox lands before the public rooms —
+	// matching the oracle's LKRA exactly for both a plain user and an aide.
+	// listorder is deliberately not used here: the real server ignores it when
+	// listing, and clients that care do their own grouping by floor.
+	sql += " ORDER BY r.name";
 
 	duckdb::vector<Value> params = {Value::BIGINT(usernum)};
 	if (!username.empty()) {

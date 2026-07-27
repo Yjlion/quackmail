@@ -192,6 +192,8 @@ bool ResolveRoom(duckdb::Connection &con, const std::string &username, const std
 bool GetRoomByNum(duckdb::Connection &con, int64_t room_num, Room &out);
 // which: "all" | "new" | "old" | "zapped". Zapped rooms are excluded from the
 // first three and are the only thing "zapped" returns. floor < 0 = every floor.
+// Rooms come back in internal-key order, which puts every personal room before
+// the public ones — the order a real Citadel server's LKRA produces.
 std::vector<Room> ListRooms(duckdb::Connection &con, const std::string &username, int64_t floor,
                             const std::string &which);
 int64_t CreateRoom(duckdb::Connection &con, const std::string &display_name, int64_t floor, int64_t qr_flags,
