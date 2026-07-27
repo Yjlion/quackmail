@@ -1,0 +1,100 @@
+# name: test/sql/http.test
+# description: The web front-end's pure codecs — percent-encoding, HTML escaping, path normalization
+# group: [quackmail]
+
+require quackmail
+
+# ---- percent-decoding ------------------------------------------------------
+
+# '+' is a space in form data (query strings, urlencoded bodies) but a literal
+# '+' in a path, so the caller chooses.
+query II
+SELECT qm_url_decode('a%20b+c', true), qm_url_decode('a%20b+c', false);
+----
+a b c	a b+c
+
+# An invalid or truncated escape is passed through literally rather than
+# dropped: decoding must never silently lose bytes.
+query III
+SELECT qm_url_decode('%zz', false), qm_url_decode('100%', false), qm_url_decode('%4', false);
+----
+%zz	100%	%4
+
+query I
+SELECT qm_url_decode('%48%65%6c%6C%6F', false);
+----
+Hello
+
+# ---- percent-encoding ------------------------------------------------------
+
+# Unreserved characters (RFC 3986) survive; everything else is escaped.
+query II
+SELECT qm_url_encode('abcXYZ019-._~'), qm_url_encode('a b/c?d=e&f#g');
+----
+abcXYZ019-._~	a%20b%2Fc%3Fd%3De%26f%23g
+
+# Round-trips over input that would break a naive encoder.
+query I
+SELECT count(*) FROM (VALUES
+    ('<script>alert(1)</script>'),
+    ('a=1&b=2'),
+    ('../../etc/passwd'),
+    ('%00%0d%0a'),
+    ('café ☕'),
+    ('"quoted" ''single'''),
+    ('')
+) AS t(s)
+WHERE qm_url_decode(qm_url_encode(s), false) <> s;
+----
+0
+
+# ---- HTML escaping ---------------------------------------------------------
+
+# Note &#39; and not &apos;: the latter is not valid HTML4, and message bodies
+# arrive from inbound SMTP, so this is the function standing between a hostile
+# sender and script execution in a reader's browser.
+query I
+SELECT qm_html_escape('<script>&"''');
+----
+&lt;script&gt;&amp;&quot;&#39;
+
+query I
+SELECT qm_html_escape('plain text 123');
+----
+plain text 123
+
+# Escaping is not idempotent, and must not be applied twice.
+query I
+SELECT qm_html_escape(qm_html_escape('<b>'));
+----
+&amp;lt;b&amp;gt;
+
+# ---- path normalization ----------------------------------------------------
+
+query III
+SELECT qm_url_path('/mail/Mail'), qm_url_path('/mail//Mail'), qm_url_path('/mail/');
+----
+/mail/Mail	/mail/Mail	/mail/
+
+# Traversal is refused outright rather than resolved — including when it is
+# hidden behind percent-encoding, which is the form a scanner actually sends.
+query I
+SELECT count(*) FROM (VALUES
+    ('/../etc/passwd'),
+    ('/mail/../../etc/passwd'),
+    ('%2e%2e%2fetc%2fpasswd'),
+    ('/mail/%2e%2e/secret'),
+    ('/mail/./x'),
+    ('relative/path'),
+    ('')
+) AS t(p)
+WHERE qm_url_path(p) IS NOT NULL;
+----
+0
+
+# %2e%2e%2f really does decode to the traversal it is hiding — the assertion
+# above is meaningful only because this one holds.
+query I
+SELECT qm_url_decode('%2e%2e%2f', false);
+----
+../

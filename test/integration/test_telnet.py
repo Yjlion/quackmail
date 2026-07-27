@@ -142,13 +142,129 @@ def main():
         out = c.send(".Goto Lobby")[before:]
         assert "Lobby>" in out, out
 
-        # <X> hides the menu.
+        # <X> hides the menu. Wording matches the real text client
+        # (textclient/user_functions.c: "Expert mode now ON").
         before = len(c.log)
         out = c.send("X")[before:]
-        assert "Expert mode ON" in out, out
+        assert "Expert mode now ON" in out, out
         before = len(c.log)
         out = c.send("K")[before:]
         assert "<K>nown rooms" not in out, "menu should be hidden in expert mode"
+
+        # Expert mode is a persisted US_EXPERT bit, not a per-connection flag.
+        assert con.execute(
+            "SELECT flags & 32 FROM citadel_users WHERE username = 'bbsuser'"
+        ).fetchone()[0] == 32, "expert mode was not persisted"
+        before = len(c.log)
+        out = c.send("X")[before:]
+        assert "Expert mode now OFF" in out, out
+
+        # --- floors ---------------------------------------------------------
+        # ;C configures floor mode; the answer persists as US_FLOORS.
+        c.send(";C")
+        out = c.send("yes")
+        assert "Floor mode now ON" in out, out
+        assert con.execute(
+            "SELECT flags & 8192 FROM citadel_users WHERE username = 'bbsuser'"
+        ).fetchone()[0] == 8192, "floor mode was not persisted"
+        # With floor mode on, <K>nown groups by floor.
+        before = len(c.log)
+        out = c.send("K")[before:]
+        assert "Main Floor" in out, out
+
+        # --- skip vs goto ----------------------------------------------------
+        # Post a second message so the Lobby has something unread, then confirm
+        # <S>kip leaves it unread where <G>oto would not. This is the behaviour
+        # the two commands used to share.
+        c.send(".G Lobby")
+        con.execute(
+            "INSERT INTO citadel_messages (msgnum, author, msgtime, subject, format_type, raw) "
+            "VALUES (nextval('citadel_msg_seq'), 'someone', epoch(now())::BIGINT, 'unread one', 0, 'body')"
+        )
+        con.execute(
+            "INSERT INTO citadel_room_msgs (room_num, msgnum) "
+            "SELECT 0, max(msgnum) FROM citadel_messages"
+        )
+
+        def lobby_unread():
+            return con.execute(
+                "SELECT count(*) FROM citadel_room_msgs rm WHERE rm.room_num = 0 AND rm.msgnum > "
+                "coalesce((SELECT last_read FROM citadel_room_state "
+                "          WHERE username = 'bbsuser' AND room_num = 0), 0)"
+            ).fetchone()[0]
+
+        assert lobby_unread() > 0, "fixture message is not unread"
+        c.send("S")
+        assert lobby_unread() > 0, "<S>kip marked the room read; it must not"
+        c.send(".G Lobby")
+        c.send("G")
+        assert lobby_unread() == 0, "<G>oto did not mark the room read"
+
+        # --- zap -------------------------------------------------------------
+        c.send(".G Lobby")
+        c.send("Z")  # asks for confirmation first
+        out = c.send("yes")
+        assert "cannot zap the lobby" in out.lower(), out
+        con.execute("CALL cit_room_add('Zappable')")
+        c.send(".G Zappable")
+        c.send("Z")
+        out = c.send("yes")
+        assert "forgotten" in out.lower(), out
+        assert con.execute(
+            "SELECT flags & 1 FROM citadel_room_state cs JOIN citadel_rooms r USING (room_num) "
+            "WHERE cs.username = 'bbsuser' AND r.display_name = 'Zappable'"
+        ).fetchone()[0] == 1, "the room was not marked zapped"
+        # It drops out of <K>nown and turns up under .Known Zapped.
+        before = len(c.log)
+        out = c.send("K")[before:]
+        assert "Zappable" not in out, "a forgotten room is still listed"
+        before = len(c.log)
+        out = c.send(".KZ")[before:]
+        assert "Zappable" in out, out
+        # Going to it by name brings it back, as Citadel does.
+        c.send(".G Zappable")
+        assert con.execute(
+            "SELECT flags & 1 FROM citadel_room_state cs JOIN citadel_rooms r USING (room_num) "
+            "WHERE cs.username = 'bbsuser' AND r.display_name = 'Zappable'"
+        ).fetchone()[0] == 0, "visiting a forgotten room did not restore it"
+
+        # --- registration ----------------------------------------------------
+        c.send(".EG")
+        for field in ("Ada Lovelace", "1 Analytical Way", "London", "", "NW1", "555", "ada@example.com"):
+            c.send(field)
+        out = c.send("England")
+        assert "Registration saved." in out, out
+        row = con.execute(
+            "SELECT real_name, city, email, country FROM citadel_user_reg WHERE username = 'bbsuser'"
+        ).fetchone()
+        assert row == ("Ada Lovelace", "London", "ada@example.com", "England"), row
+        # Filling it in sets US_REGIS.
+        assert con.execute(
+            "SELECT flags & 1024 FROM citadel_users WHERE username = 'bbsuser'"
+        ).fetchone()[0] == 1024, "US_REGIS was not set"
+
+        # The user listing honours the same record.
+        before = len(c.log)
+        out = c.send(".RU")[before:]
+        assert "bbsuser" in out and "pageme" in out, out
+
+        # --- message deletion -------------------------------------------------
+        msgnum = con.execute(
+            "SELECT msgnum FROM citadel_messages WHERE subject = 'Hello from telnet'"
+        ).fetchone()[0]
+        c.send(".G Lobby")
+        c.send("D")
+        out = c.send(str(msgnum))
+        assert "Message deleted." in out, out
+        assert con.execute(
+            "SELECT count(*) FROM citadel_room_msgs WHERE room_num = 0 AND msgnum = ?", [msgnum]
+        ).fetchone()[0] == 0, "the message pointer survived deletion"
+
+        # --- aide gating -------------------------------------------------------
+        # bbsuser is axlevel 4, so the admin submenu must refuse.
+        before = len(c.log)
+        out = c.send(".AK")[before:]
+        assert "Higher access required" in out, out
 
         out = c.send("T")
         assert "Goodbye." in out, out
@@ -160,13 +276,21 @@ def main():
         ).fetchall()
         assert pending == [("bbsuser", "ping from the BBS")], pending
 
-        # The posted message is in the Lobby, readable by every other front-end.
+        # What the Lobby holds now: the message posted over telnet was read back
+        # earlier and then removed by the <D>elete test, so only the fixture
+        # message planted for the skip/goto check should remain.
         rows = con.execute(
             "SELECT m.author, m.subject FROM citadel_messages m "
             "JOIN citadel_room_msgs rm USING (msgnum) "
-            "JOIN citadel_rooms r USING (room_num) WHERE r.name = 'Lobby'"
+            "JOIN citadel_rooms r USING (room_num) WHERE r.name = 'Lobby' "
+            "ORDER BY m.msgnum"
         ).fetchall()
-        assert rows == [("bbsuser", "Hello from telnet")], rows
+        assert rows == [("someone", "unread one")], rows
+        # The message row itself survives; only the room pointer went, which is
+        # what makes deletion safe for a message shared across rooms.
+        assert con.execute(
+            "SELECT count(*) FROM citadel_messages WHERE subject = 'Hello from telnet'"
+        ).fetchone()[0] == 1, "deletion removed the message row, not just the pointer"
 
         # The session row is cleaned up on disconnect.
         time.sleep(0.5)

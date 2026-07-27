@@ -47,6 +47,7 @@ extension.
 | `quackmail_nntp` | `qm_nntp_start/_stop/_status`, `qm_nntps_*` | ✅ NNTP reader **and poster** (119/563; dev 1119/1563) — rooms are newsgroups |
 | `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
 | `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
+| `quackmail_http` | `qm_http_start/_stop/_status`, `qm_https_*` | ✅ webmail, the BBS over the web, and the admin console (80/443; dev 8080/8443) — server-rendered, no JavaScript framework |
 
 `*_start(host, port)` also accepts named params: `tls_cert`, `tls_key`,
 `implicit_tls`, `starttls`. With `starttls => true` and no cert paths, a
@@ -76,7 +77,10 @@ be pointed into several rooms). Created idempotently on load by
 | `citadel_config` | `INFO`/config key-value (nodename, fqdn, humannode, …). |
 
 Also present: `quackmail_users` (credentials), `quackmail_sieve_scripts`,
-`quackmail_outbound` (relay queue).
+`quackmail_outbound` (relay queue), `citadel_user_reg` (the `REGI` registration
+record plus the biography), and `quackmail_web_sessions` /
+`quackmail_web_login_fails` (browser sessions for the web front-end — only the
+SHA-256 of each token is stored).
 
 ### Site policy
 
@@ -171,6 +175,9 @@ listings):
 
 - **Session**: greeting, `NOOP`, `ECHO`, `IDEN`, `QUIT`, `LOUT`, `INFO`.
 - **Auth**: `USER`/`PASS`, `NEWU` (create + log in), `SETP` (set password).
+- **Users**: `LIST` (directory, honouring `US_UNLISTED`), `REGI`/`GREG`
+  (registration), `EBIO`/`RBIO` (biography) — the same records the BBS shell
+  and the web console read and write.
 - **Floors**: `LFLR` (list), `CFLR` (create, aide).
 - **Rooms**: `LKRA`/`LKRN`/`LKRO` (list all/new/old), `GOTO`, `CRE8`, `KILL`,
   `GETR`/`SETR`, `RINF`, `SLRP` (set last-read).
@@ -200,11 +207,92 @@ Lobby>  1 new of 1 messages
 Room cmds:    <K>nown rooms, <G>oto next room, <.G>oto a specific room, ...
 ```
 
-Commands: `<G>`oto, `<K>`nown rooms, `<U>`ngoto, `<M>`ail, read `<N>`ew/`<O>`ld/
-`<F>`orward/`<R>`everse/`<L>`ast five, `<E>`nter a message, `<W>`ho is online,
-`<P>`age a user, `<X>` expert mode, `<?>` help, `<T>`erminate, and `.` commands
-(`.Goto <room>`). Sessions register in `citadel_sessions`, so telnet users and
-native Citadel clients see each other in the who-list and can page one another.
+Rooms: `<K>`nown, `<G>`oto (marks the room read and moves on), `<S>`kip (moves
+on and leaves it unread), `<A>`bandon, `<U>`ngoto, `<Z>`ap to forget a room,
+`<+>`/`<->` next/previous room and `<>>`/`<<>` next/previous floor.
+Messages: read `<N>`ew/`<O>`ld/`<F>`orward/`<R>`everse/`<L>`ast five, `<E>`nter,
+`<D>`elete. General: `<W>`ho, `<P>`age, `<M>`ail, `<I>`nfo, `<Q>`uiet mode,
+`<X>` expert mode, `<?>` help, `<T>`erminate.
+
+`;` opens the floor commands (`;C`onfigure floor mode, `;G`oto, `;S`kip to,
+`;Z`ap, `;K`nown, and `;A`dmin create/edit/kill for aides). `.` opens the rest
+of the `citadel.rc` menu: `.K`nown with filters (`.KZ`apped, `.KD`irectory,
+`.KP`rivate, `.KR`ead-only, `.KM`atch, `.KF`loors), `.R`ead (`user list`, `bio`,
+`configuration`, `system info`), `.E`nter (`password`, `configuration`,
+`registration`, `bio`, a new `room`), `.W`holist (long, stealth) and, for aides,
+`.A`dmin (edit/kill room, info file, move a message, edit/delete/validate
+users).
+
+Preferences persist in `citadel_users.flags` using Citadel's own `US_*` bits, so
+expert mode, floor mode and the paginator survive a disconnect — and the web
+console's preferences page edits exactly the same column. The screen size comes
+from the telnet NAWS negotiation, and listings pause at each screenful.
+
+Sessions register in `citadel_sessions`, so telnet users and native Citadel
+clients see each other in the who-list and can page one another.
+
+## The web interface (HTTP/HTTPS)
+
+`quackmail_http` serves three things from one listener pair — `qm_http`
+(80; dev 8080) and `qm_https` (443; dev 8443, implicit TLS):
+
+- **Webmail** at `/mail/` — the user's personal rooms as folders, a paged
+  message list, a read pane with attachments, and compose/reply/reply-all/
+  forward. Sending goes through the *same* path as SMTP submission: the send
+  quota is checked first, the message is DKIM-signed once, local recipients are
+  delivered and remote ones queued, and a copy is filed into Sent Items.
+- **The BBS** at `/bbs/` — floors, rooms, reading, posting, replying, marking
+  read, forgetting a room, the who-list and instant messages. A post made here
+  is an ordinary `format_type = 0` Citadel message, so it reads back over the
+  native protocol, telnet, NNTP, IMAP and POP3.
+- **The admin console** at `/admin/` — users, rooms, floors and `citadel_config`,
+  plus the whole mail-policy set (domains, aliases, ACLs, DNSBL zones, DKIM
+  keys, send quotas), the inbound audit log, the outbound queue, any user's
+  Sieve scripts, and the signed-in browsers.
+
+Everything is **server-rendered HTML** with one inlined stylesheet: no build
+step, no external assets, no JavaScript framework, and exactly one request per
+page (so every response closes its connection).
+
+### Security posture
+
+The web front-end is the only part of QuackCit a browser can reach, so it is
+deliberately the most locked-down:
+
+- **HTTPS by default.** `qm_web_force_https` (default `1`) makes the plain
+  listener redirect to `https://<c_fqdn>` — built from the configured name,
+  never from the client's `Host` header. Set it to `0` behind a reverse proxy
+  and list the proxy in `qm_web_trusted_proxies`; `X-Forwarded-Proto` is
+  honoured only from a peer on that list.
+- **The admin console is off until you turn it on** (`qm_web_admin_enabled`),
+  requires TLS (`qm_web_admin_require_tls`), honours the `webadmin` ACL scope
+  for a network allow-list, and asks for the operator's own password again
+  before creating accounts, resetting passwords, writing config or generating
+  DKIM keys. Reaching it is equivalent to root on the host.
+- **Sessions** are 32 random bytes in an `HttpOnly; SameSite=Lax` cookie;
+  only the SHA-256 is stored, so the database never holds anything replayable.
+  A session is **pinned to the transport it was minted over**, in both
+  directions, so a cookie cannot be laundered between the plaintext and TLS
+  listeners. Changing a password revokes every session for that account.
+- **CSRF** uses a synchronizer token derived from a server secret, checked in
+  the router rather than in each handler, so a new POST route cannot forget it.
+- **Message bodies are attacker-controlled** — they arrive over SMTP. Text is
+  escaped at every interpolation (decoded first, escaped second, so an RFC 2047
+  encoded-word cannot decode back into a tag). A `text/html` part is sanitized
+  and then served from its own route into a `sandbox`ed iframe under
+  `default-src 'none'`, with remote images blocked until the reader asks for
+  them. Attachments are always `application/octet-stream` with
+  `Content-Disposition: attachment` and `nosniff`, never the sender's type.
+- Every page carries a CSP with a per-response nonce (no `'unsafe-inline'` in
+  `script-src`), `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy:
+  no-referrer` and `Cache-Control: private, no-store`.
+- Rooms and messages are addressed by number and re-checked on every request:
+  a room is resolved through the visibility rules, and a message number is
+  verified to be pointed into that room before it is loaded.
+
+Failed sign-ins are counted per client address and answered with a `429` once
+they pile up; the wrong-user and wrong-password replies are identical, so the
+form cannot be used to enumerate accounts.
 
 ## News (NNTP)
 

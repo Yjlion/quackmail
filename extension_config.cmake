@@ -55,3 +55,9 @@ duckdb_extension_load(quackmail_xmpp
 duckdb_extension_load(quackmail_telnet
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/telnet
 )
+
+# HTTP / HTTPS: server-rendered webmail, the BBS over the web, and the admin
+# console. Unlike the others this module is several translation units.
+duckdb_extension_load(quackmail_http
+    SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/http
+)

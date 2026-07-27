@@ -24,7 +24,8 @@ prefixes still say `quackmail`; the product is QuackCit.
 | 5 | Telnet/telnets BBS shell (`quackmail_telnet`) | PR #11 |
 | 6 | NNTP/NNTPS reader + poster (`quackmail_nntp`) | PR #12 |
 | 7 | XMPP c2s bridged to Citadel express messages (`quackmail_xmpp`) | PR #13 |
-| 8 | SMTP authentication (SPF/DKIM/DMARC/DNSBL), site policy, outbound signing + rate limiting, LMTP, real Sieve/ManageSieve, `deploy/` CLI tooling | in progress |
+| 8 | SMTP authentication (SPF/DKIM/DMARC/DNSBL), site policy, outbound signing + rate limiting, LMTP, real Sieve/ManageSieve, `deploy/` CLI tooling | PR #14 |
+| 9 | Telnet BBS depth (floors, zap, skip, registration, admin verbs) + `quackmail_http`: webmail, the BBS over the web, and the admin console | in progress |
 
 Phases 2 and 3 were validated byte-for-byte against the real Citadel server, and
 the **official `citadel` text client drives a full clean session** against
@@ -81,6 +82,64 @@ QuackCit (login banner, `<K>nown rooms`, no spurious errors).
   `qm_dkim_verify(qm_dkim_sign(...))` is only expressible if both are *scalar*
   functions. The composable forms are scalar; `qm_dkim_verify_detail` remains a
   table function for the per-signature breakdown.
+- **The two dead flag columns were the right homes for the new per-user state.**
+  `citadel_room_state.flags` and `citadel_users.flags` shipped in the original
+  schema and were never read or written. They now carry `RS_ZAPPED`/`RS_UNLOCKED`
+  and Citadel's canonical `US_*` bits respectively, so the numbers stay
+  byte-compatible with a real server exactly as `qr_flags` already did — and the
+  telnet shell and the web console read and write the same column, which is why
+  expert mode set over telnet shows up in the browser.
+- **The HTTP codec lives in `core/`, the pages in `http/`.** Core is where wire
+  formats go (`telnet.cpp` and `xmlstream.cpp` each have exactly one consumer
+  too), and — the deciding reason — only core code can be exposed as umbrella
+  SQL functions, which is what makes percent-decoding, HTML escaping and path
+  normalization testable in sqllogictest with no socket in the loop.
+- **The web front-end closes every connection.** One inlined stylesheet and no
+  external assets means a page load is exactly one request, so keep-alive would
+  buy nothing while multiplying idle threads in a server with no connection cap.
+  `Connection: close` plus a request deadline bounds every thread; that, and the
+  opt-in `SetTimeouts`, is what stops a slow-loris from leaking threads.
+- **Web sessions are hashed at rest and pinned to their transport.** The cookie
+  holds 32 random bytes; the database holds only the SHA-256, so nothing stored
+  can be replayed. A session minted over TLS presented in the clear is revoked
+  (it should have been impossible), and one minted in the clear is refused over
+  TLS — which stops a MITM on port 80 laundering a stolen cookie into the
+  secure area. CSRF is a synchronizer token derived from a server secret in
+  `citadel_config`, so it needs no extra column and is reproducible on every
+  request; the anonymous variant for the login form is bound to the client
+  address and a time bucket instead.
+- **The admin console is root-equivalent and ships off.** It writes
+  `citadel_config`, mints credentials and generates DKIM keys — the same threat
+  model `quackcit.conf` already states for the 0600 admin socket, but reachable
+  from a browser. Hence `qm_web_admin_enabled=0` by default, TLS required, a
+  `webadmin` ACL scope for a network allow-list, and a re-authentication prompt
+  on the sharpest actions.
+- **HTML mail renders in a sandboxed iframe, not inline.** The part is served
+  from its own route with `default-src 'none'; img-src data:` and framed with
+  `sandbox` (no `allow-scripts`, no `allow-same-origin`), so it gets an opaque
+  origin. The sanitizer is defence in depth, not the boundary. Remote images
+  stay blocked until the reader asks, so tracking pixels do not fire by default.
+- **Decode, then escape.** Headers go through `mime::DecodeEncodedWords` first
+  and `EscapeHtml` second. The other order lets `=?utf-8?B?PHNjcmlwdD4=?=`
+  decode back into a live tag *after* escaping has run — and message headers
+  come from inbound SMTP, i.e. from anyone.
+- **Room listings are ordered by the internal key, not by listorder.** The real
+  server's `cmd_lkra` just walks the room database, so rooms arrive in key
+  order; personal rooms are keyed `0000000002.Calendar`, and digits sort ahead
+  of letters, which is why every mailbox precedes the public rooms. Confirmed
+  against the oracle for both a plain user and an aide. `listorder` is stored
+  and reported but deliberately not used for sorting — the real server ignores
+  it when listing, and clients group by floor themselves.
+- **Toggle wording comes from the text client, not from taste.** `<X>` prints
+  `Expert mode now ON/OFF` and `;C` prints `Floor mode now ON/OFF`, both from
+  `textclient/user_functions.c:861-876`; `<Q>` follows `client_chat.c:204`
+  (`Quiet mode enabled (no other users may page you)`). The telnet test asserts
+  the exact strings, so drift is caught.
+- **Rooms are addressed by number in web URLs.** A Citadel room name may contain
+  a `/`, which no amount of percent-encoding survives once the path is split
+  into segments. Numbers also make the ownership check a single explicit
+  function (`ResolveRoomNumFor`), which is what stands between a guessed room
+  number and someone else's mailbox.
 
 ## The test box: debian.lan
 

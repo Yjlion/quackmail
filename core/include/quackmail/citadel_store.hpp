@@ -27,9 +27,41 @@ enum QRFlags {
 	QR_MAILBOX = 16384, // personal mailbox room (owned by one user)
 };
 
+// Per-user, per-room state bits (citadel_room_state.flags).
+enum RoomStateFlags {
+	RS_ZAPPED = 1,   // user has forgotten this room; it drops out of listings
+	RS_UNLOCKED = 2, // user has given the password of a QR_PASSWORDED room
+};
+
+// User attribute flags (citadel_users.flags). Values match Citadel's canonical
+// US_* bitmask (libcitadel.h), for the same reason QR_* does.
+enum USFlags {
+	US_NEEDVALID = 1,    // account awaits aide validation
+	US_EXTEDIT = 2,      // always use an external editor
+	US_PERM = 4,         // permanent user
+	US_LASTOLD = 16,     // print the last old message along with the new ones
+	US_EXPERT = 32,      // experienced user: suppress the menu
+	US_UNLISTED = 64,    // hide from the user listing
+	US_NOPROMPT = 128,   // do not prompt after each message
+	US_PROMPTCTL = 256,  // <N>ext and <S>top work at the message prompt
+	US_DISAPPEAR = 512,  // disappearing message prompts
+	US_REGIS = 1024,     // user has filled in their registration
+	US_PAGINATOR = 2048, // pause after each screenful
+	US_INTERNET = 4096,  // internet mail privileges
+	US_FLOORS = 8192,    // user wants to see floors
+	US_COLOR = 16384,    // user wants ANSI colour
+};
+
+// The subset a user may set for themselves (Citadel's US_USER_SET).
+constexpr int64_t kUserSettableFlags = US_LASTOLD | US_EXPERT | US_UNLISTED | US_NOPROMPT | US_PROMPTCTL |
+                                       US_DISAPPEAR | US_PAGINATOR | US_COLOR;
+
 // Reserved room numbers (fixed, seeded ids) — match Citadel's low room numbers.
 constexpr int64_t kLobbyRoom = 0;
 constexpr int64_t kAideRoom = 1;
+
+// Access level at which a user is an aide (system administrator).
+constexpr int64_t kAideAxLevel = 6;
 
 // Citadel default_view codes (VIEW_*): what kind of content a room holds.
 enum RoomView {
@@ -98,6 +130,48 @@ std::string GetConfig(duckdb::Connection &con, const std::string &name, const st
 // Returns 0 if the username is not a known local user.
 int64_t GetOrAssignUserNum(duckdb::Connection &con, const std::string &username);
 int64_t GetAxLevel(duckdb::Connection &con, const std::string &username);
+
+// The Citadel user record joined with its credential row. `enabled` comes from
+// quackmail_users; everything else from citadel_users.
+struct UserInfo {
+	std::string username;
+	int64_t usernum = 0;
+	int64_t axlevel = 4;
+	int64_t flags = 0; // US_* bitmask
+	int64_t times_called = 0;
+	int64_t num_posts = 0;
+	int64_t last_call = 0; // unix seconds, 0 if never
+	bool enabled = false;
+	int64_t screenwidth = 80;
+	int64_t screenheight = 24;
+};
+
+std::vector<UserInfo> ListUsers(duckdb::Connection &con);
+bool GetUser(duckdb::Connection &con, const std::string &username, UserInfo &out);
+bool SetAxLevel(duckdb::Connection &con, const std::string &username, int64_t axlevel, std::string &err);
+bool SetUserFlags(duckdb::Connection &con, const std::string &username, int64_t flags);
+bool SetScreenSize(duckdb::Connection &con, const std::string &username, int64_t width, int64_t height);
+// Bump times_called and stamp last_call. Call once per login.
+void RecordCall(duckdb::Connection &con, const std::string &username);
+
+// Citadel's REGI registration record, in REGI's field order, plus the free-text
+// biography EBIO/RBIO carry.
+struct Registration {
+	std::string real_name;
+	std::string street;
+	std::string city;
+	std::string state;
+	std::string zipcode;
+	std::string phone;
+	std::string email;
+	std::string country;
+	std::string bio;
+};
+
+bool GetRegistration(duckdb::Connection &con, const std::string &username, Registration &out);
+bool SetRegistration(duckdb::Connection &con, const std::string &username, const Registration &reg);
+// Replace only the biography, leaving the registration fields alone.
+bool SetBio(duckdb::Connection &con, const std::string &username, const std::string &bio);
 // True when `addr` is deliverable locally: its domain (if present) matches the
 // configured c_fqdn and its local-part is a known local user. Used by the SMTP
 // front-ends to accept local mail vs. reject unknown users / deny relay.
@@ -105,17 +179,28 @@ bool IsLocalUser(duckdb::Connection &con, const std::string &addr);
 
 // ---- floors -------------------------------------------------------------
 std::vector<Floor> ListFloors(duckdb::Connection &con);
+bool GetFloor(duckdb::Connection &con, int64_t floor_num, Floor &out);
 int64_t CreateFloor(duckdb::Connection &con, const std::string &name, std::string &err);
+bool RenameFloor(duckdb::Connection &con, int64_t floor_num, const std::string &name, std::string &err);
+// Refuses floor 0 and any floor that still holds rooms.
+bool KillFloor(duckdb::Connection &con, int64_t floor_num, std::string &err);
 
 // ---- rooms --------------------------------------------------------------
 // Resolve a client-supplied room name (matches a public room's display name, or
 // the logged-in user's own mailbox room). Returns false if not found/visible.
 bool ResolveRoom(duckdb::Connection &con, const std::string &username, const std::string &wanted, Room &out);
 bool GetRoomByNum(duckdb::Connection &con, int64_t room_num, Room &out);
+// which: "all" | "new" | "old" | "zapped". Zapped rooms are excluded from the
+// first three and are the only thing "zapped" returns. floor < 0 = every floor.
+// Rooms come back in internal-key order, which puts every personal room before
+// the public ones — the order a real Citadel server's LKRA produces.
 std::vector<Room> ListRooms(duckdb::Connection &con, const std::string &username, int64_t floor,
-                            const std::string &which); // which: "all" | "new" | "old"
+                            const std::string &which);
 int64_t CreateRoom(duckdb::Connection &con, const std::string &display_name, int64_t floor, int64_t qr_flags,
                    const std::string &password, int64_t mailbox_owner, std::string &err);
+// Update the mutable attributes of an existing room (everything but room_num,
+// mailbox_owner and highest_msg). Renames the internal key to match.
+bool UpdateRoom(duckdb::Connection &con, const Room &room, std::string &err);
 bool KillRoom(duckdb::Connection &con, int64_t room_num, std::string &err);
 // Get (creating if needed) a personal room owned by a user, identified by its
 // display name (e.g. "Mail", or a Sieve fileinto folder). Returns room_num.
@@ -177,7 +262,26 @@ void MarkExpressDelivered(duckdb::Connection &con, int64_t id);
 
 // ---- per-user room read state ------------------------------------------
 RoomStats GetRoomStats(duckdb::Connection &con, const std::string &username, int64_t room_num);
+// One query for many rooms. GetRoomStats costs three or four scalar queries, so
+// per-room calls make drawing a room list O(4N); listings should use this.
+// The result is parallel to `room_nums`.
+std::vector<RoomStats> RoomStatsBulk(duckdb::Connection &con, const std::string &username,
+                                     const std::vector<int64_t> &room_nums);
 void SetLastRead(duckdb::Connection &con, const std::string &username, int64_t room_num, int64_t msgnum);
+
+// Zap (forget) a room, or un-zap it. Refuses the Lobby, as Citadel does.
+bool ZapRoom(duckdb::Connection &con, const std::string &username, int64_t room_num, bool zapped,
+             std::string &err);
+bool IsZapped(duckdb::Connection &con, const std::string &username, int64_t room_num);
+
+// May this user read a room's contents? False only for a QR_PASSWORDED room
+// whose password they have not yet given. Every front-end must ask before
+// listing or serving messages — resolving a room by name or number is not by
+// itself permission to read it.
+bool RoomUnlocked(duckdb::Connection &con, const std::string &username, const Room &room);
+// Record a correct password. Returns false if the password does not match.
+bool UnlockRoom(duckdb::Connection &con, const std::string &username, const Room &room,
+                const std::string &password);
 
 // ---- messages -----------------------------------------------------------
 // Insert a message and point it into each of `rooms`. Bumps each room's
@@ -189,6 +293,17 @@ int64_t InsertMessage(duckdb::Connection &con, const Message &msg, const std::ve
 std::vector<int64_t> RoomMessages(duckdb::Connection &con, int64_t room_num, const std::string &filter,
                                   int64_t param, int64_t last_read);
 bool LoadMessage(duckdb::Connection &con, int64_t msgnum, Message &out);
+// True when `msgnum` is pointed into `room_num`. Every front-end that takes a
+// message number from a client must check this against a room the caller is
+// allowed to see before loading the message — LoadMessage itself has no notion
+// of ownership.
+bool MessageInRoom(duckdb::Connection &con, int64_t room_num, int64_t msgnum);
+// Unlink a message from a room. The citadel_messages row is left behind (it may
+// still be pointed into other rooms); an unreferenced row is harmless.
+bool DeleteMessage(duckdb::Connection &con, int64_t room_num, int64_t msgnum, std::string &err);
+// Point a message into `to_room`, unlinking it from `from_room` unless is_copy.
+bool MoveMessage(duckdb::Connection &con, int64_t from_room, int64_t to_room, int64_t msgnum, bool is_copy,
+                 std::string &err);
 
 } // namespace citadel
 } // namespace quackmail

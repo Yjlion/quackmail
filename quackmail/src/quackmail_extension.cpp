@@ -14,6 +14,7 @@
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/dkim.hpp"
 #include "quackmail/dmarc.hpp"
+#include "quackmail/http.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/mime.hpp"
@@ -690,6 +691,44 @@ void SieveValidScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	});
 }
 
+// The web front-end's pure codecs, exposed so they can be asserted from
+// sqllogictest with no socket in the loop. These are the functions an escaping
+// or decoding bug would turn into an XSS or a path traversal, so they are worth
+// table-driven tests of their own.
+void UrlEncodeScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::http::PercentEncode(in.GetString()));
+	});
+}
+
+void UrlDecodeScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, bool, string_t>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t in, bool plus_as_space) {
+		    return StringVector::AddString(result,
+		                                   quackmail::http::PercentDecode(in.GetString(), plus_as_space));
+	    });
+}
+
+void HtmlEscapeScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::http::EscapeHtml(in.GetString()));
+	});
+}
+
+// qm_url_path(target) -> the normalized path, or NULL if the path is one we
+// refuse to serve (traversal, control characters, no leading slash).
+void UrlPathScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    std::string out;
+		    if (!quackmail::http::NormalizePath(quackmail::http::PercentDecode(in.GetString(), false), out)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	// Ensure the shared schema exists as soon as the umbrella loads.
 	Connection con(loader.GetDatabaseInstance());
@@ -768,6 +807,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_dkim_verify", {V}, V, DkimVerifyScalar, DbBind));
 	// Parsing needs no database access.
 	loader.RegisterFunction(ScalarFunction("qm_sieve_valid", {V}, B, SieveValidScalar));
+
+	// Web codecs (pure; see the scalars above).
+	loader.RegisterFunction(ScalarFunction("qm_url_encode", {V}, V, UrlEncodeScalar));
+	loader.RegisterFunction(ScalarFunction("qm_url_decode", {V, B}, V, UrlDecodeScalar));
+	loader.RegisterFunction(ScalarFunction("qm_html_escape", {V}, V, HtmlEscapeScalar));
+	loader.RegisterFunction(ScalarFunction("qm_url_path", {V}, V, UrlPathScalar));
 
 	// Per-user send quotas.
 	RegisterPolicyFn(loader, "qm_ratelimit_set", UmbrellaKind::RATELIMIT_SET, {V, I, I, I}, kOkNote, kOkNoteTypes);

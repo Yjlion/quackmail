@@ -66,6 +66,14 @@ enum class AclVerdict {
 // additionally understands CIDR notation ("192.0.2.0/24").
 AclVerdict CheckAcl(duckdb::Connection &con, const std::string &scope, const std::string &value,
                     std::string &note);
+
+// Does a client address match one pattern? A pattern containing '/' is treated
+// as a CIDR block, anything else as a wildmat glob. Exposed because the same
+// question comes up outside the ACL tables — the web front-end asks it of its
+// trusted-proxy list.
+bool IpMatches(const std::string &ip, const std::string &pattern);
+// As above, over a comma-separated list. Empty list = no match.
+bool IpMatchesAny(const std::string &ip, const std::string &patterns);
 bool AddAcl(duckdb::Connection &con, const std::string &scope, const std::string &pattern,
             const std::string &action, const std::string &note, std::string &err);
 bool RemoveAcl(duckdb::Connection &con, int64_t id, std::string &err);

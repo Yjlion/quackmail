@@ -420,6 +420,39 @@ bool RemoveAlias(Connection &con, const std::string &alias, const std::string &d
 // Access control
 // ---------------------------------------------------------------------------
 
+bool IpMatches(const std::string &ip, const std::string &pattern) {
+	if (ip.empty() || pattern.empty()) {
+		return false;
+	}
+	if (pattern.find('/') != std::string::npos) {
+		return CidrMatch(ip, pattern);
+	}
+	return WildmatMatch(Lower(ip), Lower(pattern));
+}
+
+bool IpMatchesAny(const std::string &ip, const std::string &patterns) {
+	size_t pos = 0;
+	while (pos <= patterns.size()) {
+		size_t comma = patterns.find(',', pos);
+		std::string entry =
+		    patterns.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+		while (!entry.empty() && (entry.front() == ' ' || entry.front() == '\t')) {
+			entry.erase(0, 1);
+		}
+		while (!entry.empty() && (entry.back() == ' ' || entry.back() == '\t')) {
+			entry.pop_back();
+		}
+		if (IpMatches(ip, entry)) {
+			return true;
+		}
+		if (comma == std::string::npos) {
+			break;
+		}
+		pos = comma + 1;
+	}
+	return false;
+}
+
 AclVerdict CheckAcl(Connection &con, const std::string &scope, const std::string &value,
                     std::string &note) {
 	note.clear();
@@ -438,7 +471,12 @@ AclVerdict CheckAcl(Connection &con, const std::string &scope, const std::string
 	bool blocked = false;
 	std::string block_note;
 	std::string lowered = Lower(value);
-	bool is_ip = Lower(scope) == "ip";
+	// Scopes whose values are client addresses, so a pattern may be a CIDR
+	// block rather than a glob. "webadmin" restricts which networks may reach
+	// the web admin console; it is separate from "ip" so that blocking a
+	// spam source does not also lock an operator out of the console.
+	std::string lscope = Lower(scope);
+	bool is_ip = lscope == "ip" || lscope == "webadmin";
 
 	for (duckdb::idx_t i = 0; i < mat.RowCount(); i++) {
 		std::string pattern = Str(mat.GetValue(0, i));

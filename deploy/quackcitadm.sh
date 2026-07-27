@@ -252,6 +252,34 @@ cmd_status() {
     q0 "SELECT * FROM qm_status()"
 }
 
+# Browser sessions for the web front-end. The raw token is never stored — only
+# its SHA-256 — so there is nothing here that could be replayed as a login.
+cmd_websession() {
+    action=${1:-list}; shift 2>/dev/null || true
+    case "$action" in
+        list) q0 "SELECT token_hash, username, peer_ip, tls, user_agent,
+                         to_timestamp(created_at) AS created,
+                         to_timestamp(last_seen)  AS last_seen,
+                         to_timestamp(expires_at) AS expires
+                  FROM quackmail_web_sessions
+                  WHERE NOT revoked AND expires_at > epoch(now())
+                  ORDER BY last_seen DESC" ;;
+        revoke)
+            need 1 "$@"
+            q1 "DELETE FROM quackmail_web_sessions WHERE token_hash = ?
+                RETURNING token_hash, username" "$1" ;;
+        revoke-user)
+            need 1 "$@"
+            q1 "DELETE FROM quackmail_web_sessions WHERE username = ?
+                RETURNING token_hash, username" "$1" ;;
+        prune)
+            q0 "DELETE FROM quackmail_web_sessions
+                WHERE revoked OR expires_at <= epoch(now())
+                RETURNING token_hash, username" ;;
+        *) die "unknown websession command '$action' (list|revoke|revoke-user|prune)" ;;
+    esac
+}
+
 usage() {
     cat <<EOF
 usage: quackcitadm.sh <object> <action> [arguments]
@@ -263,9 +291,10 @@ usage: quackcitadm.sh <object> <action> [arguments]
               catch-all (@example.com)
   acl       allow <scope> <pattern> [note] | block <scope> <pattern> [note]
             remove <id> | list
-              scope: ip | sender | domain | rcpt | helo
-              patterns are globs; the ip scope also accepts CIDR (192.0.2.0/24)
+              scope: ip | sender | domain | rcpt | helo | webadmin
+              patterns are globs; ip and webadmin also accept CIDR (192.0.2.0/24)
               an allow rule always beats a block rule
+              webadmin restricts which networks may reach the web console
   rbl       add <zone> | remove <zone> | list | check <ip>
   dkim      keygen <domain> <selector> [bits] | list | remove <domain> <selector>
             verify <file>
@@ -276,9 +305,14 @@ usage: quackcitadm.sh <object> <action> [arguments]
   config    get <name> | set <name> <value> | list
               qm_spf_reject, qm_dkim_reject, qm_dmarc_enforce, qm_rbl_reject,
               qm_quarantine_room, c_fqdn, ...
+              web: qm_web_force_https, qm_web_trusted_proxies, qm_web_hsts,
+                   qm_web_origins, qm_web_admin_enabled (off by default),
+                   qm_web_admin_require_tls
   room      add <name> | list
   floor     add <name> | list
   queue     list | retry <id> | flush
+  websession list | revoke <token_hash> | revoke-user <name> | prune
+              signed-in browsers; only the hash of each token is stored
   spf       <client-ip> <helo> <mail-from>
   dmarc     <domain>
   status
@@ -304,6 +338,7 @@ case "$object" in
     room)      cmd_room "$@" ;;
     floor)     cmd_floor "$@" ;;
     queue)     cmd_queue "$@" ;;
+    websession) cmd_websession "$@" ;;
     spf)       cmd_spf "$@" ;;
     dmarc)     cmd_dmarc "$@" ;;
     status)    cmd_status ;;
