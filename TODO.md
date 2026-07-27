@@ -5,6 +5,57 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
+- [ ] **Phase 6 — BBS shell depth + a web front-end (HTTP/HTTPS)**
+      (branch `claude/smtp-inbound-outbound-15982f`)
+  - [x] `core/`: zapped rooms and room passwords in the previously dead
+        `citadel_room_state.flags`; `DeleteMessage`/`MoveMessage` lifted out of
+        the native extension; `ListUsers`/`GetUser`/`SetAxLevel`/`SetUserFlags`
+        with Citadel's canonical `US_*` bits in the equally dead
+        `citadel_users.flags`; `citadel_user_reg` (the eight `REGI` fields plus
+        a biography); `UpdateRoom`, floor rename/kill, and a batched
+        `RoomStatsBulk` so a room listing is one query instead of ~4N
+  - [x] `core/http.{hpp,cpp}`: an HTTP/1.1 server codec — request reader with
+        limits and deadlines, response writer, percent/urlencoded/multipart
+        codecs, HTML escaping, path normalization, cookies and a route matcher;
+        `net::ClientStream::ReadN` and opt-in `SetTimeouts` behind it
+  - [x] `quackmail_http`: server-rendered webmail, the BBS over the web, a
+        preferences area, and an admin console covering everything
+        `quackcitadm.sh` does
+  - [x] telnet: floors and the `;` submenu, zap and the `.Known` filters,
+        `S`kip/`A`bandon distinct from `G`oto, registration/bio/configuration,
+        the user listing, message delete/move and the `.Admin` family, NAWS
+        terminal sizing and a real pager — plus the four known bugs fixed
+  - [x] native `REGI`/`GREG`/`EBIO`/`RBIO`/`LIST`, so the official text client
+        sees the same registration data
+  - [x] `test/sql/http.test` and `test/sql/citadel_store.test`;
+        `quackcitadm.sh websession`; README, `quackcit.conf` and deploy wiring
+  - [x] `test/integration/test_http.py` — auth and session handling (the stored
+        token is the SHA-256, never the cookie), CSRF including the per-session
+        binding, account-enumeration resistance, IDOR from three angles, XSS
+        from both a raw and an RFC 2047-encoded hostile subject, the sandboxed
+        HTML part and its CSP, attachment framing, admin gating with
+        re-authentication, the DKIM private key staying off the page, the
+        HTTPS redirect, malformed-request handling, and a slow-loris regression
+  - [x] `test_telnet.py` extended: expert/floor mode persisting as `US_*` bits,
+        floor-grouped listings, `S`kip leaving a room unread where `G`oto does
+        not, zap (Lobby refused, `.KZ` listing, restored on visit), `.EG`
+        registration setting `US_REGIS`, `.RU` user listing, message deletion
+        unlinking the pointer but keeping the row, and aide gating
+  - [x] built clean on `debian.lan`; **243 sqllogictest assertions and all 13
+        integration tests green**
+  - [x] manual pass through the real `deploy/run_quackcit.py` launcher: every
+        listener bound, `quackcitadm.sh` driven over the launcher's admin
+        socket while the server held the database, each web page read as text,
+        and the BBS driven with the actual `telnet` client. Two things it
+        caught that no assertion would have: room badges read "Lobby of 0" when
+        nothing was unread (now "empty" / "N messages" / "3 new of 10"), and
+        the toggle wording did not match the text client. Confirmed end to end
+        that a message posted in the browser reads back over the native
+        Citadel protocol, and that `/admin/dkim` shows only the public key.
+  - [ ] optional follow-up: drive the official `citadel` text client against
+        QuackCit through the `LD_PRELOAD` port shim and diff its screens
+        against the oracle's, for byte-level BBS parity
+
 - [ ] **Phase 5 — SMTP authentication, policy and operations**
       (branch `claude/smtp-inbound-outbound-15982f`)
   - [x] `core/`: SPF (RFC 7208), DKIM sign+verify+keygen (6376, plus ed25519
@@ -95,9 +146,9 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## Backlog
 
-- Telnet BBS, still to fill in from `citadel.rc`: floors, zapped/anonymous/
-  directory room filters, `S`kip semantics distinct from `G`oto,
-  registration/bio, file transfer.
+- Telnet BBS, still to fill in from `citadel.rc`: file transfer (the
+  `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR` room flags and the `.Read file` /
+  `.Admin File` family), `C`hat, and help files.
 - XMPP, not implemented (Citadel does not have them either): MUC, offline
   storage, stored rosters/subscriptions, s2s.
 - IMAP depth: `IDLE`, `CONDSTORE`/`QRESYNC`, server-side sort/thread.
