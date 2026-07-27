@@ -2,6 +2,7 @@
 
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/mailpolicy.hpp"
+#include "quackmail/websession.hpp"
 
 #include "duckdb/main/materialized_query_result.hpp"
 
@@ -85,6 +86,10 @@ void EnsureSchema(Connection &con) {
 	// Must follow the Citadel schema: it seeds enforcement defaults into
 	// citadel_config.
 	policy::EnsureSchema(con);
+
+	// Browser sessions for the HTTP front-end. Created here rather than in the
+	// http module so the admin CLI can list and revoke them without it loaded.
+	web::EnsureSchema(con);
 }
 
 void EnqueueOutbound(Connection &con, const std::string &from_addr, const std::string &rcpt,
