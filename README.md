@@ -385,13 +385,29 @@ DuckDB CLI with every extension statically linked is at `build/release/duckdb`.
 ### Install from a release
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds the
-extensions and attaches a `quackmail-<tag>-linux_amd64.tar.gz` bundle (the
-`.duckdb_extension` files plus a statically linked `duckdb` CLI) to a GitHub
-Release. To install:
+extensions and attaches a `quackmail-<tag>-linux_amd64.tar.gz` bundle to a
+GitHub Release. The bundle is self-contained — the `.duckdb_extension` files, a
+statically linked `duckdb` CLI, and the `deploy/` scripts that run them as a
+server. Nothing else is needed: no Python, no separate DuckDB.
 
 ```bash
-tar -xzf quackmail-<tag>-linux_amd64.tar.gz
-cd quackmail-<tag>-linux_amd64
+sudo tar -xzf quackmail-<tag>-linux_amd64.tar.gz -C /opt
+sudo mv /opt/quackmail-<tag>-linux_amd64 /opt/quackmail
+
+sudo /opt/quackmail/quackcit.sh start
+sudo /opt/quackmail/quackcitadm.sh user add alice s3cret
+```
+
+The scripts notice they are in an unpacked bundle rather than a checkout and
+put the database in `/var/lib/quackcit`, logs in `/var/log/quackcit` and the
+control FIFO in `/run/quackcit`; point `QUACKCIT_STATE_DIR`, `QUACKCIT_LOG_DIR`
+and `QUACKCIT_RUN_DIR` somewhere writable to run without root.
+`quackcit.service` in the bundle is a systemd unit template.
+
+To drive DuckDB by hand instead:
+
+```bash
+cd /opt/quackmail
 ./duckdb -unsigned          # unsigned extensions require -unsigned
 ```
 ```sql
@@ -440,10 +456,11 @@ CALL qm_pop3_start('127.0.0.1', 1110);
 
 ## Running and administering a server
 
-`deploy/` has two scripts. Both read `deploy/quackcit.conf` (override the path
-with `QUACKCIT_CONF`), where the database location, bind address, TLS material
-and every port live. Values already in the environment win, so one-off
-overrides work.
+`deploy/` has two scripts, both POSIX shell with no interpreter to install. Both
+read `deploy/quackcit.conf` (override the path with `QUACKCIT_CONF`), where the
+database location, bind address, TLS material and every port live. Values
+already in the environment win, so one-off overrides work. They work the same
+from a git checkout and from an unpacked release, detecting which they are in.
 
 ```bash
 deploy/quackcit.sh start          # background, PID file, log file
@@ -473,9 +490,16 @@ deploy/quackcitadm.sh help
 
 It works whether or not the server is running. **DuckDB allows a single
 read-write process per database file**, so while the server holds it the script
-cannot simply open the file; it sends the statement over the launcher's admin
-socket instead, and falls back to opening the database directly when the server
-is stopped. That socket accepts arbitrary SQL, so it is created mode 0600 and
+cannot simply open the file; it sends the statement over the server's control
+channel instead, and falls back to opening the database directly when the server
+is stopped.
+
+The server *is* the DuckDB CLI, holding the database open with every listener
+extension loaded — the listeners are threads inside it. Its standard input is a
+FIFO opened read-write, which is both what keeps the process alive (the read
+never reaches end-of-file) and what `quackcitadm.sh` administers it through: a
+request is SQL wrapped in `.output` redirections, and the reply is the file the
+CLI writes. The FIFO accepts arbitrary SQL, so it is created mode 0600 and
 should not live on a shared filesystem.
 
 ## Tests

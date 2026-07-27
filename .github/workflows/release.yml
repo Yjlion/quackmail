@@ -112,14 +112,41 @@ jobs:
           cp build/release/duckdb "${out}/duckdb"
           cp README.md "${out}/"
 
+          # The run/admin scripts. They are POSIX shell and drive the DuckDB CLI
+          # above directly — nothing else has to be installed to run a server.
+          # They detect this flat layout and find the extensions beside them.
+          cp deploy/quackcit.sh deploy/quackcitadm.sh deploy/quackcit_common.sh \
+             deploy/quackcit.conf deploy/quackcit.service "${out}/"
+          chmod +x "${out}/quackcit.sh" "${out}/quackcitadm.sh"
+
           cat > "${out}/INSTALL.md" <<EOF
           # QuackMail ${REL} (linux_amd64)
 
-          These are unsigned DuckDB loadable extensions built against DuckDB
-          ${DUCKDB_VERSION}. Load them into a matching DuckDB with unsigned
-          extensions enabled.
+          A statically linked DuckDB ${DUCKDB_VERSION} CLI, the unsigned
+          loadable extensions built against it, and the scripts that run them as
+          a server. Everything works from this one directory; no Python and no
+          separate DuckDB install.
 
-          ## Option A — bundled DuckDB CLI (no separate install)
+          ## Option A — run it as a server
+
+          \`\`\`bash
+          sudo tar -xzf quackmail-${REL}-linux_amd64.tar.gz -C /opt
+          sudo mv /opt/quackmail-${REL}-linux_amd64 /opt/quackmail
+
+          sudo /opt/quackmail/quackcit.sh start
+          sudo /opt/quackmail/quackcit.sh status
+          sudo /opt/quackmail/quackcitadm.sh user add alice s3cret
+          \`\`\`
+
+          Settings live in \`quackcit.conf\` (copy it to \`/etc/quackcit.conf\`
+          and point \`QUACKCIT_CONF\` at it). Out of the box every listener binds
+          127.0.0.1 on a non-privileged port; the database goes to
+          \`/var/lib/quackcit\`, logs to \`/var/log/quackcit\` and the control
+          FIFO to \`/run/quackcit\`. To run without root, set
+          \`QUACKCIT_STATE_DIR\`, \`QUACKCIT_LOG_DIR\` and \`QUACKCIT_RUN_DIR\`
+          to somewhere writable. \`quackcit.service\` is a systemd unit template.
+
+          ## Option B — drive DuckDB yourself
 
           \`\`\`bash
           ./duckdb -unsigned
@@ -131,14 +158,9 @@ jobs:
           CALL cit_start('127.0.0.1', 5040);          -- native Citadel protocol
           \`\`\`
 
-          ## Option B — your own DuckDB ${DUCKDB_VERSION}
-
-          \`\`\`bash
-          duckdb -unsigned            # or: SET allow_unsigned_extensions=true;
-          \`\`\`
-          \`\`\`sql
-          LOAD '/absolute/path/to/quackmail.duckdb_extension';
-          \`\`\`
+          The same extensions load into your own DuckDB ${DUCKDB_VERSION} build,
+          which must be that exact version, started with \`-unsigned\` (or
+          \`SET allow_unsigned_extensions=true;\`).
 
           Extensions: quackmail (umbrella), quackmail_citadel (native Citadel
           protocol), quackmail_smtp_in, quackmail_smtp_out, quackmail_imap,
@@ -175,21 +197,27 @@ jobs:
 
           ## Install
 
+          The bundle is self-contained: a statically linked DuckDB CLI, the
+          extensions, and POSIX shell scripts that run them as a server. No
+          Python, no separate DuckDB.
+
           \`\`\`bash
-          tar -xzf quackmail-${REL}-linux_amd64.tar.gz
-          cd quackmail-${REL}-linux_amd64
-          ./duckdb -unsigned          # bundled CLI; extensions load from this dir
-          \`\`\`
-          \`\`\`sql
-          LOAD './quackmail.duckdb_extension';
-          LOAD './quackmail_citadel.duckdb_extension';
-          CALL qm_user_add('alice', 'secret');
-          CALL cit_start('127.0.0.1', 5040);
+          sudo tar -xzf quackmail-${REL}-linux_amd64.tar.gz -C /opt
+          sudo mv /opt/quackmail-${REL}-linux_amd64 /opt/quackmail
+
+          sudo /opt/quackmail/quackcit.sh start
+          sudo /opt/quackmail/quackcitadm.sh user add alice s3cret
           \`\`\`
 
-          Unsigned extensions require the \`-unsigned\` flag (or
-          \`SET allow_unsigned_extensions=true;\`). See \`INSTALL.md\` in the bundle.
-          Verify the download with the accompanying \`.sha256\` file.
+          Every listener binds 127.0.0.1 on a non-privileged port by default;
+          edit \`quackcit.conf\` to change that. \`quackcit.service\` is a
+          systemd unit template. To drive DuckDB by hand instead, run
+          \`./duckdb -unsigned\` and \`LOAD './quackmail.duckdb_extension';\` —
+          unsigned extensions require the \`-unsigned\` flag (or
+          \`SET allow_unsigned_extensions=true;\`).
+
+          See \`INSTALL.md\` in the bundle. Verify the download with the
+          accompanying \`.sha256\` file.
           EOF
 
           tarball="dist/quackmail-${REL}-linux_amd64.tar.gz"

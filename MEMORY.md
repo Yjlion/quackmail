@@ -74,10 +74,27 @@ QuackCit (login banner, `<K>nown rooms`, no spurious errors).
   path. It binds to loopback unless explicitly overridden, and the README says
   plainly not to expose it.
 - **DuckDB allows one read-write process per database file**, so the admin CLI
-  cannot open the database while the server holds it. `run_quackcit.py` exposes
-  a mode-0600 Unix socket next to the database; `quackcitadm.sh` sends SQL there
-  when the server is up and opens the file directly when it is down. That socket
-  accepts arbitrary SQL — treat it as root-equivalent.
+  cannot open the database while the server holds it. `quackcitadm.sh` sends SQL
+  over the server's mode-0600 control FIFO when the server is up and opens the
+  file directly when it is down. That channel accepts arbitrary SQL — treat it
+  as root-equivalent.
+- **The deploy scripts dropped Python for the binary release (0.4.x).** The
+  release tarball ships a statically linked DuckDB CLI, but `run_quackcit.py`
+  needed the *DuckDB Python package* pinned to the same version — a second
+  install the bundle exists to avoid. So the server became the CLI itself,
+  reading its standard input from a FIFO opened `0<>`: the process is a writer
+  on its own input, the read never sees EOF, and that idle read replaces the
+  launcher's `while not stop: sleep(1)`. The admin channel followed: a request
+  is SQL bracketed by `.output` redirections, the reply is the file written, and
+  a `mkdir` lock serialises clients. Error text was the only casualty of losing
+  the JSON socket — `.output` captures stdout only — so the server's stderr gets
+  its own file and the bytes appended across one request are that request's
+  error. That is exact only because nothing in the C++ tree writes to stderr.
+- **The scripts detect their install layout** rather than being configured for
+  it: a checkout keeps repo-relative paths and the `<n>/<n>.duckdb_extension`
+  tree, an unpacked bundle uses the flat directory and FHS state. One
+  `ext_path` helper spans both, which is what let the same scripts ship in the
+  tarball unchanged.
 - **DuckDB table functions require constant-foldable arguments**, so
   `qm_dkim_verify(qm_dkim_sign(...))` is only expressible if both are *scalar*
   functions. The composable forms are scalar; `qm_dkim_verify_detail` remains a
@@ -110,7 +127,7 @@ QuackCit (login banner, `<K>nown rooms`, no spurious errors).
   address and a time bucket instead.
 - **The admin console is root-equivalent and ships off.** It writes
   `citadel_config`, mints credentials and generates DKIM keys — the same threat
-  model `quackcit.conf` already states for the 0600 admin socket, but reachable
+  model `quackcit.conf` already states for the 0600 control FIFO, but reachable
   from a browser. Hence `qm_web_admin_enabled=0` by default, TLS required, a
   `webadmin` ACL scope for a network allow-list, and a re-authentication prompt
   on the sharpest actions.
@@ -159,9 +176,9 @@ QuackCit (login banner, `<K>nown rooms`, no spurious errors).
   `webcit-ng/`. This is the authoritative spec — read it instead of guessing.
 - Toolchain is user-local: `~/venv` with cmake/ninja/duckdb (pip bootstrapped via
   get-pip.py; Debian strips ensurepip). Build with `-j2` — 3.8G RAM.
-- QuackCit source lives in `~/quackmail`; the dev launcher is
-  `deploy/run_quackcit.py` with `QUACKCIT_DB=~/quackcit.duckdb`. Seeded users
-  `admin/admin` (aide) and `leo/leo` mirror the oracle for 1:1 diffing.
+- QuackCit source lives in `~/quackmail`; run it with `deploy/quackcit.sh start`
+  and `QUACKCIT_DB=~/quackcit.duckdb`. Seeded users `admin/admin` (aide) and
+  `leo/leo` mirror the oracle for 1:1 diffing.
 - Parity probes: `~/parity/cit_probe.py` (native), `~/parity/imap_probe.py`,
   `~/parity/drive_client.py` (drives the real text client). Captured oracle
   fixtures are committed under `test/parity/real_citadel/`.
