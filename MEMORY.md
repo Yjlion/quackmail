@@ -25,7 +25,7 @@ prefixes still say `quackmail`; the product is QuackCit.
 | 6 | NNTP/NNTPS reader + poster (`quackmail_nntp`) | PR #12 |
 | 7 | XMPP c2s bridged to Citadel express messages (`quackmail_xmpp`) | PR #13 |
 | 8 | SMTP authentication (SPF/DKIM/DMARC/DNSBL), site policy, outbound signing + rate limiting, LMTP, real Sieve/ManageSieve, `deploy/` CLI tooling | PR #14 |
-| 9 | Telnet BBS depth (floors, zap, skip, registration, admin verbs) + `quackmail_http`: webmail, the BBS over the web, and the admin console | in progress |
+| 9 | Telnet BBS depth (floors, zap, skip, registration, admin verbs) + `quackmail_http`: webmail, the BBS over the web, and the admin console | PR #15 |
 
 Phases 2 and 3 were validated byte-for-byte against the real Citadel server, and
 the **official `citadel` text client drives a full clean session** against
@@ -211,3 +211,9 @@ part become `_`), a blank line, then the body.
 - Releases are built by `.github/workflows/release.yml` on `v*` tags; its
   packaging step has a **hardcoded extension list** that must be updated whenever
   a module is added.
+- **The version string lives in three places** and they must move together, or
+  `qm_version()` drifts the way it did before 0.3.x: the constant in
+  `quackmail/src/quackmail_extension.cpp`, the seeded `c_version` in
+  `core/src/citadel_store.cpp`, and the assertion in `test/sql/quackmail.test`.
+  Note the seed is `INSERT OR IGNORE`, so an existing database keeps whatever
+  `c_version` it was created with — only fresh installs pick the new one up.
