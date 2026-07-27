@@ -23,7 +23,7 @@ for what's next.
 | `test/sql/` | sqllogictest (`make test`) |
 | `test/integration/` | python end-to-end tests, one per protocol |
 | `test/parity/` | captured output from the real Citadel server used as fixtures |
-| `deploy/` | `run_quackcit.py` (env-driven launcher), `quackcit.sh` + `quackcit.conf` (run it), `quackcitadm.sh` + `quackcit_admin.py` (administer it) |
+| `deploy/` | POSIX shell only, no interpreter: `quackcit.sh` + `quackcit.conf` (run it), `quackcitadm.sh` (administer it), `quackcit_common.sh` (shared: layout detection, the listener table, SQL quoting, the control channel), `quackcit.service` |
 
 ## Build and test
 
@@ -71,8 +71,8 @@ Besides `<mod>/src/*` you must touch **four** files — the last one is easy to 
 4. `.github/workflows/release.yml` — add the extension to the hardcoded
    `for ext in ...` packaging loop, or it won't ship in releases.
 
-Then add it to `deploy/run_quackcit.py`, `test/sql/quackmail.test`, and the
-README table.
+Then add it to the `quackcit_services` table in `deploy/quackcit_common.sh`,
+`test/sql/quackmail.test`, and the README table.
 
 ## Reuse before you write
 
@@ -116,10 +116,18 @@ README table.
   in `test/integration/`. Protocol handlers are unaffected: each session does
   all its reads and writes on the one connection it opens.
 - The admin CLI cannot open the database while the server is running — DuckDB
-  permits one read-write process per file. `deploy/quackcitadm.sh` goes through
-  the launcher's Unix socket instead; see `deploy/quackcit_admin.py`.
-- `pkill -f run_quackcit` over SSH kills your own shell (the pattern matches the
-  command line). Kill by PID.
+  permits one read-write process per file. `deploy/quackcitadm.sh` writes SQL
+  into the server's control FIFO instead and reads the file the CLI redirects
+  the result to; see the control-channel section of `deploy/quackcit_common.sh`.
+  Errors are the one thing `.output` cannot capture, so the server's stderr has
+  its own file and the bytes appended across a request are that request's error.
+  This works only because no C++ in the tree writes to stderr — keep it that way.
+- Deploy scripts are POSIX `sh` and run under `dash`; check with `dash -n`.
+  Watch for `die` inside `$(...)`: it exits only the subshell, so validators
+  like `sql_int` must be used in a plain assignment (`n=$(sql_int "$1")`) where
+  `set -e` sees the failure.
+- Kill the server by the PID in `quackcit.pid`. `pkill -f quackcit` over SSH
+  kills your own shell (the pattern matches the command line).
 
 ## The parity oracle
 

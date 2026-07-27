@@ -155,6 +155,17 @@ Nothing in flight. Next work comes off the backlog below.
           per-verb text ("Known rooms:", "Server info:", "msg:", ...)
   - known divergences that remain, all deliberate: branding (node name, banner
     text) and the NNTP posting support QuackCit adds on purpose
+- [x] **Deploy scripts for the binary release.**
+  - [x] `deploy/` is POSIX shell end to end; `run_quackcit.py` and
+        `quackcit_admin.py` deleted. The server is the bundled DuckDB CLI
+        idling on a FIFO it holds open read-write, and that FIFO is the admin
+        channel `quackcitadm.sh` uses in place of the old JSON Unix socket
+  - [x] `quackcit_common.sh` — layout detection (checkout vs unpacked bundle,
+        nested vs flat extension tree), the listener table, SQL quoting, the
+        control channel; sourced by both entry points
+  - [x] `.github/workflows/release.yml` packages the scripts, `quackcit.conf`
+        and a `quackcit.service` template, so a release untars into
+        `/opt/quackmail` and runs
 
 ## Backlog
 

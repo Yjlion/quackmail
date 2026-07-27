@@ -1,0 +1,42 @@
+; QuackCit — a Citadel groupware/BBS server that runs inside DuckDB.
+;
+; Template unit for an unpacked release at /opt/quackmail. Edit the paths if
+; you installed elsewhere, then:
+;
+;     sudo cp /opt/quackmail/quackcit.conf /etc/quackcit.conf   # and edit it
+;     sudo cp /opt/quackmail/quackcit.service /etc/systemd/system/
+;     sudo systemctl daemon-reload && sudo systemctl enable --now quackcit
+;
+; RuntimeDirectory, StateDirectory and LogsDirectory create exactly the
+; locations the scripts default to for a bundle install, so no other setup is
+; needed. Administer the running server with:
+;
+;     sudo /opt/quackmail/quackcitadm.sh status
+
+[Unit]
+Description=QuackCit groupware server
+Documentation=https://github.com/Yjlion/quackmail
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=QUACKCIT_CONF=/etc/quackcit.conf
+ExecStart=/opt/quackmail/quackcit.sh foreground
+Restart=on-failure
+RestartSec=5
+
+RuntimeDirectory=quackcit
+StateDirectory=quackcit
+LogsDirectory=quackcit
+
+; Binding the production ports (25, 110, 143, 504, ...) needs this; drop it if
+; you only run the non-privileged dev ports.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
