@@ -263,7 +263,7 @@ void EnsureCitadelSchema(Connection &con) {
 	          "('c_humannode', 'QuackCit BBS'), "
 	          "('c_fqdn', 'quackmail.test'), "
 	          "('c_sysadm', 'admin'), "
-	          "('c_version', 'QuackCit 0.3.1'), "
+	          "('c_version', 'QuackCit 0.4.0'), "
 	          "('c_bbs_city', 'The Cloud')");
 }
 
