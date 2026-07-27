@@ -109,8 +109,17 @@ std::string TimeLine() {
 	       std::to_string(local.tm_isdst > 0 ? 1 : 0) + "|" + std::to_string(g_server_start);
 }
 
-void WriteListing(net::ClientStream &stream, const std::vector<std::string> &lines) {
-	stream.WriteLine("100 listing follows");
+// A `100` listing: preamble, lines, terminating `000`.
+//
+// The text after the code is per-verb in a real Citadel server ("Known rooms:",
+// "Server info:", "msg:", ...), and while no client parses it, mirroring the
+// wire exactly is the rule this project follows. The preamble is therefore a
+// required argument rather than a default: a new listing verb should have to
+// look up what the real server says instead of silently inheriting a generic
+// string. Values taken from the oracle and from citadel/server/*.
+void WriteListing(net::ClientStream &stream, const std::vector<std::string> &lines,
+                  const std::string &preamble) {
+	stream.WriteLine("100 " + preamble);
 	for (auto &l : lines) {
 		stream.WriteLine(l);
 	}
@@ -235,7 +244,8 @@ void HandleMsgs(Connection &con, Session &s, net::ClientStream &stream, const st
 	for (int64_t n : nums) {
 		lines.push_back(std::to_string(n));
 	}
-	WriteListing(stream, lines);
+	// serv_messages.c emits the bare code followed by two spaces.
+	WriteListing(stream, lines, " ");
 }
 
 void HandleMsg0(Connection &con, net::ClientStream &stream, const std::vector<std::string> &p) {
@@ -246,7 +256,7 @@ void HandleMsg0(Connection &con, net::ClientStream &stream, const std::vector<st
 		stream.WriteLine("500 No such message.");
 		return;
 	}
-	WriteListing(stream, citadel::FormatMsg0(msg, mode));
+	WriteListing(stream, citadel::FormatMsg0(msg, mode), "msg:"); // msgbase.c
 }
 
 void HandleMsg2(Connection &con, net::ClientStream &stream, const std::vector<std::string> &p) {
@@ -273,7 +283,7 @@ void HandleMsg2(Connection &con, net::ClientStream &stream, const std::vector<st
 	if (!cur.empty()) {
 		lines.push_back(cur);
 	}
-	WriteListing(stream, lines);
+	WriteListing(stream, lines, "msg:"); // same message-output path as MSG0
 }
 
 // REGI — the client sends the registration as a listing, in the field order
@@ -379,6 +389,11 @@ void HandleRbio(Connection &con, Session &s, net::ClientStream &stream, const st
 	if (who.empty()) {
 		who = s.username;
 	}
+	citadel::UserInfo info;
+	if (!citadel::GetUser(con, who, info)) {
+		stream.WriteLine("550 No such user.");
+		return;
+	}
 	citadel::Registration reg;
 	if (!citadel::GetRegistration(con, who, reg) || reg.bio.empty()) {
 		stream.WriteLine("550 No bio on file.");
@@ -394,7 +409,10 @@ void HandleRbio(Connection &con, Session &s, net::ClientStream &stream, const st
 		}
 		pos = nl + 1;
 	}
-	WriteListing(stream, lines);
+	// serv_bio.c: "OK|<fullname>|<usernum>|<axlevel>|<lastcall>|0|0".
+	WriteListing(stream, lines,
+	             "OK|" + who + "|" + std::to_string(info.usernum) + "|" +
+	                 std::to_string(info.axlevel) + "|" + std::to_string(info.last_call) + "|0|0");
 }
 
 // LIST — the user directory. US_UNLISTED hides an entry from everyone but an
@@ -410,7 +428,7 @@ void HandleList(Connection &con, Session &s, net::ClientStream &stream) {
 		                std::to_string(u.usernum) + "|" + std::to_string(u.last_call) + "|" +
 		                std::to_string(u.times_called) + "|" + std::to_string(u.num_posts));
 	}
-	WriteListing(stream, lines);
+	WriteListing(stream, lines, "");
 }
 
 void HandleEnt0(Connection &con, Session &s, net::ClientStream &stream, const std::vector<std::string> &p) {
@@ -736,7 +754,11 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			for (auto &r : rooms) {
 				lines.push_back(RoomListLine(r));
 			}
-			WriteListing(stream, lines);
+			// Each of the three has its own wording in serv_rooms.c.
+			std::string preamble = verb == "LKRN"   ? "Rooms with new msgs:"
+			                       : verb == "LKRO" ? "Rooms with no new msgs:"
+			                                        : "Known rooms:";
+			WriteListing(stream, lines, preamble);
 		} else if (verb == "LFLR") {
 			auto floors = citadel::ListFloors(con);
 			std::vector<std::string> lines;
@@ -744,7 +766,7 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				lines.push_back(std::to_string(f.floor_num) + "|" + f.name + "|" +
 				                std::to_string(f.room_count));
 			}
-			WriteListing(stream, lines);
+			WriteListing(stream, lines, "Known floors:");
 		} else if (verb == "CFLR") {
 			if (s.axlevel < 6) {
 				stream.WriteLine("500 Higher access required.");
@@ -792,7 +814,7 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			HandleSetr(con, s, stream, p);
 		} else if (verb == "RINF") {
 			if (s.have_room && !s.room.info.empty()) {
-				WriteListing(stream, {s.room.info});
+				WriteListing(stream, {s.room.info}, "Info:");
 			} else {
 				stream.WriteLine("500 No info file for this room.");
 			}
@@ -810,12 +832,15 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			// login banner) during handshake; a real server returns the text.
 			// Returning a banner here avoids a spurious "unrecognized command".
 			std::string human = citadel::GetConfig(con, "c_humannode", "QuackCit BBS");
+			// serv_file.c echoes the requested banner's name back in the
+			// preamble, so "MESG hello" answers "100 hello".
 			WriteListing(stream, {"Welcome to " + human + "!", "",
-			                      "You are connected to a QuackCit server speaking the Citadel protocol."});
+			                      "You are connected to a QuackCit server speaking the Citadel protocol."},
+			             rest.empty() ? std::string("hello") : rest);
 		} else if (verb == "TIME") {
 			stream.WriteLine(TimeLine());
 		} else if (verb == "RWHO") {
-			WriteListing(stream, WhoLines(con));
+			WriteListing(stream, WhoLines(con), " "); // serv_rwho.c: code, express flag, space
 		} else if (verb == "SEXP" || verb == "SEND_EXPRESS") {
 			// SEXP <recipient>|<message text>  (page a user an instant message)
 			if (!s.authed) {
@@ -908,7 +933,7 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 		} else if (verb == "LIST") {
 			HandleList(con, s, stream);
 		} else if (verb == "INFO") {
-			WriteListing(stream, InfoLines(con));
+			WriteListing(stream, InfoLines(con), "Server info:");
 		} else if (verb == "MSGP") {
 			// Client message-format preference hint (which MIME types it wants
 			// decoded). We deliver messages as-is and let the client decode, so
