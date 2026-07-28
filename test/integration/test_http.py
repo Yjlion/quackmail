@@ -211,6 +211,53 @@ def main():
         )
         assert status == 403, f"login without a CSRF token returned {status}"
 
+        # ---- form origin --------------------------------------------------
+        # Empty qm_web_origins means any origin may post. This server is reached
+        # by whatever name its operator points at it, so the check is opt-in;
+        # the CSRF token above is what actually stops a cross-site post.
+        def login_from(origin):
+            jar = http.cookiejar.CookieJar()
+            o = opener(jar)
+            _, _, p = request(o, BASE + "/login")
+            return request(
+                o,
+                BASE + "/login",
+                {"_csrf": csrf_of(p), "username": "webuser", "password": "secret", "next": "/mail/"},
+                headers={"Origin": origin},
+            )
+
+        for origin in ("http://192.0.2.1:8080", "https://mail.example.com", "http://[::1]:8443"):
+            status, _, _ = login_from(origin)
+            assert status == 303, f"with no allow-list, Origin {origin} returned {status}"
+
+        con.execute("CALL qm_config_set('qm_web_origins', 'mail.example.com')")
+
+        status, _, body = login_from("http://192.0.2.1:8080")
+        assert status == 403, f"with an allow-list, a foreign Origin returned {status}"
+        assert "another site" in body, "the rejection is not the origin check"
+
+        status, _, _ = login_from("https://mail.example.com")
+        assert status == 303, "a listed Origin must be accepted"
+
+        status, _, _ = login_from("https://mail.example.com:8443")
+        assert status == 303, "the port must not take part in the origin match"
+
+        # Loopback is always its own origin, allow-list or not. The bracketed
+        # form is the regression: splitting the port off at the first colon
+        # reduced "[::1]:8443" to "[" and rejected the request.
+        for origin in ("http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8443"):
+            status, _, _ = login_from(origin)
+            assert status == 303, f"loopback Origin {origin} returned {status}"
+
+        con.execute("CALL qm_config_set('qm_web_origins', 'mail.example.com,*.corp.example')")
+        status, _, _ = login_from("https://vpn.corp.example")
+        assert status == 303, "a glob entry in the allow-list must match"
+
+        con.execute("CALL qm_config_set('qm_web_origins', '')")
+        # Every accepted probe above completed a real sign-in. Clear them, so
+        # the session assertions further down still count from zero.
+        con.execute("DELETE FROM quackmail_web_sessions")
+
         # ---- account enumeration ----------------------------------------
         # The two pages must not differ in any way that depends on whether the
         # account exists. Two things legitimately differ between any two

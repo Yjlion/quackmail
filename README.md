@@ -10,6 +10,20 @@ Like real Citadel, QuackCit speaks its own native client/server protocol
 over the same store. A message that arrives by SMTP shows up in the recipient's
 Mail **room**, readable both from a Citadel client and over POP3/IMAP.
 
+> **This is vibe-coded software.** Nearly all of it was written by an LLM,
+> against a real Citadel server used as an oracle for protocol behaviour. It is
+> an experiment in how far that approach goes on a large, specification-heavy
+> codebase — not a product, and not something anyone has audited. There has been
+> no security review, no interoperability testing beyond the suites in this
+> repository, and no promise that the on-disk schema is stable between commits.
+>
+> It speaks SMTP well enough to accept mail from the internet, which is exactly
+> what makes that worth saying out loud: **do not put it in front of mail you
+> would mind losing.** Several defaults are chosen so a fresh install is
+> reachable rather than locked down — a self-signed certificate, an unrestricted
+> web form origin, plaintext HTTP — and each one is called out in
+> [Security posture](#security-posture) with the setting that tightens it.
+
 ```sql
 LOAD quackmail;            -- umbrella: schema, users, admin, MIME helpers
 LOAD quackmail_citadel;    -- the native Citadel protocol
@@ -261,13 +275,31 @@ page (so every response closes its connection).
 ### Security posture
 
 The web front-end is the only part of QuackCit a browser can reach, so it is
-deliberately the most locked-down:
+the part with the most deliberate hardening. Read that in the light of the
+[disclaimer](#quackcit) at the top: none of it has been reviewed by anyone, and
+the two items marked **relaxed by default** are the price of a fresh install
+being reachable at all.
 
-- **HTTPS by default.** `qm_web_force_https` (default `1`) makes the plain
-  listener redirect to `https://<c_fqdn>` — built from the configured name,
-  never from the client's `Host` header. Set it to `0` behind a reverse proxy
-  and list the proxy in `qm_web_trusted_proxies`; `X-Forwarded-Proto` is
-  honoured only from a peer on that list.
+- **HTTPS is not forced on a fresh install** — *relaxed by default*. The plain
+  listener can redirect everything to `https://<c_fqdn>`, built from the
+  configured name and never from the client's `Host` header, because using the
+  header there would be an open redirect with extra steps. But that redirect
+  carries no port, so on the default dev ports (8080/8443) it sends browsers to
+  a closed one; the first `quackcit.sh start` therefore writes
+  `qm_web_force_https = 0` and the interface is served in the clear. Set it back
+  to `1` once you have a certificate clients trust, or behind a reverse proxy
+  listed in `qm_web_trusted_proxies` — `X-Forwarded-Proto` is honoured only from
+  a peer on that list. Sessions are pinned to the transport they were minted
+  over either way, so nothing is laundered between the two listeners.
+- **Form origins are unrestricted until you restrict them** — *relaxed by
+  default*. `qm_web_origins` is a comma-separated list of host globs allowed to
+  submit forms; while it is empty, any origin may. This server is reached by
+  whatever name its operator points at it — a LAN address, a container name, a
+  tunnel — and the previous behaviour of falling back to `c_fqdn` meant every
+  deployment whose `c_fqdn` was not exactly the browsed name rejected all of its
+  own POSTs with *"This form was submitted from another site"*. The CSRF
+  synchronizer token below is the actual cross-site defence; the origin check is
+  a cheap second one, and setting `qm_web_origins` is what turns it on.
 - **The admin console is off until you turn it on** (`qm_web_admin_enabled`),
   requires TLS (`qm_web_admin_require_tls`), honours the `webadmin` ACL scope
   for a network allow-list, and asks for the operator's own password again
@@ -487,6 +519,47 @@ for production point `QUACKCIT_TLS_CERT` and `QUACKCIT_TLS_KEY` at real material
 (a Let's Encrypt `fullchain.pem`/`privkey.pem` pair works as-is), which takes
 precedence and disables the generated one. `QUACKCIT_TLS_AUTOGEN=0` opts out
 entirely.
+
+**One account, with a password you have to go and read.** The first start of an
+empty database creates the accounts in `QUACKCIT_SEED_USERS`, which defaults to
+a single aide named `admin`. Its password is generated — 24 alphanumerics from
+`openssl` or `/dev/urandom` — and written to
+`$QUACKCIT_SEED_SECRET_FILE` (`/var/lib/quackcit/initial-credentials` in a
+release), mode `0600`. It is never printed to the terminal or into the log;
+only the path is. Change it and delete the file. Seed whoever you like instead,
+generating some passwords and choosing others:
+
+```sh
+: "${QUACKCIT_SEED_USERS:=admin - 6
+alice - 4
+bob hunter2 4}"
+```
+
+`<name> <password> <axlevel>` per line, `-` for "generate one", access level 6
+for an aide and 4 for an ordinary user. This runs only while the database has
+no accounts at all — it cannot reset a password later, so use
+`quackcitadm.sh user add` after that.
+
+**The server names itself after the host.** The first start resolves
+`hostname -f` (then `hostname`, then `localhost`) and stores it as `c_fqdn`,
+the name used for SMTP banners, `Received:` and `Message-ID` headers, the domain
+mail is accepted for, and the certificate subject. It only ever replaces an
+empty value or the `quackmail.test` placeholder, so a name you chose survives
+every restart. Set `QUACKCIT_FQDN` to decide it yourself, in which case it is
+authoritative and applied on every start.
+
+**The log is syslog.** `quackcit.log` is RFC 5424, one record per line:
+
+```
+<22>1 2026-07-28T15:41:02Z mail quackcit 12345 server - qm_http	true	0.0.0.0	8080	0	started
+```
+
+`<22>` is `mail.info` — set `QUACKCIT_SYSLOG_FACILITY` to any facility name or
+number. Everything the server prints goes through it, so a collector tailing the
+file gets the same records `quackcit.sh logs` shows you. `quackcit.err` is
+deliberately *not* in that format and should not be pointed at a collector: it
+is the control channel's error return path, and `quackcitadm.sh` reads a failed
+request's error text out of it byte for byte. Neither file is rotated yet.
 
 `quackcitadm.sh` administers the server — users, domains, aliases, access
 rules, DKIM keys, quotas, Sieve scripts, the outbound queue and server config:

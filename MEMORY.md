@@ -157,6 +157,42 @@ QuackCit (login banner, `<K>nown rooms`, no spurious errors).
   into segments. Numbers also make the ownership check a single explicit
   function (`ResolveRoomNumFor`), which is what stands between a guessed room
   number and someone else's mailbox.
+- **Seeding is a deployment default, not a parity fixture.** `admin/admin` and
+  `leo/leo` were seeded so protocol output could be diffed against the oracle
+  1:1. That is a development convenience being shipped as two known passwords,
+  so the default is now one `admin` with a generated password written to
+  `$QUACKCIT_SEED_SECRET_FILE` (mode 0600), and the whole list is
+  `QUACKCIT_SEED_USERS`. The parity pair is one variable away when it is needed.
+- **Seeding happens before the server starts, not after.** It used to run from
+  `cmd_start` over the control channel, which meant `cmd_foreground` — the
+  systemd path, which `exec`s into the CLI and never returns — never seeded at
+  all. It now runs from `prepare_runtime` through `adm_offline`: loading the
+  umbrella runs `EnsureSchema`, and `qm_user_add` and `qm_config_set` both live
+  there, so nothing needs a listener to be up. One SQL batch for all accounts,
+  because `adm_offline` spawns a DuckDB process per call.
+- **`c_fqdn`'s `quackmail.test` counts as unset.** The extension seeds that
+  placeholder with `INSERT OR IGNORE`, so a deploy-side "set it if it is
+  missing" would never fire. `seed_fqdn` treats empty *and* the placeholder as
+  unconfigured and writes `hostname -f`; anything else is the operator's and is
+  left alone. `QUACKCIT_FQDN` overrides on every start. This also stopped the
+  certificate (issued to the real hostname) and `c_fqdn` from disagreeing.
+- **The web origin check is opt-in.** It used to fall back to `c_fqdn` when
+  `qm_web_origins` was empty — and since `c_fqdn` was always the seeded
+  placeholder, the "no allow-list, allow everything" escape hatch was dead code
+  and every POST from a real hostname or LAN address 403'd with *"This form was
+  submitted from another site"*. Empty now means allow; the CSRF synchronizer
+  token is the real defence and always was. Bracketed IPv6 origins
+  (`http://[::1]:8443`) were also being truncated to `[` by the port split.
+- **`quackcit.log` is RFC 5424; `quackcit.err` is not a log.** Everything the
+  server prints goes through `syslog_stream` over a second FIFO, which keeps
+  `$!` on the DuckDB process so the PID file and control channel are unaffected.
+  Startup SQL switched to `.mode tabs`/`.headers off` so one row is one line —
+  duckbox wraps a single row in several lines of box-drawing characters. The
+  error log stays byte-exact because `adm_online` recovers a request's error
+  text as the bytes appended to it while that request ran; a syslog header in
+  front of those bytes would end up in front of every error the admin CLI
+  prints. Neither file rotates, and `errlog_delta`'s absolute offsets are why
+  adding rotation is not free.
 
 ## The test box: debian.lan
 
@@ -177,8 +213,11 @@ QuackCit (login banner, `<K>nown rooms`, no spurious errors).
 - Toolchain is user-local: `~/venv` with cmake/ninja/duckdb (pip bootstrapped via
   get-pip.py; Debian strips ensurepip). Build with `-j2` — 3.8G RAM.
 - QuackCit source lives in `~/quackmail`; run it with `deploy/quackcit.sh start`
-  and `QUACKCIT_DB=~/quackcit.duckdb`. Seeded users `admin/admin` (aide) and
-  `leo/leo` mirror the oracle for 1:1 diffing.
+  and `QUACKCIT_DB=~/quackcit.duckdb`. The seeded users used to be `admin/admin`
+  and `leo/leo`, mirroring the oracle for 1:1 diffing; that is no longer the
+  default (see below). To reproduce it for a parity session, set
+  `QUACKCIT_SEED_USERS='admin admin 6
+  leo leo 4'` before the first start.
 - Parity probes: `~/parity/cit_probe.py` (native), `~/parity/imap_probe.py`,
   `~/parity/drive_client.py` (drives the real text client). Captured oracle
   fixtures are committed under `test/parity/real_citadel/`.
