@@ -36,6 +36,9 @@ struct Action {
 struct Envelope {
 	std::string mail_from;
 	std::string rcpt_to;
+	// The subaddress separator `:user`/`:detail` split on (RFC 5233), which the
+	// site configures as qm_subaddress_sep. Empty disables the split.
+	std::string separator = "+";
 
 	Envelope() = default;
 	Envelope(std::string from, std::string to) : mail_from(std::move(from)), rcpt_to(std::move(to)) {}

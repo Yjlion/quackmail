@@ -228,6 +228,28 @@ void EnsureCitadelSchema(Connection &con) {
 	)");
 	// `client` was added after the table shipped; keep older database files working.
 	con.Query("ALTER TABLE citadel_sessions ADD COLUMN IF NOT EXISTS client VARCHAR DEFAULT ''");
+
+	// String-valued per-user preferences. The US_* bit field covers the boolean
+	// BBS toggles; anything with a value (the web theme, so far) lives here.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_user_prefs (
+			username VARCHAR,
+			name     VARCHAR,
+			value    VARCHAR DEFAULT '',
+			PRIMARY KEY (username, name)
+		)
+	)");
+
+	// RFC 4314 access control lists. Only explicit grants live here; ordinary
+	// permissions are derived from the room itself (see EffectiveRights).
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_room_acl (
+			room_num   BIGINT,
+			identifier VARCHAR,
+			rights     VARCHAR DEFAULT '',
+			PRIMARY KEY (room_num, identifier)
+		)
+	)");
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_express (
 			id        BIGINT PRIMARY KEY,
@@ -264,7 +286,19 @@ void EnsureCitadelSchema(Connection &con) {
 	          "('c_fqdn', 'quackmail.test'), "
 	          "('c_sysadm', 'admin'), "
 	          "('c_version', 'QuackCit 0.4.0'), "
-	          "('c_bbs_city', 'The Cloud')");
+	          "('c_bbs_city', 'The Cloud'), "
+	          // System messages to the Aide room. Rejected inbound mail is off by
+	          // default: on a live MX it would bury everything else.
+	          "('qm_aide_log', '1'), "
+	          "('qm_aide_log_rejects', '0'), "
+	          // Public room addresses (room_<name>@) and RFC 5233 subaddressing.
+	          // Room mail is on, but no room is reachable until its ACL grants
+	          // "anyone" the `p` right, so this only decides whether the lookup
+	          // happens at all. Subaddressed folders are never auto-created:
+	          // the sender picks the name.
+	          "('qm_room_mail', '1'), "
+	          "('qm_subaddress_sep', '+'), "
+	          "('qm_subaddress_create', '0')");
 }
 
 std::string GetConfig(Connection &con, const std::string &name, const std::string &dflt) {
@@ -755,12 +789,25 @@ bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
 	}
 	ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1", {Value::BIGINT(room_num)});
 	ExecP(con, "DELETE FROM citadel_room_state WHERE room_num = $1", {Value::BIGINT(room_num)});
+	ExecP(con, "DELETE FROM citadel_room_acl WHERE room_num = $1", {Value::BIGINT(room_num)});
 	auto r = ExecP(con, "DELETE FROM citadel_rooms WHERE room_num = $1", {Value::BIGINT(room_num)});
 	if (!r) {
 		err = "delete failed";
 		return false;
 	}
 	return true;
+}
+
+int64_t FindUserRoom(Connection &con, const std::string &username, const std::string &display_name) {
+	int64_t usernum = GetOrAssignUserNum(con, username);
+	if (usernum <= 0) {
+		return -1;
+	}
+	// Match on the internal key, which is scoped to the user — looking the name
+	// up any other way can collide with a public room that happens to share it.
+	auto existing = ScalarP(con, "SELECT room_num FROM citadel_rooms WHERE lower(name) = lower($1)",
+	                        {Value(MailboxRoomName(usernum, display_name))});
+	return existing.IsNull() ? -1 : existing.GetValue<int64_t>();
 }
 
 int64_t GetOrCreateUserRoom(Connection &con, const std::string &username, const std::string &display_name) {
@@ -866,15 +913,22 @@ std::string NewsgroupToRoom(const std::string &newsgroup) {
 	return out;
 }
 
-int64_t RegisterSession(Connection &con, const std::string &client) {
+int64_t RegisterSession(Connection &con, const std::string &client, const std::string &host) {
 	auto sid = ScalarP(con, "SELECT nextval('citadel_session_seq')", {});
 	if (sid.IsNull()) {
 		return 0;
 	}
 	int64_t id = sid.GetValue<int64_t>();
+	// A loopback peer is reported as "localhost", which is the name a real
+	// Citadel server puts in RWHO for a local connection.
+	std::string where = host;
+	if (where == "127.0.0.1" || where == "::1" || where == "::ffff:127.0.0.1") {
+		where = "localhost";
+	}
 	ExecP(con,
-	      "INSERT INTO citadel_sessions (session_id, client, since, last_seen) VALUES ($1, $2, $3, $3)",
-	      {Value::BIGINT(id), Value(client), Value::BIGINT(NowEpoch())});
+	      "INSERT INTO citadel_sessions (session_id, client, host, since, last_seen) "
+	      "VALUES ($1, $2, $3, $4, $4)",
+	      {Value::BIGINT(id), Value(client), Value(where), Value::BIGINT(NowEpoch())});
 	return id;
 }
 
@@ -1092,6 +1146,155 @@ bool RoomUnlocked(Connection &con, const std::string &username, const Room &room
 	return (AsBigint(v) & RS_UNLOCKED) != 0;
 }
 
+// ---- access control lists (RFC 4314) ------------------------------------
+
+const char *const kAclRights = "lrswipkxtea";
+
+// Union two rights strings, emitting them in kAclRights order with no repeats.
+static std::string UnionRights(const std::string &a, const std::string &b) {
+	std::string out;
+	for (const char *p = kAclRights; *p; p++) {
+		if (a.find(*p) != std::string::npos || b.find(*p) != std::string::npos) {
+			out += *p;
+		}
+	}
+	return out;
+}
+
+static std::string StoredRights(Connection &con, int64_t room_num, const std::string &identifier) {
+	auto v = ScalarP(con,
+	                 "SELECT rights FROM citadel_room_acl WHERE room_num = $1 AND lower(identifier) = lower($2)",
+	                 {Value::BIGINT(room_num), Value(identifier)});
+	return v.IsNull() ? std::string() : v.ToString();
+}
+
+// The RFC 4314 identifier that covers every caller, authenticated or not.
+static bool IsAnyone(const std::string &identifier) {
+	if (identifier.size() != 6) {
+		return false;
+	}
+	for (size_t i = 0; i < 6; i++) {
+		if (std::tolower((unsigned char)identifier[i]) != "anyone"[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+std::string EffectiveRights(Connection &con, const std::string &username, const Room &room) {
+	std::string derived;
+	bool anonymous = username.empty() || IsAnyone(username);
+	if (!anonymous) {
+		int64_t usernum = GetOrAssignUserNum(con, username);
+		bool owner = room.mailbox_owner > 0 && room.mailbox_owner == usernum;
+		if (owner || GetAxLevel(con, username) >= kAideAxLevel) {
+			// The owner of a mailbox, and any aide, hold every right. This is
+			// also what lets an aide post into a QR_READONLY announcement room.
+			derived = kAclRights;
+		} else if (room.mailbox_owner > 0 || (room.qr_flags & QR_PRIVATE) ||
+		           !RoomUnlocked(con, username, room)) {
+			// Someone else's mailbox, an invitation-only room, or a passworded
+			// room whose password has not been given: not even visible.
+			derived.clear();
+		} else {
+			derived = "lrs";
+			if (!(room.qr_flags & QR_READONLY)) {
+				derived += "wi";
+			}
+		}
+	}
+	// Stored grants are additive. "anyone" applies to every caller; a row naming
+	// this user adds to it.
+	std::string stored = StoredRights(con, room.room_num, "anyone");
+	if (!anonymous) {
+		stored = UnionRights(stored, StoredRights(con, room.room_num, username));
+	}
+	return UnionRights(derived, stored);
+}
+
+bool SetRights(Connection &con, const Room &room, const std::string &identifier,
+               const std::string &rights, std::string &err) {
+	if (identifier.empty()) {
+		err = "an ACL entry needs an identifier";
+		return false;
+	}
+	for (char c : rights) {
+		if (std::strchr(kAclRights, c) == nullptr) {
+			err = std::string("unknown right '") + c + "'";
+			return false;
+		}
+	}
+	if (rights.empty()) {
+		ExecP(con, "DELETE FROM citadel_room_acl WHERE room_num = $1 AND lower(identifier) = lower($2)",
+		      {Value::BIGINT(room.room_num), Value(identifier)});
+		return true;
+	}
+	// Normalize to kAclRights order so GETACL output does not depend on the
+	// order the client happened to type the letters in.
+	std::string normalized = UnionRights(rights, "");
+	if (!ExecP(con,
+	           "INSERT INTO citadel_room_acl (room_num, identifier, rights) VALUES ($1, $2, $3) "
+	           "ON CONFLICT (room_num, identifier) DO UPDATE SET rights = excluded.rights",
+	           {Value::BIGINT(room.room_num), Value(identifier), Value(normalized)})) {
+		err = "could not store the access control entry";
+		return false;
+	}
+	return true;
+}
+
+std::vector<std::pair<std::string, std::string>> ListRights(Connection &con, const Room &room) {
+	std::vector<std::pair<std::string, std::string>> out;
+	auto r = ExecP(con,
+	               "SELECT identifier, rights FROM citadel_room_acl WHERE room_num = $1 ORDER BY identifier",
+	               {Value::BIGINT(room.room_num)});
+	if (!r) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		out.push_back({mat.GetValue(0, i).ToString(), mat.GetValue(1, i).ToString()});
+	}
+	return out;
+}
+
+bool CanPost(Connection &con, const std::string &username, const Room &room) {
+	std::string rights = EffectiveRights(con, username, room);
+	char needed = username.empty() ? 'p' : 'i';
+	return rights.find(needed) != std::string::npos;
+}
+
+int64_t ResolveMailRoom(Connection &con, const std::string &local_part) {
+	static const char kPrefix[] = "room_";
+	const size_t kPrefixLen = sizeof(kPrefix) - 1;
+	if (local_part.size() <= kPrefixLen) {
+		return -1;
+	}
+	for (size_t i = 0; i < kPrefixLen; i++) {
+		if (std::tolower((unsigned char)local_part[i]) != kPrefix[i]) {
+			return -1;
+		}
+	}
+	std::string rest = local_part.substr(kPrefixLen);
+	Room room;
+	// Citadel writes a room's spaces as underscores in an address, but a room
+	// name may contain a literal underscore, so try the name as given first.
+	bool found = ResolveRoom(con, "", rest, room);
+	if (!found) {
+		std::replace(rest.begin(), rest.end(), '_', ' ');
+		found = ResolveRoom(con, "", rest, room);
+	}
+	if (!found) {
+		return -1;
+	}
+	// Belt and braces: ResolveRoom with no user only returns public rooms, but
+	// a personal, invitation-only or passworded room must never be mail-reachable
+	// even if someone manages to put a grant on it.
+	if (room.mailbox_owner > 0 || (room.qr_flags & (QR_MAILBOX | QR_PRIVATE | QR_PASSWORDED))) {
+		return -1;
+	}
+	return CanPost(con, "", room) ? room.room_num : -1;
+}
+
 bool UnlockRoom(Connection &con, const std::string &username, const Room &room,
                 const std::string &password) {
 	if (username.empty()) {
@@ -1279,6 +1482,50 @@ bool MoveMessage(Connection &con, int64_t from_room, int64_t to_room, int64_t ms
 		}
 	}
 	return true;
+}
+
+std::string GetUserPref(Connection &con, const std::string &username, const std::string &name,
+                        const std::string &dflt) {
+	if (username.empty()) {
+		return dflt;
+	}
+	auto v = ScalarP(con,
+	                 "SELECT value FROM citadel_user_prefs WHERE lower(username) = lower($1) AND name = $2",
+	                 {Value(username), Value(name)});
+	return v.IsNull() ? dflt : v.ToString();
+}
+
+bool SetUserPref(Connection &con, const std::string &username, const std::string &name,
+                 const std::string &value) {
+	if (username.empty()) {
+		return false;
+	}
+	if (value.empty()) {
+		// An empty value means "no preference", which must fall back to the site
+		// default rather than pin the user to an empty string.
+		ExecP(con, "DELETE FROM citadel_user_prefs WHERE lower(username) = lower($1) AND name = $2",
+		      {Value(username), Value(name)});
+		return true;
+	}
+	return ExecP(con,
+	             "INSERT INTO citadel_user_prefs (username, name, value) VALUES ($1, $2, $3) "
+	             "ON CONFLICT (username, name) DO UPDATE SET value = excluded.value",
+	             {Value(username), Value(name), Value(value)}) != nullptr;
+}
+
+void PostAideMessage(Connection &con, const std::string &subject, const std::string &text) {
+	if (GetConfig(con, "qm_aide_log", "1") != "1") {
+		return;
+	}
+	Message msg;
+	msg.author = GetConfig(con, "c_nodename", "quackcit");
+	msg.msgtime = NowEpoch();
+	msg.format_type = 0; // native Citadel text, so every front-end renders it
+	msg.subject = subject;
+	msg.origin_room = "Aide";
+	msg.raw = text;
+	std::string err;
+	InsertMessage(con, msg, {kAideRoom}, err); // best effort; never fails the caller
 }
 
 } // namespace citadel

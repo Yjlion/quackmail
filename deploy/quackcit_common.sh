@@ -340,13 +340,14 @@ gen_password() {
 quackcit_services() {
     cat <<'EOF'
 CITADEL      quackmail_citadel     cit                 5040   starttls  -
-SMTP_IN      quackmail_smtp_in     qm_smtp_in          2525   starttls  -
+SMTP         quackmail_smtp_in     qm_smtp_in          2525   starttls  -
 LMTP         quackmail_smtp_in     qm_lmtp             2033   none      127.0.0.1
 SUBMISSION   quackmail_smtp_out    qm_smtp_submission  2587   starttls  -
-SMTPS        quackmail_smtp_out    qm_smtp_smtps       2465   implicit  -
+SUBMISSIONS  quackmail_smtp_out    qm_smtp_smtps       2465   implicit  -
 POP3         quackmail_pop3        qm_pop3             1110   starttls  -
 POP3S        quackmail_pop3        qm_pop3s            1995   implicit  -
 IMAP         quackmail_imap        qm_imap             1143   starttls  -
+IMAPS        quackmail_imap        qm_imaps            1993   implicit  -
 MANAGESIEVE  quackmail_managesieve qm_managesieve      4190   starttls  -
 TELNET       quackmail_telnet      qm_telnet           2300   none      -
 TELNETS      quackmail_telnet      qm_telnets          2992   implicit  -

@@ -100,11 +100,8 @@ std::vector<int64_t> RoomArticles(Connection &con, int64_t room_num) {
 // Posting is allowed for an authenticated user in a writable room. A real
 // Citadel server hardcodes "n" here because it has no NNTP posting at all; we
 // do, so this reports the truth.
-bool CanPost(const Nntp &s, const citadel::Room &room) {
-	if (!s.authed || (room.qr_flags & citadel::QR_READONLY)) {
-		return false;
-	}
-	return true;
+bool CanPost(Connection &con, const Nntp &s, const citadel::Room &room) {
+	return s.authed && citadel::CanPost(con, s.username, room);
 }
 
 // "<low>-<high>" / "<num>-" / "<num>" ranges used by LISTGROUP, OVER and XOVER.
@@ -170,7 +167,7 @@ void HandleList(Connection &con, Nntp &s, net::ClientStream &stream, const std::
 		int64_t low = nums.empty() ? 0 : nums.front();
 		int64_t high = nums.empty() ? 0 : nums.back();
 		stream.WriteLine(group + " " + std::to_string(high) + " " + std::to_string(low) + " " +
-		                 (CanPost(s, room) ? "y" : "n"));
+		                 (CanPost(con, s, room) ? "y" : "n"));
 	}
 	stream.WriteLine(".");
 }
@@ -439,7 +436,7 @@ void HandlePost(Connection &con, Nntp &s, net::ClientStream &stream, const std::
 			stream.WriteLine("441 posting failed: no such newsgroup " + g);
 			return;
 		}
-		if (!CanPost(s, room)) {
+		if (!CanPost(con, s, room)) {
 			stream.WriteLine("440 posting not permitted to " + g);
 			return;
 		}
@@ -580,7 +577,7 @@ void HandleNntp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 				stream.WriteLine(citadel::RoomToNewsgroup(room.name) + " " +
 				                 std::to_string(nums.empty() ? 0 : nums.back()) + " " +
 				                 std::to_string(nums.empty() ? 0 : nums.front()) + " " +
-				                 (CanPost(s, room) ? "y" : "n"));
+				                 (CanPost(con, s, room) ? "y" : "n"));
 			}
 			stream.WriteLine(".");
 		} else if (verb == "GROUP" || verb == "LISTGROUP") {

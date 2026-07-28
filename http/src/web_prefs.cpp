@@ -70,6 +70,10 @@ void GetPrefs(Ctx &ctx) {
 	        TextInput("width", std::to_string(user.screenwidth), "number") + "</label>";
 	body += "<label class=\"field\"><span>Screen height</span>" +
 	        TextInput("height", std::to_string(user.screenheight), "number") + "</label>";
+	body += "<label class=\"field\"><span>Colour theme</span>" +
+	        Select("theme", ThemeOptions(),
+	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_theme", "auto")) +
+	        "</label>";
 	body += "<p>" + Button("Save settings") + "</p>";
 	body += "<p class=\"muted\">These are the same preferences the BBS shell's "
 	        "<code>.Enter Configuration</code> edits.</p>";
@@ -154,6 +158,16 @@ void PostSettings(Ctx &ctx) {
 	quackmail::citadel::SetUserFlags(ctx.con, ctx.username, flags);
 	quackmail::citadel::SetScreenSize(ctx.con, ctx.username, ctx.FormInt("width", 80),
 	                                  ctx.FormInt("height", 24));
+	// Only a theme we actually ship is stored; "auto" clears the row so the user
+	// follows the site default rather than being pinned to today's value of it.
+	std::string theme = ctx.req.Form("theme");
+	for (auto &t : ThemeOptions()) {
+		if (t.first == theme) {
+			quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_theme",
+			                                theme == "auto" ? "" : theme);
+			break;
+		}
+	}
 	RedirectTo(ctx, "/prefs", "saved");
 }
 

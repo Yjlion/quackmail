@@ -86,6 +86,39 @@ public:
 		return echo_;
 	}
 
+	// ---- colour ---------------------------------------------------------
+	// The BBS shell asks for colour when the user's US_COLOR bit is set, but a
+	// terminal that cannot render it must never see an escape sequence — so a
+	// client that identifies itself as "dumb" or "unknown" is refused even then.
+	// A client that never answers TERMINAL-TYPE is assumed capable, the same
+	// benefit of the doubt the NAWS fallback gives.
+	void SetColor(bool on) {
+		color_ = on;
+	}
+	bool ColorEnabled() const {
+		return color_ && !dumb_terminal_;
+	}
+	const std::string &TermType() const {
+		return term_type_;
+	}
+	// The escape for one palette entry, or "" when colour is off, so call sites
+	// never have to branch. `Attr::Reset` returns to the terminal default.
+	enum class Attr {
+		Reset,
+		Banner,   // room banners, section headings
+		Prompt,   // the room prompt and menu keys
+		Header,   // message From/Subject lines
+		Body,     // message text
+		Notice,   // instant messages, system notices
+		Error,    // refusals and warnings
+		Dim,      // secondary detail
+	};
+	std::string Colour(Attr attr) const;
+
+	// Printable width, ignoring CSI escape sequences. The pager needs this or a
+	// coloured line counts its escapes as visible columns and wraps early.
+	static size_t VisibleWidth(const std::string &text);
+
 private:
 	void Send3(unsigned char verb, unsigned char option);
 	// Next raw byte, honouring the pushback slot. False on EOF.
@@ -104,6 +137,9 @@ private:
 	bool have_naws_ = false;
 	int page_rows_ = 0; // 0 = no paging
 	int page_used_ = 0;
+	bool color_ = false;
+	bool dumb_terminal_ = false;
+	std::string term_type_;
 };
 
 } // namespace telnet

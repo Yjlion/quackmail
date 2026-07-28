@@ -1,5 +1,7 @@
 #include "quackmail/dmarc.hpp"
 
+#include "quackmail/psl.hpp"
+
 #include "quackmail/dns.hpp"
 
 #include <algorithm>
@@ -54,31 +56,6 @@ std::string Join(const std::vector<std::string> &labels, size_t from) {
 		out += labels[i];
 	}
 	return out;
-}
-
-// Multi-label public suffixes common enough to be worth special-casing without
-// shipping a full Public Suffix List. See the note in the header.
-bool IsTwoLabelSuffix(const std::string &a, const std::string &b) {
-	static const char *kSecondLevel[] = {"co",  "com", "net", "org", "gov", "edu",
-	                                     "ac",  "mil", "sch", "ltd", "plc", "me",
-	                                     "or",  "ne",  "gr",  "in",  "nic", nullptr};
-	static const char *kCountry[] = {"uk", "au", "nz", "za", "jp", "kr", "br", "cn", "il",
-	                                 "tr", "mx", "ar", "id", "th", "sg", "hk", "my", "ph",
-	                                 "pk", "ng", "ke", "at", "pl", nullptr};
-	bool second = false, country = false;
-	for (int i = 0; kSecondLevel[i]; i++) {
-		if (a == kSecondLevel[i]) {
-			second = true;
-			break;
-		}
-	}
-	for (int i = 0; kCountry[i]; i++) {
-		if (b == kCountry[i]) {
-			country = true;
-			break;
-		}
-	}
-	return second && country;
 }
 
 // Alignment: strict requires an exact domain match, relaxed accepts a shared
@@ -157,17 +134,12 @@ Result FetchRecord(const std::string &from_domain, std::string &record, std::str
 } // namespace
 
 std::string OrganizationalDomain(const std::string &domain) {
-	auto labels = Labels(Lower(domain));
-	if (labels.size() <= 2) {
-		return Join(labels, 0);
-	}
-	// "example.co.uk" keeps three labels; "mail.example.com" keeps two.
-	const std::string &tld = labels[labels.size() - 1];
-	const std::string &sld = labels[labels.size() - 2];
-	if (IsTwoLabelSuffix(sld, tld) && labels.size() >= 3) {
-		return Join(labels, labels.size() - 3);
-	}
-	return Join(labels, labels.size() - 2);
+	// The registrable domain from the bundled Public Suffix List. A name that is
+	// nothing but a public suffix ("co.uk") has no organizational domain; report
+	// it unchanged rather than empty, so alignment simply fails to match instead
+	// of comparing two empty strings and passing.
+	std::string org = psl::RegistrableDomain(domain);
+	return org.empty() ? Lower(domain) : org;
 }
 
 Eval Evaluate(const std::string &from_domain, const std::string &spf_domain, spf::Result spf_result,

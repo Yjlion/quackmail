@@ -159,12 +159,14 @@ void PostAdminSieveDelete(Ctx &ctx) {
 
 void GetAdminWho(Ctx &ctx) {
 	std::string body = "<div class=\"wrap\"><table><tr>" + Head("Session") + Head("User") + Head("Room") +
-	                   Head("Client") + Head("Doing") + Head("Access") + Head("Since") + "</tr>";
+	                   Head("From") + Head("Client") + Head("Doing") + Head("Access") + Head("Since") +
+	                   "</tr>";
 	for (auto &s : quackmail::citadel::ListSessions(ctx.con)) {
 		body += "<tr>";
 		body += Cell(std::to_string(s.session_id));
 		body += Cell(s.username.empty() ? "(signing in)" : s.username);
 		body += Cell(s.room);
+		body += Cell(s.host);
 		body += Cell(s.client);
 		body += Cell(s.last_cmd);
 		body += Cell(std::to_string(s.axlevel));

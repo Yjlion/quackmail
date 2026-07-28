@@ -127,11 +127,15 @@ def main():
     finally:
         con.execute("CALL cit_stop()").fetchall()
 
-    # Verify persistence in the shared Citadel tables.
+    # Verify persistence in the shared Citadel tables. Scoped to the Lobby: NEWU
+    # also posts a "new user" notice into the Aide room, so an unqualified count
+    # over citadel_messages would pick that up too.
     rows = con.execute(
-        "SELECT author, subject FROM citadel_messages ORDER BY msgnum"
+        "SELECT m.author, m.subject FROM citadel_messages m "
+        "JOIN citadel_room_msgs rm ON rm.msgnum = m.msgnum "
+        "WHERE rm.room_num = 0 ORDER BY m.msgnum"
     ).fetchall()
-    assert len(rows) == 1, f"expected 1 message, got {rows}"
+    assert len(rows) == 1, f"expected 1 message in the Lobby, got {rows}"
     assert rows[0][0] == "cituser", rows[0]
     assert rows[0][1] == "Hello Subject", rows[0]
 
@@ -140,7 +144,16 @@ def main():
     ).fetchone()[0]
     assert ptr == 1, "message should be pointed into the Lobby (room 0)"
 
-    print("PASS: Citadel NEWU -> GOTO -> ENT0 -> MSGS -> MSG0 round-trip")
+    # Registering the account posted a system notice into the Aide room (room 1),
+    # authored by the node rather than by any user.
+    notice = con.execute(
+        "SELECT m.author, m.subject FROM citadel_messages m "
+        "JOIN citadel_room_msgs rm ON rm.msgnum = m.msgnum "
+        "WHERE rm.room_num = 1"
+    ).fetchall()
+    assert notice == [("quackcit", "New user: cituser")], f"aide notice: {notice}"
+
+    print("PASS: Citadel NEWU -> GOTO -> ENT0 -> MSGS -> MSG0 round-trip, Aide notice")
 
 
 if __name__ == "__main__":

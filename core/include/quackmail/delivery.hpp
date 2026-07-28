@@ -17,6 +17,24 @@ struct Options {
 	// must override the user's filter rather than compete with it.
 	std::string folder_override;
 
+	// Rooms the message must also be pointed into, regardless of recipients —
+	// how a public room address (room_<name>@) is delivered. They are merged
+	// into the same stored message, so mail to a room and a user is stored once.
+	std::vector<int64_t> extra_rooms;
+
+	// Per-recipient subaddress detail: "bob@x" -> "receipts" for bob+receipts@x
+	// (RFC 5233). Files into that existing personal folder, and is offered to
+	// the user's Sieve script as `envelope :detail`.
+	std::vector<std::pair<std::string, std::string>> subaddress;
+
+	// The separator the detail was split on, for `envelope :detail`.
+	std::string subaddress_sep = "+";
+
+	// Create a subaddressed folder that does not exist yet. Off by default: any
+	// sender can pick the folder name, so this would let one mint rooms in a
+	// user's account. Without it an unknown folder falls back to the inbox.
+	bool subaddress_create = false;
+
 	Options() = default;
 };
 

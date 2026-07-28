@@ -9,6 +9,34 @@ Nothing in flight. Next work comes off the backlog below.
 
 ## Shipped
 
+- [x] **Misc fixes and features.**
+  - [x] IMAPS: the implicit-TLS twin of the IMAP listener (993; dev 1993), so
+        every protocol now has one.
+  - [x] Deploy: `QUACKCIT_PORT_SMTP_IN` → `QUACKCIT_PORT_SMTP` and
+        `QUACKCIT_PORT_SMTPS` → `QUACKCIT_PORT_SUBMISSIONS`, named after the
+        service rather than the module. The old names still work for one release.
+  - [x] ANSI colour in the BBS shell, finally reading the long-plumbed
+        `US_COLOR` bit. Gated on TERMINAL-TYPE so a dumb terminal never sees an
+        escape, and the pager counts printable columns rather than bytes.
+  - [x] `citadel_sessions.host` is written at last: RWHO, the telnet who-list
+        and both web who-lists show where a session came from. The native
+        extension's duplicate session helpers are gone, which also fixed its
+        blank Client column.
+  - [x] System messages to the Aide room (`qm_aide_log`): new users, aide
+        actions, and optionally refused inbound mail (`qm_aide_log_rejects`,
+        off by default).
+  - [x] RFC 4314 IMAP ACLs — `SETACL`/`DELETEACL`/`GETACL`/`LISTRIGHTS`/
+        `MYRIGHTS` and the `ACL` capability, closing a parity gap with the
+        oracle. Rights are derived from the room and unioned with stored grants.
+  - [x] `citadel::CanPost`, one post predicate for the web front-end, NNTP,
+        telnet and `ENT0` — which had no check at all.
+  - [x] Public room mail at `room_<name>@<fqdn>`, opted in by granting `anyone`
+        the `p` right, plus RFC 5233 subaddressing (`user+detail@`) with
+        `envelope :detail`/`:user` in Sieve.
+  - [x] A bundled Public Suffix List behind DMARC's organizational domain,
+        with `qm_psl_org_domain`/`qm_psl_suffix` and `test/sql/psl.test`.
+  - [x] Web colour themes (per-user, with a site default) and a typed
+        `/admin/prefs` settings page beside the raw config list.
 - [x] **Phase 0 — GitHub sync.** Merged branches pruned; v0.3.0 re-cut as
       **v0.3.1** (PR #9).
 - [x] **Phase 1 — POP3 parity + agent docs** (PR #10)
@@ -200,10 +228,8 @@ Nothing in flight. Next work comes off the backlog below.
   vCard rooms, the Citadel network mesh (inter-node replication, and with it the
   NNTP peer-feed verbs `IHAVE`/`CHECK`/`TAKETHIS`).
 - SMTP: PIPELINING, CHUNKING/BDAT, DSN.
-- Mail authentication depth: bundle a Public Suffix List so DMARC's
-  organizational domain is exact rather than the current two-label
-  approximation; DMARC aggregate (`rua`) reports; ARC, so forwarded mail keeps
-  an authenticated chain; MTA-STS / DANE for outbound transport.
+- Mail authentication depth: DMARC aggregate (`rua`) reports; ARC, so forwarded
+  mail keeps an authenticated chain; MTA-STS / DANE for outbound transport.
 - Sieve extensions beyond the current core + `reject`/`envelope`/`body`/`copy`:
   variables, regex, vacation, imap4flags.
 - Hardening: SCRAM-SHA-256, bcrypt/argon2 password hashing, charset transcoding

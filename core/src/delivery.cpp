@@ -42,8 +42,32 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 		}
 	};
 
+	// Rooms named by the envelope itself (a room_<name>@ recipient) rather than
+	// by any user's mailbox.
+	for (int64_t room : opts.extra_rooms) {
+		add_room(room);
+	}
+
 	for (const std::string &rcpt : rcpts) {
 		std::string user = util::LocalPart(rcpt);
+
+		// The subaddress detail, if this recipient was addressed as user+detail@.
+		std::string detail;
+		for (const auto &e : opts.subaddress) {
+			if (e.first == rcpt) {
+				detail = e.second;
+			}
+		}
+		// Where the detail files to, when it names a folder that already exists.
+		// An unknown folder falls back to the inbox unless the site opted in to
+		// creating them — the sender chooses this name, so it is not trusted.
+		auto detail_room = [&]() -> int64_t {
+			if (detail.empty()) {
+				return -1;
+			}
+			return opts.subaddress_create ? citadel::GetOrCreateUserRoom(con, user, detail)
+			                              : citadel::FindUserRoom(con, user, detail);
+		};
 
 		// A site-level quarantine overrides the user's own filter: the point is
 		// to keep suspect mail out of the inbox even if a rule would file it there.
@@ -54,11 +78,13 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 
 		std::string script = sieve::LoadActiveScript(con, user);
 		if (script.empty()) {
-			add_room(citadel::GetOrCreateMailRoom(con, user));
+			int64_t sub = detail_room();
+			add_room(sub >= 0 ? sub : citadel::GetOrCreateMailRoom(con, user));
 			continue;
 		}
 
 		sieve::Envelope env(mail_from, rcpt);
+		env.separator = opts.subaddress_sep;
 		auto result = sieve::Evaluate(script, parsed, body, env);
 
 		std::string reject = result.RejectReason();
@@ -73,9 +99,14 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 
 		for (const auto &action : result.actions) {
 			switch (action.type) {
-			case sieve::Action::KEEP:
-				add_room(citadel::GetOrCreateMailRoom(con, user));
+			case sieve::Action::KEEP: {
+				// An implicit or explicit keep honours the subaddress; an
+				// explicit fileinto below outranks it, because a filter the user
+				// wrote beats a folder the sender picked.
+				int64_t sub = detail_room();
+				add_room(sub >= 0 ? sub : citadel::GetOrCreateMailRoom(con, user));
 				break;
+			}
 			case sieve::Action::FILEINTO:
 				add_room(citadel::GetOrCreateUserRoom(
 				    con, user, action.folder.empty() ? "Mail" : action.folder));

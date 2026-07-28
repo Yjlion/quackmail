@@ -924,6 +924,30 @@ void LogInbound(Connection &con, const InboundVerdict &v) {
 	      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
 	      {Value(v.client_ip), Value(v.helo), Value(v.mail_from), Value(v.rcpt), Value(v.spf),
 	       Value(v.dkim), Value(v.dmarc), Value(v.rbl), Value(v.disposition), Value(v.detail)});
+
+	// Optionally mirror refusals into the Aide room. Off by default: on a live
+	// MX this is the single noisiest thing the server could post. The audit log
+	// above is always written and is the complete record.
+	if (v.disposition == "accept" ||
+	    citadel::GetConfig(con, "qm_aide_log_rejects", "0") != "1") {
+		return;
+	}
+	std::string text = "Disposition: " + v.disposition + "\n";
+	auto add = [&](const char *label, const std::string &value) {
+		if (!value.empty()) {
+			text += std::string(label) + ": " + value + "\n";
+		}
+	};
+	add("From", v.mail_from);
+	add("To", v.rcpt);
+	add("Client", v.client_ip);
+	add("HELO", v.helo);
+	add("SPF", v.spf);
+	add("DKIM", v.dkim);
+	add("DMARC", v.dmarc);
+	add("Blocklist", v.rbl);
+	add("Detail", v.detail);
+	citadel::PostAideMessage(con, "Inbound mail " + v.disposition + ": " + v.mail_from, text);
 }
 
 } // namespace policy

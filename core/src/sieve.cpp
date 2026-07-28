@@ -314,7 +314,7 @@ struct Test {
 	std::vector<std::string> keys;   // values to match against
 	std::string match_type = "is";   // is | contains | matches
 	std::string comparator = "i;ascii-casemap";
-	std::string address_part = "all"; // all | localpart | domain
+	std::string address_part = "all"; // all | localpart | domain | user | detail
 	std::string size_relation;        // over | under
 	long long size_limit = 0;
 };
@@ -415,7 +415,8 @@ private:
 			if (tag == "is" || tag == "contains" || tag == "matches") {
 				test.match_type = tag;
 				Next();
-			} else if (tag == "all" || tag == "localpart" || tag == "domain") {
+			} else if (tag == "all" || tag == "localpart" || tag == "domain" || tag == "user" ||
+			           tag == "detail") {
 				test.address_part = tag;
 				Next();
 			} else if (tag == "comparator") {
@@ -701,17 +702,38 @@ bool MatchOne(const std::string &value, const std::string &key, const std::strin
 	return v == k; // :is
 }
 
-// Apply the address-part selector to an addr-spec.
-std::string AddressPart(const std::string &addr, const std::string &part) {
+// Apply the address-part selector to an addr-spec. Returns false when the part
+// does not exist, which RFC 5233 defines as NIL rather than the empty string:
+// `envelope :detail "to" ""` must not match mail sent to a plain address. The
+// caller expresses that by contributing no value at all to the match.
+bool AddressPart(const std::string &addr, const std::string &part, const std::string &sep,
+                 std::string &out) {
+	auto at = addr.rfind('@');
+	std::string local = at == std::string::npos ? addr : addr.substr(0, at);
 	if (part == "localpart") {
-		auto at = addr.rfind('@');
-		return at == std::string::npos ? addr : addr.substr(0, at);
+		out = local;
+		return true;
 	}
 	if (part == "domain") {
-		auto at = addr.rfind('@');
-		return at == std::string::npos ? "" : addr.substr(at + 1);
+		out = at == std::string::npos ? "" : addr.substr(at + 1);
+		return true;
 	}
-	return addr;
+	// RFC 5233 subaddressing: ":user" is the local-part up to the separator,
+	// ":detail" everything after it.
+	if (part == "user" || part == "detail") {
+		auto cut = sep.empty() ? std::string::npos : local.find(sep);
+		if (part == "user") {
+			out = cut == std::string::npos ? local : local.substr(0, cut);
+			return true;
+		}
+		if (cut == std::string::npos) {
+			return false; // not a subaddress: NIL
+		}
+		out = local.substr(cut + sep.size());
+		return true;
+	}
+	out = addr;
+	return true;
 }
 
 bool EvalTest(const Test &test, const Context &ctx);
@@ -785,7 +807,10 @@ bool EvalTest(const Test &test, const Context &ctx) {
 			for (auto &raw_value : HeaderValues(*ctx.msg, n)) {
 				for (auto &a : mime::ParseAddressList(raw_value)) {
 					if (!a.addr.empty()) {
-						values.push_back(AddressPart(a.addr, test.address_part));
+						std::string part;
+						if (AddressPart(a.addr, test.address_part, "+", part)) {
+							values.push_back(part);
+						}
 					}
 				}
 			}
@@ -798,10 +823,15 @@ bool EvalTest(const Test &test, const Context &ctx) {
 		for (auto &n : test.names) {
 			std::string part = ToLower(Trim(n));
 			// The envelope test names transaction parts, not header names.
+			std::string value;
 			if (part == "from") {
-				values.push_back(AddressPart(ctx.env->mail_from, test.address_part));
+				if (AddressPart(ctx.env->mail_from, test.address_part, ctx.env->separator, value)) {
+					values.push_back(value);
+				}
 			} else if (part == "to") {
-				values.push_back(AddressPart(ctx.env->rcpt_to, test.address_part));
+				if (AddressPart(ctx.env->rcpt_to, test.address_part, ctx.env->separator, value)) {
+					values.push_back(value);
+				}
 			}
 		}
 		return MatchAny(values, test);
@@ -990,7 +1020,7 @@ std::string LoadActiveScript(Connection &con, const std::string &username) {
 
 std::string Capabilities() {
 	// Only what the evaluator above actually implements.
-	return "fileinto reject envelope body copy";
+	return "fileinto reject envelope body copy subaddress";
 }
 
 } // namespace sieve

@@ -1,5 +1,6 @@
 #include "quackmail/telnet.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <string>
 
@@ -17,8 +18,24 @@ constexpr unsigned char SB = 250;
 constexpr unsigned char SE = 240;
 
 constexpr unsigned char OPT_ECHO = 1;
-constexpr unsigned char OPT_SGA = 3;   // suppress go-ahead
-constexpr unsigned char OPT_NAWS = 31; // window size
+constexpr unsigned char OPT_SGA = 3;    // suppress go-ahead
+constexpr unsigned char OPT_TTYPE = 24; // terminal type (RFC 1091)
+constexpr unsigned char OPT_NAWS = 31;  // window size
+
+constexpr unsigned char TTYPE_IS = 0;
+constexpr unsigned char TTYPE_SEND = 1;
+
+// The palette, in the spirit of the official text client's commands.c: bright
+// cyan for room banners, bright white for prompts, yellow for headers, bright
+// red for errors. Values are SGR sequences, emitted only when colour is on.
+constexpr const char *kReset = "\033[0m";
+constexpr const char *kBanner = "\033[1;36m";
+constexpr const char *kPrompt = "\033[1;37m";
+constexpr const char *kHeader = "\033[1;33m";
+constexpr const char *kBody = "\033[0;37m";
+constexpr const char *kNotice = "\033[1;35m";
+constexpr const char *kError = "\033[1;31m";
+constexpr const char *kDim = "\033[0;36m";
 
 } // namespace
 
@@ -33,6 +50,54 @@ void Session::Negotiate() {
 	Send3(WILL, OPT_SGA);
 	Send3(DO, OPT_SGA);
 	Send3(DO, OPT_NAWS);
+	// Ask what kind of terminal this is, so colour is never sent to one that
+	// cannot render it. A client that ignores this is treated as capable.
+	Send3(DO, OPT_TTYPE);
+}
+
+std::string Session::Colour(Attr attr) const {
+	if (!ColorEnabled()) {
+		return "";
+	}
+	switch (attr) {
+	case Attr::Banner:
+		return kBanner;
+	case Attr::Prompt:
+		return kPrompt;
+	case Attr::Header:
+		return kHeader;
+	case Attr::Body:
+		return kBody;
+	case Attr::Notice:
+		return kNotice;
+	case Attr::Error:
+		return kError;
+	case Attr::Dim:
+		return kDim;
+	case Attr::Reset:
+		break;
+	}
+	return kReset;
+}
+
+size_t Session::VisibleWidth(const std::string &text) {
+	size_t width = 0;
+	for (size_t i = 0; i < text.size(); i++) {
+		if (text[i] != '\033') {
+			width++;
+			continue;
+		}
+		// Skip a CSI sequence: ESC [ ... <final byte 0x40-0x7E>.
+		if (i + 1 < text.size() && text[i + 1] == '[') {
+			i += 2;
+			while (i < text.size() && (text[i] < '@' || text[i] > '~')) {
+				i++;
+			}
+		} else {
+			i++; // a two-character escape
+		}
+	}
+	return width;
 }
 
 bool Session::NextByte(unsigned char &u) {
@@ -80,6 +145,14 @@ void Session::ReadSubnegotiation() {
 		if (payload.size() > 64) {
 			payload.resize(64); // nothing we parse is longer than this
 		}
+	}
+	if (option == OPT_TTYPE && !payload.empty() && (unsigned char)payload[0] == TTYPE_IS) {
+		term_type_.assign(payload, 1, std::string::npos);
+		std::string lower;
+		for (char c : term_type_) {
+			lower += (char)std::tolower((unsigned char)c);
+		}
+		dumb_terminal_ = lower.empty() || lower == "dumb" || lower == "unknown" || lower == "net";
 	}
 	if (option == OPT_NAWS && payload.size() >= 4) {
 		int w = ((unsigned char)payload[0] << 8) | (unsigned char)payload[1];
@@ -133,8 +206,14 @@ int Session::GetChar() {
 					}
 					Send3(WONT, opt);
 				} else if (verb == WILL) {
-					// Let the peer do SGA/NAWS; decline anything else.
-					if (opt != OPT_SGA && opt != OPT_NAWS) {
+					// Let the peer do SGA/NAWS/TTYPE; decline anything else.
+					if (opt == OPT_TTYPE) {
+						// It agreed to describe itself: now ask it to.
+						// IAC SB TERMINAL-TYPE SEND IAC SE.
+						char req[6] = {(char)IAC,       (char)SB, (char)OPT_TTYPE,
+						               (char)TTYPE_SEND, (char)IAC, (char)SE};
+						stream_.Write(std::string(req, 6));
+					} else if (opt != OPT_SGA && opt != OPT_NAWS) {
 						Send3(DONT, opt);
 					}
 				}
@@ -297,7 +376,7 @@ bool Session::Page(const std::string &text) {
 			return true; // no trailing newline: leave the cursor where it is
 		}
 		Write("\n");
-		int rows = (int)(line.size() / (size_t)width_) + 1;
+		int rows = (int)(VisibleWidth(line) / (size_t)width_) + 1;
 		page_used_ += rows;
 		if (page_used_ >= page_rows_ - 1) {
 			page_used_ = 0;

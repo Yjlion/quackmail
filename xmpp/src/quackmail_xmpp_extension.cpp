@@ -187,7 +187,8 @@ void HandleXmpp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 
 	Xmpp s;
 	s.node = citadel::GetConfig(con, "c_nodename", "quackcit");
-	int64_t session_id = citadel::RegisterSession(con, ctrl.ImplicitTls() ? "XMPPS session" : "XMPP session");
+	int64_t session_id = citadel::RegisterSession(con, ctrl.ImplicitTls() ? "XMPPS session" : "XMPP session",
+	                                            stream.PeerIp());
 
 	xmlstream::Tokenizer tok;
 	bool running = true;

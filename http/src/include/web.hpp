@@ -188,6 +188,14 @@ void ReAuthFailed(Ctx &ctx);
 std::string AdminNav();
 void AdminPage(Ctx &ctx, const std::string &title, const std::string &body);
 
+// The named colour themes, as (value, label) pairs for a <select>. The theme in
+// force is applied by Render; this is only for building the pickers.
+std::vector<std::pair<std::string, std::string>> ThemeOptions();
+
+// Record an administrative action in the Aide room, attributed to the operator
+// who performed it. Call it only after the action has actually succeeded.
+void AideLog(Ctx &ctx, const std::string &subject, const std::string &detail);
+
 // Sieve script editing and the browser-session table, shared between the user's
 // own preferences and the admin console's view of any user. Defined in
 // web_prefs.cpp.

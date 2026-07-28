@@ -9,7 +9,7 @@
 # All settings come from quackcit.conf (override with QUACKCIT_CONF). Anything
 # already in the environment wins over the config file, so one-off runs work:
 #
-#     QUACKCIT_PORT_SMTP_IN=25 deploy/quackcit.sh start
+#     QUACKCIT_PORT_SMTP=25 deploy/quackcit.sh start
 #
 set -eu
 

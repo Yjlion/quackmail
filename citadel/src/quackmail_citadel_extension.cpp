@@ -440,6 +440,13 @@ void HandleEnt0(Connection &con, Session &s, net::ClientStream &stream, const st
 		stream.WriteLine("540 Not in a room; use GOTO first.");
 		return;
 	}
+	// ENT0 with a 0 first field is the client asking "may I post here?" — and
+	// until now the answer was an unconditional yes, with no check on the way in
+	// either. Both paths go through the shared predicate now.
+	if (!citadel::CanPost(con, s.username, s.room)) {
+		stream.WriteLine("550 You may not enter messages in this room.");
+		return;
+	}
 	int post = (int)ToInt(Field(p, 0), 0);
 	if (post == 0) {
 		stream.WriteLine("200 Ok to post here.");
@@ -605,52 +612,26 @@ void ExecParams(Connection &con, const std::string &sql, duckdb::vector<Value> p
 	}
 }
 
-int64_t RegisterSession(Connection &con) {
-	auto num = con.Query("SELECT nextval('citadel_session_seq')");
-	if (num->HasError() || num->RowCount() < 1) {
-		return 0;
-	}
-	int64_t sid = num->GetValue(0, 0).GetValue<int64_t>();
-	ExecParams(con, "INSERT INTO citadel_sessions (session_id, since, last_seen) VALUES ($1, $2, $2)",
-	           {Value::BIGINT(sid), Value::BIGINT(NowEpoch())});
-	return sid;
-}
-
+// Presence is core's (citadel::RegisterSession/TouchSession/UnregisterSession)
+// so every front-end writes the same columns; this file only adapts the Session
+// struct to the shared signature.
 void TouchSession(Connection &con, const Session &s, const std::string &last_cmd) {
-	if (s.session_id == 0) {
-		return;
-	}
-	ExecParams(con,
-	           "UPDATE citadel_sessions SET username=$1, room=$2, last_cmd=$3, axlevel=$4, last_seen=$5 "
-	           "WHERE session_id=$6",
-	           {Value(s.username), Value(s.have_room ? s.room.display_name : std::string()), Value(last_cmd),
-	            Value::BIGINT(s.axlevel), Value::BIGINT(NowEpoch()), Value::BIGINT(s.session_id)});
-}
-
-void UnregisterSession(Connection &con, int64_t sid) {
-	if (sid == 0) {
-		return;
-	}
-	ExecParams(con, "DELETE FROM citadel_sessions WHERE session_id=$1", {Value::BIGINT(sid)});
+	citadel::TouchSession(con, s.session_id, s.username,
+	                      s.have_room ? s.room.display_name : std::string(), last_cmd, s.axlevel);
 }
 
 // RWHO listing line: session|user|room|host|client|idletime|lastcmd|.||||flags|axlevel
+//
+// The "idletime" field carries the absolute last-command timestamp, not a
+// duration — that is what a real Citadel server emits (test/parity/
+// real_citadel/native_extra.txt), and an empty host is legitimate there too.
 std::vector<std::string> WhoLines(Connection &con) {
 	std::vector<std::string> out;
-	auto r = con.Query("SELECT session_id, username, room, last_cmd, axlevel, last_seen "
-	                   "FROM citadel_sessions ORDER BY session_id");
-	if (r->HasError()) {
-		return out;
-	}
-	for (idx_t i = 0; i < r->RowCount(); i++) {
-		std::string user = r->GetValue(1, i).ToString();
-		if (user.empty()) {
-			user = "(not logged in)";
-		}
-		out.push_back(std::to_string(r->GetValue(0, i).GetValue<int64_t>()) + "|" + user + "|" +
-		              r->GetValue(2, i).ToString() + "|localhost|Citadel client protocol|" +
-		              std::to_string(r->GetValue(5, i).GetValue<int64_t>()) + "|" + r->GetValue(3, i).ToString() +
-		              "|.||||1|" + std::to_string(r->GetValue(4, i).GetValue<int64_t>()));
+	for (const auto &s : citadel::ListSessions(con)) {
+		std::string user = s.username.empty() ? "(not logged in)" : s.username;
+		out.push_back(std::to_string(s.session_id) + "|" + user + "|" + s.room + "|" + s.host + "|" +
+		              s.client + "|" + std::to_string(s.last_seen) + "|" + s.last_cmd + "|.||||1|" +
+		              std::to_string(s.axlevel));
 	}
 	return out;
 }
@@ -678,7 +659,7 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 	store::EnsureSchema(con);
 
 	Session s;
-	s.session_id = RegisterSession(con);
+	s.session_id = citadel::RegisterSession(con, "Citadel client protocol", stream.PeerIp());
 	std::string node = citadel::GetConfig(con, "c_nodename", "quackcit");
 	// Greeting must match a real Citadel server's format ("200 <node> Citadel
 	// server ready.") — the official text client parses this line and rejects a
@@ -732,6 +713,9 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 					stream.WriteLine("550 " + err);
 				} else {
 					CompleteLogin(con, s, name);
+					citadel::PostAideMessage(con, "New user: " + name,
+					                         "A new account was created from the Citadel client "
+					                         "protocol.\n\nUser: " + name + "\n");
 					stream.WriteLine(LoginLine(con, s));
 				}
 			}
@@ -947,7 +931,7 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 		// and the room just entered.
 		TouchSession(con, s, verb);
 	}
-	UnregisterSession(con, s.session_id);
+	citadel::UnregisterSession(con, s.session_id);
 }
 
 void LoadInternal(ExtensionLoader &loader) {
