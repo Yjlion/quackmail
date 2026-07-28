@@ -27,6 +27,102 @@ leo leo 4'
 
 # ---------------------------------------------------------------------------
 
+# The subject of a generated certificate. Nothing will trust it either way, but
+# the name still has to be *something* a client can be told to expect.
+tls_cn() {
+    if [ -n "$QUACKCIT_TLS_CN" ]; then
+        printf '%s' "$QUACKCIT_TLS_CN"
+        return 0
+    fi
+    # `hostname -f` needs a resolver that answers, and fails outright on some
+    # minimal images; set -e would take the script down with it.
+    _cn=$(hostname -f 2>/dev/null || true)
+    [ -n "$_cn" ] || _cn=$(hostname 2>/dev/null || true)
+    [ -n "$_cn" ] || _cn=localhost
+    printf '%s' "$_cn"
+}
+
+# Write a self-signed certificate/key pair. Both are built under .tmp names and
+# moved into place, so an interrupted run cannot leave a half-written file or a
+# cert that does not match the key beside it.
+tls_generate() {
+    _cert=$1; _key=$2; _cn=$3
+    _sans="DNS:$_cn"
+    case "$_cn" in
+        localhost) ;;
+        *) _sans="$_sans,DNS:localhost" ;;
+    esac
+    _sans="$_sans,IP:127.0.0.1,IP:::1"
+
+    mkdir -p "$QUACKCIT_TLS_DIR" 2>/dev/null ||
+        die "cannot create $QUACKCIT_TLS_DIR — set QUACKCIT_TLS_DIR to a writable location, or QUACKCIT_TLS_AUTOGEN=0 to run without TLS"
+    chmod 700 "$QUACKCIT_TLS_DIR" 2>/dev/null || true
+    rm -f "$_cert.tmp" "$_key.tmp"
+
+    # Ten years: a certificate nobody trusts gains nothing from expiring, and a
+    # server that quietly stops accepting TLS after a year is the worse failure.
+    # -addext arrived in OpenSSL 1.1.1; without it the cert is CN-only, which
+    # modern clients dislike but older toolchains are stuck with.
+    if ! openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+             -subj "/CN=$_cn" -addext "subjectAltName=$_sans" \
+             -keyout "$_key.tmp" -out "$_cert.tmp" >/dev/null 2>&1; then
+        rm -f "$_cert.tmp" "$_key.tmp"
+        if ! openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+                 -subj "/CN=$_cn" \
+                 -keyout "$_key.tmp" -out "$_cert.tmp" >/dev/null 2>&1; then
+            rm -f "$_cert.tmp" "$_key.tmp"
+            return 1
+        fi
+    fi
+
+    chmod 600 "$_key.tmp"
+    chmod 644 "$_cert.tmp"
+    mv "$_key.tmp" "$_key"
+    mv "$_cert.tmp" "$_cert"
+}
+
+# Decide what TLS material the listeners will be started with, generating a
+# self-signed pair the first time if nothing is configured. Must run before
+# gen_startup_sql, which reads QUACKCIT_TLS_CERT/KEY.
+ensure_tls_material() {
+    # An operator's own certificate always wins, and a path that does not
+    # resolve is an error — papering over a typo with a self-signed certificate
+    # would hand out the wrong identity for as long as nobody noticed.
+    if [ -n "$QUACKCIT_TLS_CERT" ] || [ -n "$QUACKCIT_TLS_KEY" ]; then
+        [ -n "$QUACKCIT_TLS_CERT" ] && [ -n "$QUACKCIT_TLS_KEY" ] ||
+            die "set both QUACKCIT_TLS_CERT and QUACKCIT_TLS_KEY, or neither"
+        [ -r "$QUACKCIT_TLS_CERT" ] || die "no readable certificate at $QUACKCIT_TLS_CERT"
+        [ -r "$QUACKCIT_TLS_KEY" ] || die "no readable private key at $QUACKCIT_TLS_KEY"
+        return 0
+    fi
+
+    env_true "$QUACKCIT_TLS_AUTOGEN" || return 0
+
+    # The "if no certs exist" test: generation happens once, and every restart
+    # after it reuses the same certificate, so a client that accepted the
+    # fingerprint keeps working.
+    if [ -r "$QUACKCIT_TLS_SELF_CERT" ] && [ -r "$QUACKCIT_TLS_SELF_KEY" ]; then
+        QUACKCIT_TLS_CERT=$QUACKCIT_TLS_SELF_CERT
+        QUACKCIT_TLS_KEY=$QUACKCIT_TLS_SELF_KEY
+        return 0
+    fi
+
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "quackcit: no openssl on PATH — cannot generate a certificate; implicit-TLS listeners will be skipped" >&2
+        return 0
+    fi
+
+    _cn=$(tls_cn)
+    if ! tls_generate "$QUACKCIT_TLS_SELF_CERT" "$QUACKCIT_TLS_SELF_KEY" "$_cn"; then
+        echo "quackcit: openssl failed to generate a certificate; implicit-TLS listeners will be skipped" >&2
+        return 0
+    fi
+    QUACKCIT_TLS_CERT=$QUACKCIT_TLS_SELF_CERT
+    QUACKCIT_TLS_KEY=$QUACKCIT_TLS_SELF_KEY
+    echo "quackcit: generated a self-signed certificate for CN=$_cn at $QUACKCIT_TLS_CERT (valid 10 years)"
+    echo "quackcit: no client will trust it — point QUACKCIT_TLS_CERT/QUACKCIT_TLS_KEY at real material for production"
+}
+
 # One CALL that brings a listener up, with TLS wired if it is configured.
 # Returns 1 for an implicit-TLS listener with no certificate — it cannot work,
 # so it is skipped rather than started in the clear.
@@ -109,6 +205,7 @@ prepare_runtime() {
     require_duckdb
     require_sane_run_dir
     ensure_dirs
+    ensure_tls_material
     [ -n "$(quackcit_enabled_services)" ] || die "no services enabled; nothing to do"
     gen_startup_sql > "$STARTUP_SQL"
     rm -f "$READY" "$QUACKCIT_ADMIN_FIFO"
@@ -231,6 +328,15 @@ cmd_status() {
         echo "  log:     $QUACKCIT_LOG"
         echo "  errors:  $QUACKCIT_ERRLOG"
         echo "  control: $QUACKCIT_ADMIN_FIFO"
+        # ensure_tls_material only runs on start, so work out what that would
+        # have chosen rather than reporting the raw (usually empty) variable.
+        if [ -n "$QUACKCIT_TLS_CERT" ]; then
+            echo "  tls:     $QUACKCIT_TLS_CERT"
+        elif [ -r "$QUACKCIT_TLS_SELF_CERT" ]; then
+            echo "  tls:     $QUACKCIT_TLS_SELF_CERT (self-signed)"
+        else
+            echo "  tls:     none — implicit-TLS listeners are skipped"
+        fi
         # The server owns the DB file, so ask it through the control channel.
         "$HERE/quackcitadm.sh" status 2>/dev/null || true
         return 0

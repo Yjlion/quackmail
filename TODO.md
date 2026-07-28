@@ -155,6 +155,25 @@ Nothing in flight. Next work comes off the backlog below.
           per-verb text ("Known rooms:", "Server info:", "msg:", ...)
   - known divergences that remain, all deliberate: branding (node name, banner
     text) and the NNTP posting support QuackCit adds on purpose
+- [x] **GitHub sync + TLS out of the box.**
+  - [x] every branch from PRs #9–#17 was fully merged into `main` with no open
+        PRs; the eight merged local branches and the three `origin/claude/*`
+        remote branches are gone, leaving `main`. (`xmpp` survives only because
+        it is checked out in a local worktree.)
+  - [x] `deploy/quackcit.sh` generates a self-signed certificate on first start
+        when none is configured, under `$QUACKCIT_TLS_DIR`. Until now
+        `start_call` skipped **every implicit-TLS listener** without one, so a
+        fresh install had no SMTPS/POP3S/TELNETS/NNTPS/XMPPS and — because
+        `qm_web_force_https` defaults to 1 — a web interface that redirected to
+        a port nothing was listening on. `core/src/tls.cpp`'s in-memory cert
+        did not help: ephemeral, per-listener, `CN=localhost`.
+  - [x] issued to `hostname -f` with `localhost`/`127.0.0.1`/`::1` SANs, ten
+        years, written through `.tmp` files so an interrupt cannot leave a
+        mismatched pair, key 0600 in a 0700 directory, and reused by every
+        restart. `QUACKCIT_TLS_CERT`/`_KEY` still win; a path that does not
+        resolve is now a startup error rather than a silent downgrade.
+        `QUACKCIT_TLS_AUTOGEN=0` restores the old behaviour.
+
 - [x] **Deploy scripts for the binary release.**
   - [x] `deploy/` is POSIX shell end to end; `run_quackcit.py` and
         `quackcit_admin.py` deleted. The server is the bundled DuckDB CLI
