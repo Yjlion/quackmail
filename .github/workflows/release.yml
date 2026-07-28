@@ -146,6 +146,12 @@ jobs:
           \`QUACKCIT_STATE_DIR\`, \`QUACKCIT_LOG_DIR\` and \`QUACKCIT_RUN_DIR\`
           to somewhere writable. \`quackcit.service\` is a systemd unit template.
 
+          The first start also generates a self-signed certificate under
+          \`/var/lib/quackcit/tls\` if you have none, so the TLS listeners — the
+          HTTPS web interface included — come up immediately. No client will
+          trust it; point \`QUACKCIT_TLS_CERT\` and \`QUACKCIT_TLS_KEY\` at real
+          material when you have it.
+
           ## Option B — drive DuckDB yourself
 
           \`\`\`bash

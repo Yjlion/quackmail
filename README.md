@@ -51,8 +51,12 @@ extension.
 
 `*_start(host, port)` also accepts named params: `tls_cert`, `tls_key`,
 `implicit_tls`, `starttls`. With `starttls => true` and no cert paths, a
-self-signed certificate is generated in memory (for development). All control
-functions return a status row: `(action, running, host, port, connections, note)`.
+throwaway self-signed certificate is generated in memory — enough to exercise an
+upgrade by hand, but it differs per listener and is gone on restart, so a
+*server* wants a certificate on disk. `deploy/quackcit.sh` writes one on first
+start if you have none (see [Running and administering a server](#running-and-administering-a-server)).
+All control functions return a status row:
+`(action, running, host, port, connections, note)`.
 
 > **Port 504** is the IANA-assigned Citadel port, but it is privileged on Linux,
 > so `cit_start` defaults to **5040** for development (just as `qm_smtp_in`
@@ -470,6 +474,19 @@ deploy/quackcit.sh stop
 
 QUACKCIT_PORT_SMTP_IN=25 deploy/quackcit.sh foreground   # run in this terminal
 ```
+
+**TLS out of the box.** With no certificate configured, the first `start`
+generates a self-signed one under `$QUACKCIT_TLS_DIR` (`/var/lib/quackcit/tls`
+in a release, beside the database in a checkout) and starts every listener with
+it — including the implicit-TLS ones, SMTPS/POP3S/TELNETS/NNTPS/XMPPS and the
+HTTPS web interface, which are skipped outright when there is no certificate to
+give them. It is issued to `hostname -f` with `localhost`, `127.0.0.1` and `::1`
+as alternative names, lasts ten years, and is reused by every restart, so a
+client that accepted the fingerprint keeps working. Nothing will trust it —
+for production point `QUACKCIT_TLS_CERT` and `QUACKCIT_TLS_KEY` at real material
+(a Let's Encrypt `fullchain.pem`/`privkey.pem` pair works as-is), which takes
+precedence and disables the generated one. `QUACKCIT_TLS_AUTOGEN=0` opts out
+entirely.
 
 `quackcitadm.sh` administers the server — users, domains, aliases, access
 rules, DKIM keys, quotas, Sieve scripts, the outbound queue and server config:

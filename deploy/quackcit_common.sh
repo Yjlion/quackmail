@@ -71,8 +71,21 @@ fi
 : "${QUACKCIT_PIDFILE:=$QUACKCIT_RUN_DIR/quackcit.pid}"
 : "${QUACKCIT_ADMIN_FIFO:=$QUACKCIT_RUN_DIR/control.fifo}"
 : "${QUACKCIT_HOST:=127.0.0.1}"
+
+# TLS material. These two stay *empty* by default: start_call() reads "empty" as
+# "this listener gets no TLS", so a path that does not exist yet must never be
+# put here. quackcit.sh fills them in — from the operator's own certificate if
+# one is configured, otherwise from the self-signed pair below, which it mints on
+# first start. Without either, implicit-TLS listeners (HTTPS included) cannot run
+# at all and are skipped.
 : "${QUACKCIT_TLS_CERT:=}"
 : "${QUACKCIT_TLS_KEY:=}"
+: "${QUACKCIT_TLS_DIR:=$QUACKCIT_STATE_DIR/tls}"
+: "${QUACKCIT_TLS_SELF_CERT:=$QUACKCIT_TLS_DIR/quackcit.pem}"
+: "${QUACKCIT_TLS_SELF_KEY:=$QUACKCIT_TLS_DIR/quackcit.key}"
+: "${QUACKCIT_TLS_AUTOGEN:=1}"
+# Subject of the generated certificate; resolved from the host name when empty.
+: "${QUACKCIT_TLS_CN:=}"
 
 # A DuckDB on PATH is the last resort; it must be the version the extensions
 # were built against or LOAD refuses them.
