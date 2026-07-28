@@ -110,6 +110,13 @@ Then add it to the `quackcit_services` table in `deploy/quackcit_common.sh`,
   declared `BIGINT`, not `VARCHAR` — DuckDB will not implicitly convert an
   `INTEGER` literal to `VARCHAR`, so a VARCHAR signature forces callers to
   quote every number.
+- `store::EnsureSchema` runs from a table function's **init**, not from `LOAD`.
+  The copy `LoadInternal` calls only partly takes effect — on a brand-new
+  database `quackmail_users`, `citadel_users`, `citadel_rooms` and friends do
+  *not* exist after `LOAD quackmail` alone, though `citadel_config` and
+  `quackmail_sieve_scripts` do. Plain SQL against those tables is a catalog
+  error until some `qm_*` function has run once, so any offline batch has to
+  lead with one (`SELECT count(*) FROM qm_status()` warms everything).
 - The umbrella's table functions open **their own `Connection`**, so rows
   written by sqllogictest's harness connection are invisible to them. Assert
   configuration in `test/sql/`, but assert *enforcement* (rate limits, delivery)

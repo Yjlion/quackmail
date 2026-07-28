@@ -72,6 +72,23 @@ fi
 : "${QUACKCIT_ADMIN_FIFO:=$QUACKCIT_RUN_DIR/control.fifo}"
 : "${QUACKCIT_HOST:=127.0.0.1}"
 
+# The site's own name, written to the c_fqdn setting. Empty means "work it out
+# from the host name", which happens only while c_fqdn is still unset or the
+# extension's `quackmail.test` placeholder; a value here is authoritative and is
+# applied on every start.
+: "${QUACKCIT_FQDN:=}"
+
+# Accounts created the first time the database has no users at all, one record
+# per line: `<name> <password> <axlevel>`. A password of `-` is generated and
+# written to QUACKCIT_SEED_SECRET_FILE. Access level 6 is an aide, 4 a normal
+# user. Seeding is skipped entirely once any account exists.
+: "${QUACKCIT_SEED_USERS:=admin - 6}"
+: "${QUACKCIT_SEED_SECRET_FILE:=$QUACKCIT_STATE_DIR/initial-credentials}"
+
+# Syslog facility for quackcit.log: a name (mail, daemon, local0, ...) or the
+# number itself.
+: "${QUACKCIT_SYSLOG_FACILITY:=mail}"
+
 # TLS material. These two stay *empty* by default: start_call() reads "empty" as
 # "this listener gets no TLS", so a path that does not exist yet must never be
 # put here. quackcit.sh fills them in — from the operator's own certificate if
@@ -107,6 +124,117 @@ else
     QUACKCIT_TICKS_PER_SEC=1
 fi
 tick() { sleep "$QUACKCIT_TICK"; }
+
+# ---- logging ---------------------------------------------------------------
+#
+# quackcit.log is RFC 5424, one record per line:
+#
+#   <PRI>1 TIMESTAMP HOSTNAME quackcit PROCID MSGID - MESSAGE
+#
+# PRI is facility * 8 + severity. TIME-SECFRAC is optional in RFC 5424 and the
+# `%N` that would produce it is a GNU extension busybox does not carry, so the
+# timestamp stops at whole seconds rather than probing for one.
+#
+# quackcit.err is deliberately *not* in this format. It is not a log: it is the
+# control channel's error return path, and adm_online below recovers a failed
+# request's error text as the exact bytes appended to it. A header in front of
+# those bytes would end up in front of every error quackcitadm.sh prints.
+
+syslog_facility_num() {
+    case "$1" in
+        kern)     echo 0 ;;
+        user)     echo 1 ;;
+        mail)     echo 2 ;;
+        daemon)   echo 3 ;;
+        auth)     echo 4 ;;
+        syslog)   echo 5 ;;
+        lpr)      echo 6 ;;
+        news)     echo 7 ;;
+        uucp)     echo 8 ;;
+        cron)     echo 9 ;;
+        authpriv) echo 10 ;;
+        ftp)      echo 11 ;;
+        local0)   echo 16 ;;
+        local1)   echo 17 ;;
+        local2)   echo 18 ;;
+        local3)   echo 19 ;;
+        local4)   echo 20 ;;
+        local5)   echo 21 ;;
+        local6)   echo 22 ;;
+        local7)   echo 23 ;;
+        # Anything already numeric passes through; anything else is a typo, and
+        # a log line is the wrong place to die over one.
+        ''|*[!0-9]*) echo 2 ;;
+        *)        echo "$1" ;;
+    esac
+}
+
+syslog_severity_num() {
+    case "$1" in
+        emerg)   echo 0 ;;
+        alert)   echo 1 ;;
+        crit)    echo 2 ;;
+        err)     echo 3 ;;
+        warning) echo 4 ;;
+        notice)  echo 5 ;;
+        debug)   echo 7 ;;
+        *)       echo 6 ;;
+    esac
+}
+
+QUACKCIT_SYSLOG_FACILITY_NUM=$(syslog_facility_num "$QUACKCIT_SYSLOG_FACILITY")
+QUACKCIT_SYSLOG_HOST=$(hostname 2>/dev/null || true)
+# NILVALUE. RFC 5424 has no room for an empty field.
+[ -n "$QUACKCIT_SYSLOG_HOST" ] || QUACKCIT_SYSLOG_HOST=-
+
+# syslog_record <severity> <procid> <msgid> <message...> — one record on stdout.
+syslog_record() {
+    _rsev=$(syslog_severity_num "$1")
+    _rpri=$((QUACKCIT_SYSLOG_FACILITY_NUM * 8 + _rsev))
+    _rproc=$2
+    _rmsgid=$3
+    shift 3
+    [ -n "$_rproc" ] || _rproc=-
+    [ -n "$_rmsgid" ] || _rmsgid=-
+    printf '<%s>1 %s %s quackcit %s %s - %s\n' \
+        "$_rpri" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$QUACKCIT_SYSLOG_HOST" \
+        "$_rproc" "$_rmsgid" "$*"
+}
+
+# log_line <severity> <msgid> <message...> — append one record to the log file.
+# Never fatal: losing a log line must not take the server down with it.
+log_line() {
+    _lsev=$1
+    _lmsgid=$2
+    shift 2
+    syslog_record "$_lsev" "$$" "$_lmsgid" "$*" >> "$QUACKCIT_LOG" 2>/dev/null || true
+}
+
+# say <severity> <msgid> <message...> — to whoever ran the script *and* to the
+# log. Warnings and errors go to stderr so they survive a redirected stdout.
+say() {
+    _ssev=$1
+    _smsgid=$2
+    shift 2
+    case "$_ssev" in
+        err|warning|crit|alert|emerg) echo "quackcit: $*" >&2 ;;
+        *)                            echo "quackcit: $*" ;;
+    esac
+    log_line "$_ssev" "$_smsgid" "$*"
+}
+
+# syslog_stream <procid> <msgid> — wrap every line on stdin in a record. This is
+# what turns the DuckDB CLI's own output into log entries. Blank lines are
+# dropped: a record with an empty MSG carries nothing.
+syslog_stream() {
+    _tproc=$1
+    _tmsgid=$2
+    # `|| [ -n "$_tline" ]` catches a final line with no trailing newline.
+    while IFS= read -r _tline || [ -n "$_tline" ]; do
+        [ -n "$_tline" ] || continue
+        syslog_record info "$_tproc" "$_tmsgid" "$_tline"
+    done
+}
 
 # ---- paths -----------------------------------------------------------------
 
@@ -179,6 +307,26 @@ sql_terminate() {
         *\;) printf '%s\n' "$1" ;;
         *)   printf '%s;\n' "$1" ;;
     esac
+}
+
+# ---- generated secrets -----------------------------------------------------
+
+# gen_password — a password for a seeded account, on stdout. Alphanumerics only:
+# it has to survive a shell, a SQL literal, and being read off a terminal and
+# typed back in by hand. Returns 1 rather than calling die, because die inside
+# the `$(...)` a caller wraps this in would only exit that subshell.
+gen_password() {
+    _pw=
+    if command -v openssl >/dev/null 2>&1; then
+        _pw=$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | cut -c1-24)
+    fi
+    if [ -z "$_pw" ] && [ -r /dev/urandom ]; then
+        # od is POSIX where `tr < /dev/urandom` is not: tr stops at the first
+        # NUL byte on some implementations, which biases the output badly.
+        _pw=$(od -An -tx1 -N 64 /dev/urandom 2>/dev/null | tr -dc 'a-f0-9' | cut -c1-24)
+    fi
+    [ -n "$_pw" ] || return 1
+    printf '%s' "$_pw"
 }
 
 # ---- the listeners ---------------------------------------------------------

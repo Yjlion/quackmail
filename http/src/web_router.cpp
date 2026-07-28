@@ -47,9 +47,16 @@ bool EffectiveTls(Connection &con, const http::Request &req) {
 	return proto == "https";
 }
 
-// Cross-origin form posts. The CSRF token is the real defense; this is a cheap
-// second check, and deliberately does not fail when the header is absent (many
-// legitimate requests have no Origin).
+// Cross-origin form posts. The CSRF token is the real defense; this is an
+// opt-in second check, and deliberately does not fail when the header is absent
+// (many legitimate requests have no Origin).
+//
+// It is off unless `qm_web_origins` names the hosts forms may be submitted
+// from. There is no fallback to c_fqdn: this server is reached by whatever name
+// or address its operator points at it — a LAN address, a container name, a
+// tunnel — and pinning the form origin to one configured name meant every
+// deployment that had not set c_fqdn to exactly that name rejected all of its
+// own POSTs. Setting the allow-list is what turns the check on.
 bool OriginAcceptable(Ctx &ctx) {
 	std::string origin = ctx.req.Header("Origin");
 	if (origin.empty()) {
@@ -57,6 +64,10 @@ bool OriginAcceptable(Ctx &ctx) {
 		if (origin.empty()) {
 			return true;
 		}
+	}
+	std::string allowed = ConfigStr(ctx.con, "qm_web_origins", "");
+	if (allowed.empty()) {
+		return true;
 	}
 	// Reduce to scheme://host[:port].
 	size_t scheme = origin.find("://");
@@ -67,21 +78,22 @@ bool OriginAcceptable(Ctx &ctx) {
 	size_t slash = origin.find('/', host_start);
 	std::string host = origin.substr(host_start, slash == std::string::npos ? std::string::npos
 	                                                                       : slash - host_start);
-	size_t colon = host.find(':');
-	if (colon != std::string::npos) {
-		host = host.substr(0, colon);
+	// An IPv6 literal is bracketed and full of colons, so the port has to come
+	// off the brackets rather than the first colon — otherwise `[::1]:8443`
+	// reduces to "[" and even loopback fails to match.
+	if (!host.empty() && host.front() == '[') {
+		size_t close = host.find(']');
+		host = close == std::string::npos ? host.substr(1) : host.substr(1, close - 1);
+	} else {
+		size_t colon = host.find(':');
+		if (colon != std::string::npos) {
+			host = host.substr(0, colon);
+		}
 	}
 	host = quackmail::util::Lower(host);
 
-	std::string allowed = ConfigStr(ctx.con, "qm_web_origins", "");
-	if (allowed.empty()) {
-		allowed = quackmail::util::Lower(ConfigStr(ctx.con, "c_fqdn", ""));
-	}
-	// Loopback is always its own origin; a dev box has no meaningful c_fqdn.
+	// Loopback is always its own origin.
 	if (host == "localhost" || host == "127.0.0.1" || host == "::1") {
-		return true;
-	}
-	if (allowed.empty()) {
 		return true;
 	}
 	size_t pos = 0;

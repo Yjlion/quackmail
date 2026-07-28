@@ -12,6 +12,15 @@
 ; needed. Administer the running server with:
 ;
 ;     sudo /opt/quackmail/quackcitadm.sh status
+;
+; The first start seeds the accounts in QUACKCIT_SEED_USERS — by default one
+; aide named admin, whose generated password is written to
+; /var/lib/quackcit/initial-credentials (mode 0600, under StateDirectory):
+;
+;     sudo cat /var/lib/quackcit/initial-credentials
+;
+; Log records are RFC 5424 and reach the journal as well as
+; /var/log/quackcit/quackcit.log, so `journalctl -u quackcit` works too.
 
 [Unit]
 Description=QuackCit groupware server
