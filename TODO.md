@@ -5,9 +5,77 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-Nothing in flight. Next work comes off the backlog below.
+**Bringing the web interface up to WebCit-level capability**, in four PRs.
+Phase 1 is done; the rest follow in order.
+
+- [ ] **Phase 2 — groupware core and room view modes**
+  - [ ] a bundled IANA time zone database: `core/tz.{hpp,cpp}` +
+        `tools/gen_tzdata.py` → committed `core/src/tzdata.cpp`, on the same
+        terms as the PSL. Not DuckDB's `icu` (PR #23 deliberately dropped that
+        dependency) and not `/usr/share/zoneinfo` (minimal containers lack it).
+  - [ ] `core/vcard.{hpp,cpp}` and `core/ical.{hpp,cpp}` — parse *and* emit,
+        preserving unknown `X-` properties so editing in the browser never
+        destroys what a phone wrote. Recurrence capped at 750 occurrences.
+  - [ ] `citadel::UpsertByEuid`/`FindByEuid` + an index on
+        `citadel_messages.euid` (there is none today, so every item lookup is a
+        table scan). Items are ordinary `format_type = 4` messages wrapping one
+        `text/vcard` or `text/calendar` part, so IMAP serves them with no new
+        code.
+  - [ ] extend `enum RoomView` — **verify the numbers against
+        `/root/citadel/libcitadel/lib/libcitadel.h` on debian.lan first**, they
+        go on the wire in `GETR`/`SETR`.
+  - [ ] `web_views.cpp` dispatch keyed on `default_view`, then `web_contacts`,
+        `web_calendar`, `web_notes`, `web_blog`. Skip wiki (needs versioning and
+        a markdown renderer) and queue (Citadel-internal).
+- [ ] **Phase 3 — rich mail and a Sieve rule builder**
+  - [ ] `core/src/mime_build.cpp`: one `multipart/alternative`/`related`/`mixed`
+        builder, replacing the third hand-rolled one in the tree.
+  - [ ] `core/src/html_sanitize.cpp` with two profiles — the existing deny-list
+        for display, and a true **allow-list** for compose, applied before the
+        message is built. Compose output is stored and re-served to other
+        people, so a deny-list is not defensible there.
+  - [ ] `cid:` inline images, with the served type forced to a real image format
+        (`image/svg+xml` is scriptable and must become an attachment).
+  - [ ] `sieve::Decompose`/`Compose` over the AST that already exists in
+        `core/src/sieve.cpp`. The script text stays the single source of truth —
+        ManageSieve can overwrite it at any moment, so a rules table or marker
+        comments would both make the UI lie about what the server does.
+- [ ] **Phase 4 — per-room management and self-serve rooms**
+  - [ ] `citadel::CanAdminister` riding on the RFC 4314 `a` right, so an aide
+        delegates room administration from any IMAP client with `SETACL`. No new
+        column, no QuackCit-only bit.
+  - [ ] `/bbs/room/:n/settings` — preferences, an ACL editor, mailing-list
+        config (reusing `listserv::SetField`), and feeds. Feed *creation* stays
+        aide-only: `fetch::Feed` stores a plaintext password and `RunFeed` dials
+        an arbitrary host, which for a non-aide is an SSRF primitive.
+  - [ ] `/bbs/new` gated on `qm_room_create_axlevel` (default 6, so nothing
+        changes until an operator lowers it), with a flag mask and a guard
+        against names colliding with the `0000000002.Mail` mailbox keyspace.
 
 ## Shipped
+
+- [x] **Web: persistent connections, `/static` assets, a sidebar** (phase 1 of
+      the web overhaul)
+  - [x] keep-alive in `core/src/http.cpp`, bounded by 100 requests per
+        connection, a 5 s idle deadline and a 60 s connection ceiling. The first
+        request keeps the 15 s header budget the slow-loris defence relies on.
+  - [x] the invariant that makes it safe: any non-`Ok` read closes the
+        connection, because 413 and 411 answer without consuming the announced
+        body and those bytes would otherwise be read as the next request.
+        Regression test pipelines a request behind an oversized `Content-Length`.
+  - [x] `ServerController::SetMaxConnections` (`qm_http_max_connections`,
+        default 256; 0 = unlimited, so no other protocol changes). MEMORY.md
+        named the absence of a cap as the reason connections were closed, so it
+        had to land in the same commit.
+  - [x] `/static/*` with content-hashed immutable URLs, ETag/304, and bytes
+        compiled in from `tools/gen_assets.py` → committed `web_assets.cpp`.
+        CI runs `--check` so a stale generated file fails the build.
+  - [x] CSP gains `'self'` for script and style; the message-body frame
+        deliberately does not.
+  - [x] the stylesheet splits into inlined critical CSS + `/static/qc.css`;
+        `NavFor` becomes a grouped sidebar; `AdminNav`'s nineteen buttons become
+        six labelled groups; `Render` gains a `PageOpts` overload so no existing
+        call site moved.
 
 - [x] **Pull messages in from POP3, IMAP and RSS** (`qm_fetch` in
       `quackmail_spool`, `core/src/fetch.cpp`)
