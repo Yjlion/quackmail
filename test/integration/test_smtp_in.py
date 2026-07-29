@@ -112,9 +112,10 @@ def main():
         con.execute("CALL qm_pop3_stop()").fetchall()
 
     check_policy(con)
+    check_room_mail_and_subaddressing(con)
 
     print("PASS: inbound MX validates recipients, delivers local mail, POP3 retrieves it,")
-    print("      and honours domains, aliases and block rules")
+    print("      honours domains, aliases and block rules, and routes room + subaddressed mail")
 
 
 def check_policy(con):
@@ -204,6 +205,86 @@ def check_policy(con):
     assert con.execute(
         "SELECT count(*) FROM citadel_messages WHERE subject = 'To be forwarded'"
     ).fetchone()[0] == 0, "a forward-only alias should store nothing locally"
+
+
+def check_room_mail_and_subaddressing(con):
+    """room_<name>@ delivery gated on an ACL, and RFC 5233 subaddressing."""
+    port = SMTP_PORT + 2
+    assert con.execute("SELECT ok FROM cit_room_add('Announcements')").fetchone()[0]
+    # alice already exists; give her a folder for the subaddress to file into.
+    # A folder that does NOT exist must fall back to the inbox, so "Projects" is
+    # created here and "Nowhere" deliberately is not.
+    alice = con.execute(
+        "SELECT usernum FROM citadel_users WHERE username = 'alice'"
+    ).fetchone()[0]
+    con.execute(
+        "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, mailbox_owner) "
+        f"VALUES (nextval('citadel_room_seq'), '{alice:010d}.Projects', 'Projects', 0, 16388, {alice})"
+    )
+
+    assert con.execute(
+        f"SELECT note FROM qm_smtp_in_start('{HOST}', {port})"
+    ).fetchone()[0] == "started"
+    time.sleep(0.3)
+
+    def send(rcpt, subject, expect_ok=True):
+        m = MIMEText("room body\n")
+        m["Subject"] = subject
+        m["From"] = "outside@example.invalid"
+        m["To"] = rcpt
+        c = smtplib.SMTP(HOST, port, timeout=10)
+        try:
+            c.sendmail("outside@example.invalid", [rcpt], m.as_string())
+            assert expect_ok, f"{rcpt} should have been refused"
+        except smtplib.SMTPRecipientsRefused as e:
+            assert not expect_ok, f"{rcpt} was refused: {e}"
+        finally:
+            try:
+                c.quit()
+            except Exception:
+                pass
+
+    try:
+        # No ACL entry yet: the room address is not a recipient at all.
+        send("room_Announcements@quackmail.test", "Too early", expect_ok=False)
+
+        # Granting "anyone" the RFC 4314 post right opens it — the same thing
+        # SETACL does from a mail client.
+        assert con.execute(
+            "SELECT ok FROM cit_room_acl_set('Announcements', 'anyone', 'lrsp')"
+        ).fetchone()[0]
+        send("room_Announcements@quackmail.test", "To the room")
+
+        # Personal mailboxes are never reachable this way, grant or no grant.
+        send("room_Mail@quackmail.test", "Not a public room", expect_ok=False)
+
+        # Subaddressing: an existing folder receives it...
+        send("alice+Projects@quackmail.test", "Filed by detail")
+        # ...and an unknown one falls back to the inbox rather than being created.
+        send("alice+Nowhere@quackmail.test", "Fell back to inbox")
+
+        # Revoking the grant closes the room again.
+        assert con.execute(
+            "SELECT ok FROM cit_room_acl_set('Announcements', 'anyone', '')"
+        ).fetchone()[0]
+        send("room_Announcements@quackmail.test", "Too late", expect_ok=False)
+    finally:
+        con.execute(f"CALL qm_smtp_in_stop()").fetchall()
+
+    def room_of(subject):
+        rows = con.execute(
+            "SELECT r.display_name FROM citadel_messages m "
+            "JOIN citadel_room_msgs rm ON rm.msgnum = m.msgnum "
+            "JOIN citadel_rooms r ON r.room_num = rm.room_num "
+            f"WHERE m.subject = '{subject}'"
+        ).fetchall()
+        return sorted(x[0] for x in rows)
+
+    assert room_of("To the room") == ["Announcements"], room_of("To the room")
+    assert room_of("Filed by detail") == ["Projects"], room_of("Filed by detail")
+    assert room_of("Fell back to inbox") == ["Mail"], room_of("Fell back to inbox")
+    for subject in ("Too early", "Too late", "Not a public room"):
+        assert room_of(subject) == [], f"{subject} should not have been stored"
 
 
 if __name__ == "__main__":

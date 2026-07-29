@@ -208,6 +208,11 @@ int64_t GetOrCreateUserRoom(duckdb::Connection &con, const std::string &username
                             const std::string &display_name);
 // Convenience: the user's personal "Mail" room.
 int64_t GetOrCreateMailRoom(duckdb::Connection &con, const std::string &username);
+// Look up one of a user's personal rooms without creating it. Returns -1 when
+// the user has no such room. Matches on the user-scoped internal key, so it can
+// never return a public room that happens to share the display name.
+int64_t FindUserRoom(duckdb::Connection &con, const std::string &username,
+                     const std::string &display_name);
 // Provision the full set of default personal rooms Citadel gives every user
 // (Mail, Sent Items, Drafts, Trash, Calendar, Contacts, Notes, Tasks) with the
 // correct default_view. Idempotent; call on login / user creation.
@@ -237,8 +242,10 @@ struct SessionInfo {
 	int64_t last_seen = 0;
 };
 
-// Register a connection and return its session id (0 on failure).
-int64_t RegisterSession(duckdb::Connection &con, const std::string &client);
+// Register a connection and return its session id (0 on failure). `host` is the
+// peer address (net::ClientStream::PeerIp()); loopback is stored as "localhost",
+// matching what a real Citadel server shows in RWHO.
+int64_t RegisterSession(duckdb::Connection &con, const std::string &client, const std::string &host = "");
 // Refresh the row after each command (also what makes the session visible in RWHO).
 void TouchSession(duckdb::Connection &con, int64_t session_id, const std::string &username,
                   const std::string &room, const std::string &last_cmd, int64_t axlevel);
@@ -283,6 +290,44 @@ bool RoomUnlocked(duckdb::Connection &con, const std::string &username, const Ro
 bool UnlockRoom(duckdb::Connection &con, const std::string &username, const Room &room,
                 const std::string &password);
 
+// ---- access control lists (RFC 4314) ------------------------------------
+//
+// Rights are *derived* from the room's Citadel attributes (owner, aide,
+// QR_PRIVATE/QR_READONLY/QR_PASSWORDED) and then unioned with any explicit
+// citadel_room_acl row. Deriving rather than storing keeps qr_flags the single
+// source of truth for ordinary permissions; the table only adds grants Citadel
+// has nowhere else to put — above all "anyone" + `p`, which is what makes a
+// room reachable by e-mail.
+//
+// Because the two are unioned, an ACL row can only widen access, never narrow
+// it: revoking a user's read access is still a matter of the room's flags.
+
+// The RFC 4314 rights letters in canonical order: lookup, read, keep-seen,
+// write-flags, insert, post, create, delete-mailbox, delete-message, expunge,
+// administer.
+extern const char *const kAclRights;
+
+// `username` may be empty or "anyone" for an unauthenticated/gateway caller, in
+// which case nothing is derived and only stored grants apply.
+std::string EffectiveRights(duckdb::Connection &con, const std::string &username, const Room &room);
+// Replace the stored grant for one identifier. Empty `rights` removes the row.
+bool SetRights(duckdb::Connection &con, const Room &room, const std::string &identifier,
+               const std::string &rights, std::string &err);
+// The stored grants only (identifier, rights) — what GETACL reports.
+std::vector<std::pair<std::string, std::string>> ListRights(duckdb::Connection &con, const Room &room);
+
+// May `username` post into `room`? An empty username is an anonymous/gateway
+// sender and needs the explicit `p` (post) right; a logged-in user posts with
+// `i` (insert), the right APPEND and COPY use. Every front-end that accepts a
+// new message must ask — resolving a room is not permission to write to it.
+bool CanPost(duckdb::Connection &con, const std::string &username, const Room &room);
+
+// Resolve the local-part of a public room address ("room_the_lobby") to the
+// room it names. Returns -1 unless the room exists, is public (not a mailbox,
+// not QR_PRIVATE, not QR_PASSWORDED) *and* its ACL grants `p` to "anyone" —
+// so no room is reachable by mail until an aide opts it in with SETACL.
+int64_t ResolveMailRoom(duckdb::Connection &con, const std::string &local_part);
+
 // ---- messages -----------------------------------------------------------
 // Insert a message and point it into each of `rooms`. Bumps each room's
 // highest_msg. Returns the new msgnum, or -1 on error (with err set).
@@ -304,6 +349,22 @@ bool DeleteMessage(duckdb::Connection &con, int64_t room_num, int64_t msgnum, st
 // Point a message into `to_room`, unlinking it from `from_room` unless is_copy.
 bool MoveMessage(duckdb::Connection &con, int64_t from_room, int64_t to_room, int64_t msgnum, bool is_copy,
                  std::string &err);
+
+// ---- per-user string preferences ----------------------------------------
+// The US_* bit field holds the boolean BBS toggles; this holds anything with a
+// value. An unset preference returns `dflt`, which is how "follow the site
+// default" is expressed — SetUserPref with an empty value clears the row.
+std::string GetUserPref(duckdb::Connection &con, const std::string &username, const std::string &name,
+                        const std::string &dflt = "");
+bool SetUserPref(duckdb::Connection &con, const std::string &username, const std::string &name,
+                 const std::string &value);
+
+// ---- system messages ----------------------------------------------------
+// Post a notice into the Aide room, authored by the node itself. This is the
+// server's log-to-the-BBS channel: new users, aide actions, listeners starting.
+// A no-op when the `qm_aide_log` setting is off, and it swallows its own
+// errors — a system message must never fail the operation that triggered it.
+void PostAideMessage(duckdb::Connection &con, const std::string &subject, const std::string &text);
 
 } // namespace citadel
 } // namespace quackmail

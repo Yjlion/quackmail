@@ -134,8 +134,13 @@ void LoadUser(Connection &con, Bbs &s) {
 	s.flags = info.flags;
 }
 
-// Apply the session's paging preference to the terminal.
-void ApplyPaging(Connection &con, Bbs &s, telnet::Session &t) {
+// Push the user's persisted preferences onto the terminal. Called after login
+// and again whenever <.EC>onfigure changes them.
+void ApplyPrefs(Connection &con, Bbs &s, telnet::Session &t) {
+	// US_COLOR has been settable from .EC and the web console since those
+	// existed; this is what finally makes it do something. telnet::Session still
+	// refuses to emit escapes to a terminal that called itself dumb.
+	t.SetColor((s.flags & citadel::US_COLOR) != 0);
 	if (!s.Paginate()) {
 		t.SetPageSize(0);
 		return;
@@ -170,8 +175,9 @@ void EnterRoom(Connection &con, Bbs &s, telnet::Session &t, const citadel::Room 
 		std::string err;
 		citadel::ZapRoom(con, s.username, room.room_num, false, err);
 	}
-	t.Write("\n" + room.display_name + PromptChar(room) + "  " + std::to_string(st.new_count) +
-	        " new of " + std::to_string(st.total) + " messages\n");
+	t.Write("\n" + t.Colour(telnet::Session::Attr::Banner) + room.display_name + PromptChar(room) + "  " +
+	        std::to_string(st.new_count) + " new of " + std::to_string(st.total) + " messages" +
+	        t.Colour(telnet::Session::Attr::Reset) + "\n");
 	if (!room.info.empty()) {
 		t.Write(room.info + "\n");
 	}
@@ -512,8 +518,10 @@ void ZapRoom(Connection &con, Bbs &s, telnet::Session &t) {
 // ---------------------------------------------------------------- messages
 
 // Render one message into `out`, which the caller then feeds to the pager.
-void ShowMessage(const citadel::Message &msg, const citadel::Room &room, std::string &out) {
-	out += "\n [#" + std::to_string(msg.msgnum) + "] " + TimeString(msg.msgtime) + " from " + msg.author;
+void ShowMessage(const citadel::Message &msg, const citadel::Room &room, telnet::Session &t,
+                 std::string &out) {
+	out += "\n" + t.Colour(telnet::Session::Attr::Header) + " [#" + std::to_string(msg.msgnum) + "] " +
+	       TimeString(msg.msgtime) + " from " + msg.author;
 	if (!msg.recipient.empty()) {
 		out += " to " + msg.recipient;
 	}
@@ -521,11 +529,13 @@ void ShowMessage(const citadel::Message &msg, const citadel::Room &room, std::st
 	if (!msg.subject.empty()) {
 		out += "Subject: " + msg.subject + "\n";
 	}
+	out += t.Colour(telnet::Session::Attr::Body);
 	std::string body = citadel::BodyText(msg);
 	out += body;
 	if (!body.empty() && body.back() != '\n') {
 		out += "\n";
 	}
+	out += t.Colour(telnet::Session::Attr::Reset);
 }
 
 // which: "new" | "old" | "all"; reverse walks newest-first; `last` caps the count.
@@ -558,7 +568,7 @@ void ReadMessages(Connection &con, Bbs &s, telnet::Session &t, const std::string
 			continue;
 		}
 		std::string out;
-		ShowMessage(msg, s.room, out);
+		ShowMessage(msg, s.room, t, out);
 		if (!t.Page(out)) {
 			break; // the reader pressed S(top)
 		}
@@ -577,7 +587,7 @@ void EnterMessage(Connection &con, Bbs &s, telnet::Session &t) {
 		t.Write("\nNot in a room.\n");
 		return;
 	}
-	if (s.room.qr_flags & citadel::QR_READONLY) {
+	if (!citadel::CanPost(con, s.username, s.room)) {
 		t.Write("\nYou may not enter messages in this type of room.\n");
 		return;
 	}
@@ -701,17 +711,27 @@ void MoveMessage(Connection &con, Bbs &s, telnet::Session &t) {
 
 // ------------------------------------------------------- presence + paging
 
+// One fixed-width listing cell: pad short values, truncate long ones so the
+// columns stay aligned on an 80-column terminal.
+std::string Col(std::string text, size_t width) {
+	if (text.size() >= width) {
+		text.resize(width - 1);
+		text += " ";
+		return text;
+	}
+	text.resize(width, ' ');
+	return text;
+}
+
 void WhoIsOnline(Connection &con, Bbs &s, telnet::Session &t, bool long_form) {
 	t.ResetPager();
-	std::string out = "\n Session  User                 Room                 Client\n";
+	std::string out = "\n" + t.Colour(telnet::Session::Attr::Header) +
+	                  " Session  User             Room             From               Client" +
+	                  t.Colour(telnet::Session::Attr::Reset) + "\n";
 	for (auto &sess : citadel::ListSessions(con)) {
 		std::string user = sess.username.empty() ? "(not logged in)" : sess.username;
-		std::string line = " " + std::to_string(sess.session_id);
-		line.resize(9, ' ');
-		user.resize(std::max<size_t>(user.size(), 21), ' ');
-		std::string room = sess.room;
-		room.resize(std::max<size_t>(room.size(), 21), ' ');
-		out += line + user + room + sess.client;
+		out += Col(" " + std::to_string(sess.session_id), 9) + Col(user, 17) + Col(sess.room, 17) +
+		       Col(sess.host, 19) + sess.client;
 		if (long_form) {
 			out += "  (" + sess.last_cmd + ", since " + TimeString(sess.since) + ")";
 		}
@@ -850,7 +870,7 @@ void EnterConfiguration(Connection &con, Bbs &s, telnet::Session &t) {
 	citadel::SetUserFlags(con, s.username, s.flags);
 	citadel::SetScreenSize(con, s.username, width, height);
 	t.SetSize((int)width, (int)height);
-	ApplyPaging(con, s, t);
+	ApplyPrefs(con, s, t);
 	t.Write("Configuration saved.\n");
 }
 
@@ -1184,6 +1204,9 @@ void KillRoomCmd(Connection &con, Bbs &s, telnet::Session &t) {
 		return;
 	}
 	t.Write("Room deleted.\n");
+	citadel::PostAideMessage(con, "Room deleted: " + s.room.display_name,
+	                         "The room and its message pointers were removed.\n\nBy: " + s.username +
+	                             " (BBS shell)\n");
 	s.have_room = false;
 	citadel::Room lobby;
 	if (citadel::ResolveRoom(con, s.username, "Lobby", lobby)) {
@@ -1239,6 +1262,10 @@ void EditUser(Connection &con, Bbs &s, telnet::Session &t) {
 	int64_t flags = needs_valid ? (info.flags | citadel::US_NEEDVALID)
 	                            : (info.flags & ~(int64_t)citadel::US_NEEDVALID);
 	citadel::SetUserFlags(con, who, flags);
+	citadel::PostAideMessage(con, "User edited: " + who,
+	                         "User: " + who + "\nAccess level: " + std::to_string(level) +
+	                             "\nAwaiting validation: " + (needs_valid ? "yes" : "no") + "\n\nBy: " +
+	                             s.username + " (BBS shell)\n");
 	t.Write("User saved.\n");
 }
 
@@ -1260,8 +1287,14 @@ void DeleteUser(Connection &con, Bbs &s, telnet::Session &t) {
 		return;
 	}
 	std::string err;
-	t.Write(auth::RemoveUser(con, who, err) ? std::string("User deleted.\n")
-	                                        : ("Not deleted: " + err + "\n"));
+	if (auth::RemoveUser(con, who, err)) {
+		t.Write("User deleted.\n");
+		citadel::PostAideMessage(con, "User removed: " + who,
+		                         "The account and its credentials were deleted.\n\nUser: " + who +
+		                             "\nBy: " + s.username + " (BBS shell)\n");
+	} else {
+		t.Write("Not deleted: " + err + "\n");
+	}
 }
 
 void ValidateUsers(Connection &con, Bbs &s, telnet::Session &t) {
@@ -1291,6 +1324,10 @@ void ValidateUsers(Connection &con, Bbs &s, telnet::Session &t) {
 		std::string err;
 		citadel::SetAxLevel(con, u.username, level, err);
 		citadel::SetUserFlags(con, u.username, u.flags & ~(int64_t)citadel::US_NEEDVALID);
+		citadel::PostAideMessage(con, "User validated: " + u.username,
+		                         "User: " + u.username + "\nAccess level granted: " +
+		                             std::to_string(level) + "\n\nBy: " + s.username +
+		                             " (BBS shell)\n");
 		t.Write("  Validated.\n");
 	}
 	if (!any) {
@@ -1331,6 +1368,9 @@ bool Login(Connection &con, Bbs &s, telnet::Session &t) {
 				t.Write("Could not create account: " + err + "\n");
 				continue;
 			}
+			citadel::PostAideMessage(con, "New user: " + newname,
+			                         "A new account was registered from the BBS shell.\n\nUser: " +
+			                             newname + "\n");
 			name = newname;
 			fresh = true;
 		} else {
@@ -1588,7 +1628,8 @@ void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerControl
 	t.Negotiate();
 
 	Bbs s;
-	s.session_id = citadel::RegisterSession(con, ctrl.ImplicitTls() ? "Telnets session" : "Telnet session");
+	s.session_id = citadel::RegisterSession(con, ctrl.ImplicitTls() ? "Telnets session" : "Telnet session",
+	                                       stream.PeerIp());
 
 	std::string humannode = citadel::GetConfig(con, "c_humannode", "QuackCit BBS");
 	std::string city = citadel::GetConfig(con, "c_bbs_city", "");
@@ -1601,7 +1642,7 @@ void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerControl
 		return;
 	}
 	t.Write("\nWelcome, " + s.username + ".\n");
-	ApplyPaging(con, s, t);
+	ApplyPrefs(con, s, t);
 
 	citadel::Room lobby;
 	if (citadel::ResolveRoom(con, s.username, "Lobby", lobby)) {
@@ -1621,8 +1662,10 @@ void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerControl
 		                      s.axlevel);
 
 		t.ResetPager();
-		t.Write("\n" + (s.have_room ? s.room.display_name : std::string("(no room)")) +
-		        std::string(1, s.have_room ? PromptChar(s.room) : '>') + " ");
+		t.Write("\n" + t.Colour(telnet::Session::Attr::Prompt) +
+		        (s.have_room ? s.room.display_name : std::string("(no room)")) +
+		        std::string(1, s.have_room ? PromptChar(s.room) : '>') +
+		        t.Colour(telnet::Session::Attr::Reset) + " ");
 
 		// A negotiated telnet client sends one keystroke at a time; a raw socket
 		// (nc, expect harnesses, our tests) sends whole lines. Read accordingly,

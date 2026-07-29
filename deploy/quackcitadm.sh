@@ -160,7 +160,13 @@ cmd_room() {
         add)  need 1 "$@"; q "SELECT ok, note FROM cit_room_add($(sql_str "$1"))" ;;
         list) q "SELECT room_num, display_name, floor_num, qr_flags, highest_msg
                  FROM citadel_rooms ORDER BY floor_num, listorder, room_num" ;;
-        *) die "unknown room command '$action' (add|list)" ;;
+        acl)  need 1 "$@"
+              if [ $# -ge 3 ]; then
+                  q "SELECT ok, note FROM cit_room_acl_set($(sql_str "$1"), $(sql_str "$2"), $(sql_str "$3"))"
+              else
+                  q "SELECT * FROM cit_room_acl($(sql_str "$1"))"
+              fi ;;
+        *) die "unknown room command '$action' (add|list|acl)" ;;
     esac
 }
 
@@ -304,7 +310,9 @@ usage: quackcitadm.sh <object> <action> [arguments]
               web: qm_web_force_https, qm_web_trusted_proxies, qm_web_hsts,
                    qm_web_origins, qm_web_admin_enabled (off by default),
                    qm_web_admin_require_tls
-  room      add <name> | list
+  room      add <name> | list | acl <room> [<identifier> <rights>]
+              RFC 4314 rights: lrswipkxtea. Granting "anyone" the p right opens
+              the room to mail at room_<name>@<fqdn>; no rights removes the entry
   floor     add <name> | list
   queue     list | retry <id> | flush
   websession list | revoke <token_hash> | revoke-user <name> | prune

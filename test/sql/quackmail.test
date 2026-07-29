@@ -92,14 +92,31 @@ SELECT note FROM qm_managesieve_stop();
 ----
 stopped
 
-# A second, independent extension starts on its own port
+# A second, independent extension starts on its own port. IMAP and IMAPS are
+# two listeners over one implementation (Citadel's 143/993 pair), so both
+# control sets must work independently.
 query I
 SELECT note FROM qm_imap_start('127.0.0.1', 11430);
 ----
 started
 
 query I
+SELECT note FROM qm_imaps_start('127.0.0.1', 11993, implicit_tls => true);
+----
+started
+
+query II
+SELECT (SELECT running FROM qm_imap_status()), (SELECT running FROM qm_imaps_status());
+----
+true	true
+
+query I
 SELECT note FROM qm_imap_stop();
+----
+stopped
+
+query I
+SELECT note FROM qm_imaps_stop();
 ----
 stopped
 

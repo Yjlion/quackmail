@@ -1,0 +1,110 @@
+# name: test/sql/psl.test
+# description: Public Suffix List lookups behind DMARC's organizational domain
+# group: [quackmail]
+#
+# qm_psl_org_domain / qm_psl_suffix are scalar and touch no tables, so the whole
+# algorithm is assertable here with no DNS and no listener. This is the only
+# offline coverage DMARC alignment gets: Evaluate() needs live TXT records, but
+# the organizational-domain comparison it is built on does not.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# --- the ordinary case: one label under a single-label suffix ---------------
+query I
+SELECT qm_psl_org_domain('mail.example.com');
+----
+example.com
+
+query I
+SELECT qm_psl_org_domain('example.com');
+----
+example.com
+
+query I
+SELECT qm_psl_org_domain('a.b.c.d.example.com');
+----
+example.com
+
+# --- multi-label suffixes, which the old two-label approximation guessed at --
+query I
+SELECT qm_psl_org_domain('www.bbc.co.uk');
+----
+bbc.co.uk
+
+query I
+SELECT qm_psl_org_domain('example.pvt.k12.ma.us');
+----
+example.pvt.k12.ma.us
+
+# k12.ma.us has three labels; the approximation this replaced kept two and
+# would have called "pvt.k12.ma.us" the organizational domain of the above.
+query I
+SELECT qm_psl_suffix('example.pvt.k12.ma.us');
+----
+pvt.k12.ma.us
+
+# --- a wildcard rule and its exception --------------------------------------
+# "*.ck" makes every second-level .ck name a public suffix, and "!www.ck" carves
+# www.ck back out as registrable. Getting both right is the point of shipping
+# the real list.
+query I
+SELECT qm_psl_suffix('foo.bar.ck');
+----
+bar.ck
+
+query I
+SELECT qm_psl_org_domain('www.ck');
+----
+www.ck
+
+# --- unlisted TLD: the implicit "*" rule ------------------------------------
+query I
+SELECT qm_psl_org_domain('host.invalidtldthatdoesnotexist');
+----
+host.invalidtldthatdoesnotexist
+
+# --- a name that is nothing but a public suffix -----------------------------
+# There is no registrable name here. It comes back unchanged so that alignment
+# compares two real strings rather than two empty ones (which would pass).
+query I
+SELECT qm_psl_org_domain('co.uk');
+----
+co.uk
+
+query I
+SELECT qm_psl_suffix('co.uk');
+----
+co.uk
+
+# --- case and trailing dots -------------------------------------------------
+query I
+SELECT qm_psl_org_domain('MAIL.EXAMPLE.CO.UK');
+----
+example.co.uk
+
+query I
+SELECT qm_psl_org_domain('mail.example.com.');
+----
+example.com
+
+# --- the private section is included ----------------------------------------
+# Bundling it means a name delegated by a provider is its own organizational
+# domain, so one customer's DMARC policy cannot align with another's.
+query I
+SELECT qm_psl_org_domain('shop.blogspot.com');
+----
+shop.blogspot.com
+
+# --- alignment is what all of this feeds -----------------------------------
+query I
+SELECT qm_psl_org_domain('mail.example.com') = qm_psl_org_domain('bounces.example.com');
+----
+true
+
+query I
+SELECT qm_psl_org_domain('a.example.co.uk') = qm_psl_org_domain('b.other.co.uk');
+----
+false

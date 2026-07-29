@@ -28,7 +28,10 @@ namespace {
 
 using namespace quackmail;
 
+// Two listeners over one implementation, mirroring Citadel's imap/imaps pair:
+// STARTTLS-capable plaintext (143; dev 1143) and implicit TLS (993; dev 1993).
 ServerController g_imap;
+ServerController g_imaps;
 
 // IMAP is deliberately a minimal but real subset: LOGIN, CAPABILITY, LIST,
 // SELECT/EXAMINE, FETCH (FLAGS/UID/RFC822.SIZE/INTERNALDATE/ENVELOPE and
@@ -57,6 +60,40 @@ std::string ImapQuote(const std::string &s) {
 
 std::string QOrNil(const std::string &s) {
 	return s.empty() ? "NIL" : ImapQuote(s);
+}
+
+// Split a command's argument tail into atoms, honouring double-quoted strings.
+// The ACL commands take up to three arguments, any of which may be quoted (a
+// mailbox name like "Main Floor/Lobby" always is).
+std::vector<std::string> ImapArgs(const std::string &in) {
+	std::vector<std::string> out;
+	size_t i = 0;
+	while (i < in.size()) {
+		while (i < in.size() && in[i] == ' ') {
+			i++;
+		}
+		if (i >= in.size()) {
+			break;
+		}
+		std::string tok;
+		if (in[i] == '"') {
+			for (i++; i < in.size() && in[i] != '"'; i++) {
+				if (in[i] == '\\' && i + 1 < in.size()) {
+					i++;
+				}
+				tok.push_back(in[i]);
+			}
+			if (i < in.size()) {
+				i++; // closing quote
+			}
+		} else {
+			for (; i < in.size() && in[i] != ' '; i++) {
+				tok.push_back(in[i]);
+			}
+		}
+		out.push_back(tok);
+	}
+	return out;
 }
 
 // Load the ordered msgnum list for a room.
@@ -388,7 +425,7 @@ void FetchOne(Connection &con, Session &s, net::ClientStream &stream, size_t pos
 // The CAPABILITY token list. STARTTLS is advertised only before the TLS upgrade;
 // mirrors a real Citadel server (which offers NAMESPACE, UIDPLUS, SASL, ID).
 std::string CapabilityLine(bool tls_active, bool starttls_avail) {
-	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS MOVE AUTH=PLAIN AUTH=LOGIN";
+	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS MOVE ACL AUTH=PLAIN AUTH=LOGIN";
 	if (!tls_active && starttls_avail) {
 		caps += " STARTTLS";
 	}
@@ -961,6 +998,87 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 			} else {
 				stream.WriteLine(tag + " NO " + err);
 			}
+		} else if (cmd == "MYRIGHTS" || cmd == "GETACL" || cmd == "LISTRIGHTS" || cmd == "SETACL" ||
+		           cmd == "DELETEACL") {
+			// RFC 4314. Rights are mostly derived from the room itself; the ACL
+			// table holds the grants Citadel's flags cannot express — above all
+			// "anyone p", which is what opens a room to e-mail.
+			auto a = ImapArgs(args);
+			citadel::Room room;
+			int64_t rn = a.empty() ? -1 : ResolveMailbox(con, s.user, a[0]);
+			if (a.empty()) {
+				stream.WriteLine(tag + " BAD " + cmd + " needs a mailbox name");
+			} else if (rn < 0 || !citadel::GetRoomByNum(con, rn, room)) {
+				stream.WriteLine(tag + " NO [NONEXISTENT] mailbox not found");
+			} else if (cmd == "MYRIGHTS") {
+				stream.WriteLine("* MYRIGHTS " + ImapQuote(a[0]) + " " +
+				                 citadel::EffectiveRights(con, s.user, room));
+				stream.WriteLine(tag + " OK MYRIGHTS completed");
+			} else if (citadel::EffectiveRights(con, s.user, room).find('a') == std::string::npos) {
+				// Everything below reads or rewrites the ACL, which RFC 4314
+				// reserves for holders of the "administer" right.
+				stream.WriteLine(tag + " NO [NOPERM] you do not administer that mailbox");
+			} else if (cmd == "GETACL") {
+				std::string line = "* ACL " + ImapQuote(a[0]);
+				for (auto &e : citadel::ListRights(con, room)) {
+					line += " " + ImapQuote(e.first) + " " + e.second;
+				}
+				stream.WriteLine(line);
+				stream.WriteLine(tag + " OK GETACL completed");
+			} else if (cmd == "LISTRIGHTS") {
+				if (a.size() < 2) {
+					stream.WriteLine(tag + " BAD LISTRIGHTS needs a mailbox and an identifier");
+				} else {
+					// Nothing is granted unconditionally; every right is
+					// individually grantable.
+					std::string line = "* LISTRIGHTS " + ImapQuote(a[0]) + " " + ImapQuote(a[1]) + " \"\"";
+					for (const char *p = citadel::kAclRights; *p; p++) {
+						line += std::string(" ") + *p;
+					}
+					stream.WriteLine(line);
+					stream.WriteLine(tag + " OK LISTRIGHTS completed");
+				}
+			} else if (cmd == "DELETEACL") {
+				std::string err;
+				if (a.size() < 2) {
+					stream.WriteLine(tag + " BAD DELETEACL needs a mailbox and an identifier");
+				} else if (citadel::SetRights(con, room, a[1], "", err)) {
+					stream.WriteLine(tag + " OK DELETEACL completed");
+				} else {
+					stream.WriteLine(tag + " NO " + err);
+				}
+			} else { // SETACL
+				if (a.size() < 3) {
+					stream.WriteLine(tag + " BAD SETACL needs a mailbox, an identifier and rights");
+				} else {
+					// A leading '+' or '-' edits the existing grant rather than
+					// replacing it.
+					std::string mod = a[2];
+					std::string wanted = mod;
+					if (!mod.empty() && (mod[0] == '+' || mod[0] == '-')) {
+						std::string cur;
+						for (auto &e : citadel::ListRights(con, room)) {
+							if (util::Upper(e.first) == util::Upper(a[1])) {
+								cur = e.second;
+							}
+						}
+						wanted.clear();
+						for (const char *p = citadel::kAclRights; *p; p++) {
+							bool have = cur.find(*p) != std::string::npos;
+							bool named = mod.find(*p, 1) != std::string::npos;
+							if (mod[0] == '+' ? (have || named) : (have && !named)) {
+								wanted += *p;
+							}
+						}
+					}
+					std::string err;
+					if (citadel::SetRights(con, room, a[1], wanted, err)) {
+						stream.WriteLine(tag + " OK SETACL completed");
+					} else {
+						stream.WriteLine(tag + " NO " + err);
+					}
+				}
+			}
 		} else if (cmd == "RENAME") {
 			auto unq = [](std::string v) {
 				if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
@@ -1098,11 +1216,15 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 void HandleImapConn(DatabaseInstance &db, net::ClientStream &stream) {
 	HandleImap(db, stream, g_imap);
 }
+void HandleImapsConn(DatabaseInstance &db, net::ClientStream &stream) {
+	HandleImap(db, stream, g_imaps);
+}
 
 void LoadInternal(ExtensionLoader &loader) {
 	Connection con(loader.GetDatabaseInstance());
 	store::EnsureSchema(con);
 	RegisterServerControls(loader, "qm_imap", 1143, g_imap, HandleImapConn);
+	RegisterServerControls(loader, "qm_imaps", 1993, g_imaps, HandleImapsConn);
 }
 
 } // namespace

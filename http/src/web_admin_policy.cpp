@@ -277,6 +277,10 @@ void PostDkimKeygen(Ctx &ctx) {
 		BadRequest(ctx, err);
 		return;
 	}
+	AideLog(ctx, "DKIM key generated",
+	        "A new signing key was generated. Publish the DNS record before relying on it.\n\nDomain: " +
+	            ctx.req.Form("domain") + "\nSelector: " + ctx.req.Form("selector") +
+	            "\nKey size: " + std::to_string(bits) + " bits");
 	RedirectTo(ctx, "/admin/dkim", "keygen");
 }
 

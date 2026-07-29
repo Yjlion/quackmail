@@ -314,6 +314,64 @@ void SecurityHeaders(Ctx &ctx, const std::string &csp) {
 	}
 }
 
+// Named themes. kCss above is a ten-variable custom-property sheet and every
+// rule below it reads those variables, so a theme is just a :root override — no
+// second stylesheet, no per-theme rules to keep in sync.
+//
+// "auto" is the sheet as written: light, following the OS at night. The rest
+// pin a single appearance, which is what someone who dislikes the automatic
+// switch actually wants.
+struct Theme {
+	const char *name;
+	const char *label;
+	const char *css; // empty = kCss unmodified
+};
+
+const Theme kThemes[] = {
+    {"auto", "Follow my system", ""},
+    {"light", "Always light",
+     ":root{--bg:#fbfbfa;--fg:#1c1b19;--muted:#6b6a66;--line:#e0dfdb;--panel:#fff;"
+     "--accent:#8a5a2b;--accent-fg:#fff;--warn:#8c2f00;--ok:#1f6b3a;color-scheme:light}"},
+    {"dark", "Always dark",
+     ":root{--bg:#17171a;--fg:#e9e8e4;--muted:#9d9c97;--line:#2e2e33;--panel:#1f1f23;"
+     "--accent:#c98d54;--accent-fg:#17171a;--warn:#ff9b7a;--ok:#7ecf9a;color-scheme:dark}"},
+    {"sepia", "Sepia",
+     ":root{--bg:#f4ecd8;--fg:#3b2f2a;--muted:#7a6a5d;--line:#ddd0b5;--panel:#fbf5e6;"
+     "--accent:#8a5a2b;--accent-fg:#fbf5e6;--warn:#9c3a12;--ok:#4a6b34;color-scheme:light}"},
+    {"slate", "Slate",
+     ":root{--bg:#1b2027;--fg:#dfe4ea;--muted:#93a1b0;--line:#2c3440;--panel:#222933;"
+     "--accent:#6fa8d6;--accent-fg:#131820;--warn:#e08a6a;--ok:#7fc8a0;color-scheme:dark}"},
+    {"amber", "Amber on black",
+     ":root{--bg:#0b0b0b;--fg:#ffb642;--muted:#a8752a;--line:#3a2a10;--panel:#121008;"
+     "--accent:#ffd08a;--accent-fg:#0b0b0b;--warn:#ff7043;--ok:#b8d94a;color-scheme:dark}"},
+};
+
+// The theme in force: the signed-in user's choice, else the site default.
+// "auto" (or anything unrecognized) leaves kCss alone.
+std::string ThemeCss(Ctx &ctx) {
+	std::string want;
+	if (ctx.Authed()) {
+		want = quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_theme");
+	}
+	if (want.empty() || want == "auto") {
+		want = ConfigStr(ctx.con, "qm_web_theme", "auto");
+	}
+	for (auto &t : kThemes) {
+		if (want == t.name) {
+			return t.css;
+		}
+	}
+	return "";
+}
+
+std::vector<std::pair<std::string, std::string>> ThemeOptions() {
+	std::vector<std::pair<std::string, std::string>> out;
+	for (auto &t : kThemes) {
+		out.push_back({t.name, t.label});
+	}
+	return out;
+}
+
 void Render(Ctx &ctx, const std::string &title, const std::string &body, int status) {
 	SecurityHeaders(ctx);
 
@@ -321,7 +379,10 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, int sta
 	std::string page = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">";
 	page += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
 	page += "<title>" + T(title.empty() ? node : title + " — " + node) + "</title>";
-	page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(kCss) + "</style></head><body>";
+	// The palette goes inside this same element: style-src is nonce-only with no
+	// 'unsafe-inline', so a second, unnonced <style> would be dropped silently.
+	page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(kCss) + RawHtml(ThemeCss(ctx)) +
+	        "</style></head><body>";
 
 	page += "<header class=\"top\"><span class=\"brand\">" + T(node) + "</span>";
 	page += NavFor(ctx);

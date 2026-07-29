@@ -4,6 +4,8 @@
 
 #include "duckdb/main/materialized_query_result.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 namespace qmweb {
 
@@ -15,6 +17,11 @@ bool ReAuth(Ctx &ctx) {
 	// The sharpest actions ask for the operator's own password again, so that a
 	// stolen session alone is not enough to mint credentials or rewrite config.
 	return quackmail::auth::Verify(ctx.con, ctx.username, ctx.req.Form("admin_password"));
+}
+
+void AideLog(Ctx &ctx, const std::string &subject, const std::string &detail) {
+	quackmail::citadel::PostAideMessage(ctx.con, subject,
+	                                    detail + "\n\nBy: " + ctx.username + " (web console)\n");
 }
 
 std::string ReAuthField() {
@@ -33,6 +40,7 @@ std::string AdminNav() {
 	out += Link("/admin/users", "Users", "btn sec");
 	out += Link("/admin/rooms", "Rooms", "btn sec");
 	out += Link("/admin/floors", "Floors", "btn sec");
+	out += Link("/admin/prefs", "Settings", "btn sec");
 	out += Link("/admin/config", "Config", "btn sec");
 	out += Link("/admin/domains", "Domains", "btn sec");
 	out += Link("/admin/aliases", "Aliases", "btn sec");
@@ -160,6 +168,7 @@ void PostUserAdd(Ctx &ctx) {
 		return;
 	}
 	quackmail::citadel::EnsureUserRooms(ctx.con, name);
+	AideLog(ctx, "New user: " + name, "An account was created from the web console.\n\nUser: " + name);
 	RedirectTo(ctx, "/admin/users", "created");
 }
 
@@ -186,6 +195,8 @@ void PostUserPasswd(Ctx &ctx) {
 	}
 	// Sessions minted under the old password must not outlive it.
 	quackmail::web::RevokeAllForUser(ctx.con, name);
+	AideLog(ctx, "Password reset: " + name,
+	        "The password was reset and every browser session for the account revoked.\n\nUser: " + name);
 	RedirectTo(ctx, "/admin/users", "saved");
 }
 
@@ -205,6 +216,7 @@ void PostUserRemove(Ctx &ctx) {
 		return;
 	}
 	quackmail::web::RevokeAllForUser(ctx.con, name);
+	AideLog(ctx, "User removed: " + name, "The account and its credentials were deleted.\n\nUser: " + name);
 	RedirectTo(ctx, "/admin/users", "deleted");
 }
 
@@ -220,6 +232,8 @@ void PostUserAxlevel(Ctx &ctx) {
 		BadRequest(ctx, err);
 		return;
 	}
+	AideLog(ctx, "Access level changed: " + name,
+	        "User: " + name + "\nNew access level: " + std::to_string(level));
 	RedirectTo(ctx, "/admin/users", "saved");
 }
 
@@ -326,6 +340,42 @@ void GetRooms(Ctx &ctx) {
 		body += "<p>" + Button("Save") + "</p>";
 		body += FormEnd();
 
+		// Reachability by e-mail is an RFC 4314 grant of `p` to "anyone", not a
+		// room flag — the same thing `SETACL <room> anyone p` does from any mail
+		// client. Only meaningful for a public room.
+		if (room.mailbox_owner == 0 &&
+		    !(room.qr_flags & (quackmail::citadel::QR_PRIVATE | quackmail::citadel::QR_PASSWORDED))) {
+			std::string addr = "room_" + room.display_name;
+			std::replace(addr.begin(), addr.end(), ' ', '_');
+			addr += "@" + quackmail::citadel::GetConfig(ctx.con, "c_fqdn", "");
+			bool open = quackmail::citadel::CanPost(ctx.con, "", room);
+
+			body += "<h2>E-mail</h2>";
+			body += FormStart(ctx, "/admin/rooms/mail");
+			body += Hidden("room_num", std::to_string(room.room_num));
+			body += Hidden("open", open ? "0" : "1");
+			body += "<p>" + Button(open ? "Stop accepting mail" : "Accept mail from anyone",
+			                       open ? "danger" : "") +
+			        "</p>";
+			body += "<p class=\"muted\">" +
+			        (open ? T("Anyone may post to this room by sending mail to " + addr + ".")
+			              : T("Turn this on and anyone may post to this room by sending mail to " + addr +
+			                  ".")) +
+			        " This grants the RFC 4314 <code>p</code> right to <code>anyone</code>, so a mail "
+			        "client can set it too with <code>SETACL</code>.</p>";
+			body += FormEnd();
+
+			auto acl = quackmail::citadel::ListRights(ctx.con, room);
+			if (!acl.empty()) {
+				body += "<div class=\"wrap\"><table><tr>" + Head("Identifier") + Head("Rights") +
+				        "</tr>";
+				for (auto &e : acl) {
+					body += "<tr>" + Cell(e.first) + Cell(e.second) + "</tr>";
+				}
+				body += "</table></div>";
+			}
+		}
+
 		if (room.room_num != quackmail::citadel::kLobbyRoom) {
 			body += FormStart(ctx, "/admin/rooms/kill");
 			body += Hidden("room_num", std::to_string(room.room_num));
@@ -362,6 +412,7 @@ void PostRoomAdd(Ctx &ctx) {
 		BadRequest(ctx, err);
 		return;
 	}
+	AideLog(ctx, "Room created: " + name, "A public room was created.\n\nRoom: " + name);
 	RedirectTo(ctx, "/admin/rooms", "created");
 }
 
@@ -388,12 +439,42 @@ void PostRoomEdit(Ctx &ctx) {
 	RedirectTo(ctx, "/admin/rooms", "saved");
 }
 
+// Open a room to (or close it from) public e-mail, by granting or removing the
+// RFC 4314 "anyone p" entry.
+void PostRoomMail(Ctx &ctx) {
+	Room room;
+	if (!quackmail::citadel::GetRoomByNum(ctx.con, ctx.FormInt("room_num", -1), room)) {
+		NotFound(ctx);
+		return;
+	}
+	if (room.mailbox_owner != 0 ||
+	    (room.qr_flags & (quackmail::citadel::QR_PRIVATE | quackmail::citadel::QR_PASSWORDED))) {
+		BadRequest(ctx, "Only a public room can be opened to e-mail.");
+		return;
+	}
+	bool open = ctx.req.Form("open") == "1";
+	std::string err;
+	if (!quackmail::citadel::SetRights(ctx.con, room, "anyone", open ? "lrsp" : "", err)) {
+		BadRequest(ctx, err);
+		return;
+	}
+	AideLog(ctx, "Room e-mail " + std::string(open ? "opened" : "closed") + ": " + room.display_name,
+	        open ? "The room now accepts mail from anyone (RFC 4314 \"anyone lrsp\")."
+	             : "The room no longer accepts mail from anyone.");
+	RedirectTo(ctx, "/admin/rooms?edit=" + std::to_string(room.room_num), "saved");
+}
+
 void PostRoomKill(Ctx &ctx) {
 	std::string err;
+	Room doomed;
+	bool named = quackmail::citadel::GetRoomByNum(ctx.con, ctx.FormInt("room_num", -1), doomed);
 	if (!quackmail::citadel::KillRoom(ctx.con, ctx.FormInt("room_num", -1), err)) {
 		BadRequest(ctx, err);
 		return;
 	}
+	AideLog(ctx, "Room deleted: " + (named ? doomed.display_name : std::string("#") +
+	                                             std::to_string(ctx.FormInt("room_num", -1))),
+	        "The room and its message pointers were removed.");
 	RedirectTo(ctx, "/admin/rooms", "deleted");
 }
 
@@ -435,6 +516,7 @@ void PostFloorAdd(Ctx &ctx) {
 		BadRequest(ctx, err);
 		return;
 	}
+	AideLog(ctx, "Floor created: " + ctx.req.Form("name"), "A new floor was added.");
 	RedirectTo(ctx, "/admin/floors", "created");
 }
 
@@ -454,6 +536,8 @@ void PostFloorKill(Ctx &ctx) {
 		BadRequest(ctx, err);
 		return;
 	}
+	AideLog(ctx, "Floor deleted", "Floor number " + std::to_string(ctx.FormInt("floor_num", -1)) +
+	                                  " was removed.");
 	RedirectTo(ctx, "/admin/floors", "deleted");
 }
 
@@ -484,7 +568,166 @@ const ConfigKey kConfigKeys[] = {
     {"qm_dmarc_enforce", "Honour the sender's DMARC policy (1/0)"},
     {"qm_rbl_reject", "Reject listed clients (1/0)"},
     {"qm_quarantine_room", "Quarantine folder"},
+    {"qm_web_theme", "Default colour theme"},
+    {"qm_room_mail", "Accept mail for room addresses (1/0)"},
+    {"qm_subaddress_sep", "Subaddress separator"},
+    {"qm_subaddress_create", "Create subaddressed folders on demand (1/0)"},
+    {"qm_aide_log", "Post system messages to the Aide room (1/0)"},
+    {"qm_aide_log_rejects", "Also post refused inbound mail (1/0)"},
 };
+
+// The same settings, typed and grouped. /admin/config stays as the raw escape
+// hatch — everything there is a text box, deliberately — but a checkbox cannot
+// be typo'd into a value that silently means "off", which for a setting like
+// qm_web_admin_require_tls is the difference between a gate and no gate.
+struct PrefField {
+	const char *name;
+	const char *label;
+	enum Kind { Text, Bool, Theme } kind;
+	const char *help;
+};
+
+struct PrefGroup {
+	const char *title;
+	const PrefField *fields;
+	size_t count;
+};
+
+const PrefField kIdentityFields[] = {
+    {"c_humannode", "Site name", PrefField::Text, "Shown in page titles and the BBS banner."},
+    {"c_nodename", "Node name", PrefField::Text, "Short name this server calls itself on the wire."},
+    {"c_fqdn", "Fully-qualified host name", PrefField::Text,
+     "The domain mail is accepted for, and what appears in Received: and Message-ID."},
+    {"c_bbs_city", "Location", PrefField::Text, ""},
+    {"c_sysadm", "System administrator", PrefField::Text, ""},
+};
+
+const PrefField kWebFields[] = {
+    {"qm_web_theme", "Default colour theme", PrefField::Theme,
+     "Used for signed-out visitors and anyone who has not chosen their own."},
+    {"qm_web_force_https", "Redirect HTTP to HTTPS", PrefField::Bool, ""},
+    {"qm_web_hsts", "Send HSTS over TLS", PrefField::Bool,
+     "Tells browsers to refuse plaintext for this host. Hard to undo once cached."},
+    {"qm_web_admin_enabled", "Enable this admin console", PrefField::Bool,
+     "Turning this off locks everyone out of /admin, including you."},
+    {"qm_web_admin_require_tls", "Admin console requires TLS", PrefField::Bool, ""},
+    {"qm_web_origins", "Allowed form origins", PrefField::Text, ""},
+    {"qm_web_trusted_proxies", "Trusted reverse proxies", PrefField::Text, "CIDR list."},
+};
+
+const PrefField kMailFields[] = {
+    {"qm_spf_reject", "Reject on SPF failure", PrefField::Bool, ""},
+    {"qm_dkim_reject", "Reject on DKIM failure", PrefField::Bool, ""},
+    {"qm_dmarc_enforce", "Honour the sender's DMARC policy", PrefField::Bool, ""},
+    {"qm_rbl_reject", "Reject listed clients", PrefField::Bool, ""},
+    {"qm_quarantine_room", "Quarantine folder", PrefField::Text,
+     "Where a DMARC quarantine files mail, overriding the user's own filter."},
+};
+
+const PrefField kRoomFields[] = {
+    {"qm_room_mail", "Accept mail for room addresses", PrefField::Bool,
+     "Enables the room_<name>@ lookup. A room is still only reachable once its "
+     "access list grants \"anyone\" the p right."},
+    {"qm_subaddress_sep", "Subaddress separator", PrefField::Text,
+     "user+detail@ files into the user's \"detail\" folder. Empty disables it."},
+    {"qm_subaddress_create", "Create subaddressed folders on demand", PrefField::Bool,
+     "Off by default: the sender chooses the folder name, so this lets anyone "
+     "create rooms in a user's account."},
+    {"qm_aide_log", "Post system messages to the Aide room", PrefField::Bool, ""},
+    {"qm_aide_log_rejects", "Also post refused inbound mail", PrefField::Bool,
+     "Noisy on a public MX. The audit log records refusals either way."},
+};
+
+const PrefGroup kPrefGroups[] = {
+    {"Identity", kIdentityFields, sizeof(kIdentityFields) / sizeof(kIdentityFields[0])},
+    {"Web interface", kWebFields, sizeof(kWebFields) / sizeof(kWebFields[0])},
+    {"Mail enforcement", kMailFields, sizeof(kMailFields) / sizeof(kMailFields[0])},
+    {"Rooms and logging", kRoomFields, sizeof(kRoomFields) / sizeof(kRoomFields[0])},
+};
+
+void GetPrefsPage(Ctx &ctx) {
+	std::string body = FormStart(ctx, "/admin/prefs");
+	for (auto &group : kPrefGroups) {
+		body += "<h2>" + T(group.title) + "</h2>";
+		for (size_t i = 0; i < group.count; i++) {
+			const PrefField &f = group.fields[i];
+			std::string value = ConfigStr(ctx.con, f.name, "");
+			switch (f.kind) {
+			case PrefField::Bool:
+				body += Checkbox(std::string("v_") + f.name, value == "1", f.label);
+				break;
+			case PrefField::Theme:
+				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
+				        Select(std::string("v_") + f.name, ThemeOptions(),
+				               value.empty() ? "auto" : value) +
+				        "</label>";
+				break;
+			case PrefField::Text:
+				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
+				        TextInput(std::string("v_") + f.name, value) + "</label>";
+				break;
+			}
+			if (f.help[0] != '\0') {
+				body += "<p class=\"muted\">" + T(f.help) + "</p>";
+			} else if (f.kind == PrefField::Bool) {
+				body += "<br>";
+			}
+		}
+	}
+	// Checkboxes only post when ticked, so the form has to say which ones it
+	// covers or unticking one would leave the old value in place.
+	for (auto &group : kPrefGroups) {
+		for (size_t i = 0; i < group.count; i++) {
+			if (group.fields[i].kind == PrefField::Bool) {
+				body += Hidden(std::string("seen_") + group.fields[i].name, "1");
+			}
+		}
+	}
+	body += RawHtml(ReAuthField());
+	body += "<p>" + Button("Save settings") + "</p>";
+	body += FormEnd();
+	body += "<p class=\"muted\">These are the same <code>citadel_config</code> keys "
+	        "<a href=\"/admin/config\">Config</a> and <code>quackcitadm.sh config set</code> "
+	        "edit, with the right control for each.</p>";
+	AdminPage(ctx, "Settings", body);
+}
+
+void PostPrefsPage(Ctx &ctx) {
+	if (!ReAuth(ctx)) {
+		ReAuthFailed(ctx);
+		return;
+	}
+	std::string changed;
+	for (auto &group : kPrefGroups) {
+		for (size_t i = 0; i < group.count; i++) {
+			const PrefField &f = group.fields[i];
+			std::string field = std::string("v_") + f.name;
+			std::string value;
+			if (f.kind == PrefField::Bool) {
+				if (ctx.req.Form(std::string("seen_") + f.name).empty()) {
+					continue;
+				}
+				value = ctx.req.Form(field).empty() ? "0" : "1";
+			} else {
+				if (!ctx.req.HasForm(field)) {
+					continue;
+				}
+				value = ctx.req.Form(field);
+			}
+			if (ConfigStr(ctx.con, f.name, "") != value) {
+				changed += std::string(f.name) + " = " + value + "\n";
+			}
+			Exec(ctx.con,
+			     "INSERT INTO citadel_config (name, value) VALUES ($1, $2) "
+			     "ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+			     {Value(f.name), Value(value)});
+		}
+	}
+	if (!changed.empty()) {
+		AideLog(ctx, "Configuration changed", "These settings were updated:\n\n" + changed);
+	}
+	RedirectTo(ctx, "/admin/prefs", "saved");
+}
 
 void GetConfig(Ctx &ctx) {
 	std::string body = FormStart(ctx, "/admin/config/set");
@@ -525,15 +768,23 @@ void PostConfigSet(Ctx &ctx) {
 		ReAuthFailed(ctx);
 		return;
 	}
+	std::string changed;
 	for (auto &key : kConfigKeys) {
 		std::string field = std::string("v_") + key.name;
 		if (!ctx.req.HasForm(field)) {
 			continue;
 		}
+		std::string value = ctx.req.Form(field);
+		if (quackmail::citadel::GetConfig(ctx.con, key.name) != value) {
+			changed += std::string(key.name) + " = " + value + "\n";
+		}
 		Exec(ctx.con,
 		     "INSERT INTO citadel_config (name, value) VALUES ($1, $2) "
 		     "ON CONFLICT (name) DO UPDATE SET value = excluded.value",
-		     {Value(key.name), Value(ctx.req.Form(field))});
+		     {Value(key.name), Value(value)});
+	}
+	if (!changed.empty()) {
+		AideLog(ctx, "Configuration changed", "These settings were updated:\n\n" + changed);
 	}
 	RedirectTo(ctx, "/admin/config", "saved");
 }
@@ -551,6 +802,9 @@ void RegisterAdminUserRoutes(std::vector<Route> &out) {
 	out.push_back({"GET", "/admin/rooms", Role::Aide, GetRooms});
 	out.push_back({"POST", "/admin/rooms/add", Role::Aide, PostRoomAdd});
 	out.push_back({"POST", "/admin/rooms/edit", Role::Aide, PostRoomEdit});
+	out.push_back({"GET", "/admin/prefs", Role::Aide, GetPrefsPage});
+	out.push_back({"POST", "/admin/prefs", Role::Aide, PostPrefsPage});
+	out.push_back({"POST", "/admin/rooms/mail", Role::Aide, PostRoomMail});
 	out.push_back({"POST", "/admin/rooms/kill", Role::Aide, PostRoomKill});
 	out.push_back({"GET", "/admin/floors", Role::Aide, GetFloors});
 	out.push_back({"POST", "/admin/floors/add", Role::Aide, PostFloorAdd});

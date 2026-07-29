@@ -49,6 +49,8 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/spf.cpp
         ${QUACKMAIL_CORE_DIR}/src/dkim.cpp
         ${QUACKMAIL_CORE_DIR}/src/dmarc.cpp
+        ${QUACKMAIL_CORE_DIR}/src/psl.cpp
+        ${QUACKMAIL_CORE_DIR}/src/psl_data.cpp
         ${QUACKMAIL_CORE_DIR}/src/rbl.cpp
         ${QUACKMAIL_CORE_DIR}/src/mailpolicy.cpp
     )

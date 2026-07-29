@@ -18,6 +18,7 @@
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/mime.hpp"
+#include "quackmail/psl.hpp"
 #include "quackmail/rbl.hpp"
 #include "quackmail/sieve.hpp"
 #include "quackmail/spf.hpp"
@@ -43,6 +44,8 @@ enum class UmbrellaKind {
 	MIME_PARTS,
 	CIT_ROOM_ADD,
 	CIT_FLOOR_ADD,
+	CIT_ROOM_ACL,
+	CIT_ROOM_ACL_SET,
 	// Site policy administration — what the deploy/quackcitadm.sh CLI drives.
 	DOMAIN_ADD,
 	DOMAIN_REMOVE,
@@ -130,6 +133,31 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 		int64_t num = quackmail::citadel::CreateRoom(con, bind.args[0], 0, 0, "", 0, err);
 		gstate->rows.push_back(
 		    {Value::BOOLEAN(num >= 0), Value(num >= 0 ? ("room " + std::to_string(num) + " created") : err)});
+		break;
+	}
+	case UmbrellaKind::CIT_ROOM_ACL: {
+		quackmail::citadel::Room room;
+		if (!quackmail::citadel::ResolveRoom(con, "", bind.args[0], room)) {
+			break; // no such public room: an empty listing
+		}
+		for (auto &e : quackmail::citadel::ListRights(con, room)) {
+			gstate->rows.push_back({Value(room.display_name), Value(e.first), Value(e.second)});
+		}
+		break;
+	}
+	case UmbrellaKind::CIT_ROOM_ACL_SET: {
+		quackmail::citadel::Room room;
+		std::string err;
+		if (!quackmail::citadel::ResolveRoom(con, "", bind.args[0], room)) {
+			gstate->rows.push_back({Value::BOOLEAN(false), Value("no such public room")});
+			break;
+		}
+		bool ok = quackmail::citadel::SetRights(con, room, bind.args[1], bind.args[2], err);
+		gstate->rows.push_back(
+		    {Value::BOOLEAN(ok),
+		     Value(ok ? (bind.args[2].empty() ? ("removed " + bind.args[1])
+		                                      : (bind.args[1] + " = " + bind.args[2]))
+		              : err)});
 		break;
 	}
 	case UmbrellaKind::CIT_FLOOR_ADD: {
@@ -540,6 +568,26 @@ unique_ptr<FunctionData> CitRoomAddBind(ClientContext &, TableFunctionBindInput 
 	return std::move(b);
 }
 
+unique_ptr<FunctionData> CitRoomAclBind(ClientContext &, TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::CIT_ROOM_ACL;
+	b->args = {input.inputs[0].ToString()};
+	names = {"room", "identifier", "rights"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> CitRoomAclSetBind(ClientContext &, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::CIT_ROOM_ACL_SET;
+	b->args = {input.inputs[0].ToString(), input.inputs[1].ToString(), input.inputs[2].ToString()};
+	names = {"ok", "note"};
+	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
 unique_ptr<FunctionData> CitFloorAddBind(ClientContext &, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<string> &names) {
 	auto b = make_uniq<RowsBindData>();
@@ -691,6 +739,23 @@ void SieveValidScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	});
 }
 
+// qm_psl_org_domain(domain) -> the DMARC organizational (registrable) domain,
+// from the bundled Public Suffix List. Scalar and touching no tables, so it is
+// assertable straight from sqllogictest with no DNS in the loop — which is the
+// only test coverage DMARC alignment can practically get offline.
+void PslOrgDomainScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::dmarc::OrganizationalDomain(in.GetString()));
+	});
+}
+
+// qm_psl_suffix(domain) -> just the public suffix ("co.uk" for "bbc.co.uk").
+void PslSuffixScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::psl::PublicSuffix(in.GetString()));
+	});
+}
+
 // The web front-end's pure codecs, exposed so they can be asserted from
 // sqllogictest with no socket in the loop. These are the functions an escaping
 // or decoding bug would turn into an XSS or a path traversal, so they are worth
@@ -746,6 +811,14 @@ void LoadInternal(ExtensionLoader &loader) {
 	    TableFunction("cit_room_add", {LogicalType::VARCHAR}, RowsFunc, CitRoomAddBind, RowsInit));
 	loader.RegisterFunction(
 	    TableFunction("cit_floor_add", {LogicalType::VARCHAR}, RowsFunc, CitFloorAddBind, RowsInit));
+
+	// Room access control (RFC 4314). Granting "anyone" the `p` right is what
+	// makes a room reachable at room_<name>@<fqdn>.
+	loader.RegisterFunction(
+	    TableFunction("cit_room_acl", {LogicalType::VARCHAR}, RowsFunc, CitRoomAclBind, RowsInit));
+	loader.RegisterFunction(TableFunction("cit_room_acl_set",
+	                                      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                      RowsFunc, CitRoomAclSetBind, RowsInit));
 
 	// MIME / message-format helpers (RFC 2045-2049, 822/2822/5322).
 	loader.RegisterFunction(
@@ -807,6 +880,10 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_dkim_verify", {V}, V, DkimVerifyScalar, DbBind));
 	// Parsing needs no database access.
 	loader.RegisterFunction(ScalarFunction("qm_sieve_valid", {V}, B, SieveValidScalar));
+
+	// Public Suffix List lookups (pure).
+	loader.RegisterFunction(ScalarFunction("qm_psl_org_domain", {V}, V, PslOrgDomainScalar));
+	loader.RegisterFunction(ScalarFunction("qm_psl_suffix", {V}, V, PslSuffixScalar));
 
 	// Web codecs (pure; see the scalars above).
 	loader.RegisterFunction(ScalarFunction("qm_url_encode", {V}, V, UrlEncodeScalar));

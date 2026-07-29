@@ -87,9 +87,11 @@ struct Recipient {
 	std::string envelope;                  // as given in RCPT TO
 	std::vector<std::string> destinations; // resolved local users
 	std::vector<std::string> forwards;     // off-site addresses an alias points at
+	std::vector<int64_t> rooms;            // public rooms addressed as room_<name>@
+	std::string detail;                    // RFC 5233 subaddress part, if any
 
 	bool Deliverable() const {
-		return !destinations.empty() || !forwards.empty();
+		return !destinations.empty() || !forwards.empty() || !rooms.empty();
 	}
 
 	Recipient() = default;
@@ -339,21 +341,54 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				continue;
 			}
 
+			// Resolution order, in full: a public room address, then aliases,
+			// then a plain local user, and only then the subaddress split. Room
+			// first so a domain catch-all cannot swallow room_*; subaddress last
+			// so an explicit alias for "bob+sales@" still outranks the generic
+			// split of the same address.
 			Recipient r;
 			r.envelope = rcpt;
-			auto expanded = policy::ExpandAlias(con, rcpt);
-			for (const auto &dest : expanded) {
-				if (citadel::IsLocalUser(con, dest)) {
-					r.destinations.push_back(dest);
-				} else {
-					// An alias may point off-site. Forwarding it is not open
-					// relay: the mail is addressed to a domain we host, and an
-					// admin configured this destination explicitly.
-					r.forwards.push_back(dest);
-				}
+
+			int64_t room = citadel::GetConfig(con, "qm_room_mail", "1") == "1"
+			                   ? citadel::ResolveMailRoom(con, util::LocalPart(rcpt))
+			                   : -1;
+			if (room >= 0) {
+				r.rooms.push_back(room);
 			}
-			if (expanded.empty() && citadel::IsLocalUser(con, rcpt)) {
-				r.destinations.push_back(rcpt);
+
+			auto expand_into = [&](const std::string &addr) {
+				auto expanded = policy::ExpandAlias(con, addr);
+				for (const auto &dest : expanded) {
+					if (citadel::IsLocalUser(con, dest)) {
+						r.destinations.push_back(dest);
+					} else {
+						// An alias may point off-site. Forwarding it is not open
+						// relay: the mail is addressed to a domain we host, and an
+						// admin configured this destination explicitly.
+						r.forwards.push_back(dest);
+					}
+				}
+				if (expanded.empty() && citadel::IsLocalUser(con, addr)) {
+					r.destinations.push_back(addr);
+				}
+				return !r.destinations.empty() || !r.forwards.empty();
+			};
+
+			if (r.rooms.empty() && !expand_into(rcpt)) {
+				// RFC 5233: "bob+receipts@example.com" is mail for bob, with
+				// "receipts" as a hint about where to file it.
+				std::string sep = citadel::GetConfig(con, "qm_subaddress_sep", "+");
+				std::string local = util::LocalPart(rcpt);
+				auto cut = sep.empty() ? std::string::npos : local.find(sep);
+				if (cut != std::string::npos) {
+					std::string base = local.substr(0, cut);
+					if (!domain.empty()) {
+						base += "@" + domain;
+					}
+					if (expand_into(base)) {
+						r.detail = local.substr(cut + sep.size());
+					}
+				}
 			}
 			if (!r.Deliverable()) {
 				stream.WriteLine("550 5.1.1 No such user here");
@@ -454,6 +489,8 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 			if (quarantine) {
 				opts.folder_override = enforcement.quarantine_room;
 			}
+			opts.subaddress_sep = citadel::GetConfig(con, "qm_subaddress_sep", "+");
+			opts.subaddress_create = citadel::GetConfig(con, "qm_subaddress_create", "0") == "1";
 
 			// LMTP owes one reply per envelope recipient, so each is delivered
 			// and reported separately. SMTP delivers them together.
@@ -489,9 +526,15 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 			for (const auto &r : s.rcpts) {
 				enqueue_forwards(r);
 				targets.insert(targets.end(), r.destinations.begin(), r.destinations.end());
+				opts.extra_rooms.insert(opts.extra_rooms.end(), r.rooms.begin(), r.rooms.end());
+				if (!r.detail.empty()) {
+					for (const auto &dest : r.destinations) {
+						opts.subaddress.push_back({dest, r.detail});
+					}
+				}
 			}
 			deliver::Outcome outcome;
-			bool ok = targets.empty()
+			bool ok = (targets.empty() && opts.extra_rooms.empty())
 			              ? true // everything was forwarded; nothing to store
 			              : deliver::LocalDeliver(con, s.mail_from, targets, stored, opts, outcome);
 
@@ -525,7 +568,10 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				                              : (!refused.empty() ? "reject"
 				                                                  : (quarantine ? "quarantine" : "accept"));
 				log_one(r.envelope, disposition,
-				        !ok ? outcome.err : (r.destinations.empty() ? "forwarded" : refused));
+				        !ok ? outcome.err
+				            : (!r.destinations.empty()
+				                   ? refused
+				                   : (!r.rooms.empty() ? std::string("delivered to room") : "forwarded")));
 
 				// LMTP owes one reply per envelope recipient; SMTP sends a
 				// single reply for the transaction, emitted after this loop.
@@ -536,6 +582,8 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 					stream.WriteLine("451 4.3.0 <" + r.envelope + "> local storage error");
 				} else if (!refused.empty()) {
 					stream.WriteLine("550 5.7.1 <" + r.envelope + "> " + refused);
+				} else if (!r.rooms.empty() && r.destinations.empty()) {
+					stream.WriteLine("250 2.0.0 <" + r.envelope + "> delivered to room");
 				} else if (r.destinations.empty()) {
 					stream.WriteLine("250 2.0.0 <" + r.envelope + "> forwarded");
 				} else {

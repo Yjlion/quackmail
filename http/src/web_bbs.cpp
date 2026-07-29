@@ -281,8 +281,8 @@ void GetBbsCompose(Ctx &ctx) {
 	if (!RequireUnlocked(ctx, room, RoomHref(room))) {
 		return;
 	}
-	if (room.qr_flags & quackmail::citadel::QR_READONLY) {
-		Forbidden(ctx, "This room does not accept new messages.");
+	if (!quackmail::citadel::CanPost(ctx.con, ctx.username, room)) {
+		Forbidden(ctx, "This room does not accept new messages from you.");
 		return;
 	}
 
@@ -443,12 +443,13 @@ void PostBbsDelete(Ctx &ctx) {
 
 void GetWho(Ctx &ctx) {
 	auto sessions = quackmail::citadel::ListSessions(ctx.con);
-	std::string body = "<div class=\"wrap\"><table><tr>" + Head("User") + Head("Room") + Head("Client") +
-	                   Head("Doing") + "</tr>";
+	std::string body = "<div class=\"wrap\"><table><tr>" + Head("User") + Head("Room") + Head("From") +
+	                   Head("Client") + Head("Doing") + "</tr>";
 	for (auto &s : sessions) {
 		body += "<tr>";
 		body += Cell(s.username.empty() ? "(signing in)" : s.username);
 		body += Cell(s.room);
+		body += Cell(s.host);
 		body += Cell(s.client);
 		body += Cell(s.last_cmd);
 		body += "</tr>";
