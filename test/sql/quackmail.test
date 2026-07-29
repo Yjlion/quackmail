@@ -273,3 +273,30 @@ query IIII
 SELECT distributed, recipients, digests, note FROM qm_listserv_run();
 ----
 0	0	0	ok
+
+# The fetch worker is the same shape over the same PeriodicWorker.
+query I
+SELECT note FROM qm_fetch_start(poll_secs => 5);
+----
+started
+
+query II
+SELECT worker, running FROM qm_fetch_status();
+----
+fetch	true
+
+query I
+SELECT note FROM qm_fetch_stop();
+----
+stopped
+
+# With no feeds configured, polling everything is zero rows rather than an error.
+query I
+SELECT count(*) FROM qm_fetch_run();
+----
+0
+
+query III
+SELECT feed, status, error FROM qm_fetch_run(feed => 'nosuchfeed');
+----
+nosuchfeed	error	no feed called 'nosuchfeed'

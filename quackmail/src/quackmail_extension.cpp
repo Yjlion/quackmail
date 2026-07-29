@@ -15,6 +15,8 @@
 #include "quackmail/dkim.hpp"
 #include "quackmail/dmarc.hpp"
 #include "quackmail/citadel_msg.hpp"
+#include "quackmail/feed.hpp"
+#include "quackmail/fetch.hpp"
 #include "quackmail/http.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
@@ -89,6 +91,14 @@ enum class UmbrellaKind {
 	LIST_APPROVE,
 	LIST_REJECT,
 	LIST_RENDER,
+	// Remote message pulls.
+	FEED_LIST,
+	FEED_ADD,
+	FEED_SET,
+	FEED_REMOVE,
+	FEED_TEST,
+	FEED_PARSE,
+	FEED_RENDER,
 };
 
 struct RowsBindData : public FunctionData {
@@ -657,6 +667,122 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 		gstate->rows.push_back({Value(quackmail::listserv::RenderForList(con, l, msg)), Value("ok")});
 		break;
 	}
+
+	// ---- remote message pulls -------------------------------------------
+	case UmbrellaKind::FEED_LIST: {
+		for (auto &f : quackmail::fetch::ListFeeds(con)) {
+			std::string target = f.target_user.empty() ? ("room " + std::to_string(f.target_room))
+			                                           : ("user " + f.target_user);
+			quackmail::citadel::Room room;
+			if (f.target_user.empty() && quackmail::citadel::GetRoomByNum(con, f.target_room, room)) {
+				target = room.display_name;
+			}
+			std::string source = f.kind == quackmail::fetch::Kind::Rss
+			                         ? f.url
+			                         : (f.username + "@" + f.host +
+			                            (f.port > 0 ? (":" + std::to_string(f.port)) : ""));
+			gstate->rows.push_back({Value(f.name), Value(quackmail::fetch::KindName(f.kind)),
+			                        Value::BOOLEAN(f.enabled), Value(source), Value(target),
+			                        Value::BIGINT(f.interval_secs), Value::BIGINT(f.last_run_at),
+			                        Value(f.last_status), Value(f.last_error),
+			                        Value::BIGINT(f.messages_pulled)});
+		}
+		break;
+	}
+	case UmbrellaKind::FEED_ADD: {
+		// (name, kind, source, target). `source` is a URL for rss and
+		// user:password@host[:port] for a mailbox; `target` is a room name, or
+		// "user:<name>" to route through that user's Sieve script instead.
+		quackmail::fetch::Feed f;
+		std::string err;
+		f.name = bind.args[0];
+		f.kind = quackmail::fetch::ParseKind(bind.args[1]);
+		std::string source = bind.args[2];
+		if (f.kind == quackmail::fetch::Kind::Rss) {
+			f.url = source;
+		} else {
+			auto at = source.rfind('@');
+			std::string creds = at == std::string::npos ? "" : source.substr(0, at);
+			std::string hostpart = at == std::string::npos ? source : source.substr(at + 1);
+			auto colon = creds.find(':');
+			f.username = colon == std::string::npos ? creds : creds.substr(0, colon);
+			f.password = colon == std::string::npos ? "" : creds.substr(colon + 1);
+			auto pcolon = hostpart.rfind(':');
+			if (pcolon != std::string::npos) {
+				f.host = hostpart.substr(0, pcolon);
+				f.port = std::atoll(hostpart.c_str() + pcolon + 1);
+			} else {
+				f.host = hostpart;
+			}
+		}
+		std::string target = bind.args[3];
+		if (target.compare(0, 5, "user:") == 0) {
+			f.target_user = target.substr(5);
+		} else {
+			quackmail::citadel::Room room;
+			if (!quackmail::citadel::ResolveRoom(con, "", target, room)) {
+				gstate->rows.push_back({Value::BOOLEAN(false), Value("no such public room")});
+				break;
+			}
+			f.target_room = room.room_num;
+		}
+		bool ok = quackmail::fetch::SetFeed(con, f, err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "feed added" : err)});
+		break;
+	}
+	case UmbrellaKind::FEED_SET: {
+		std::string err;
+		bool ok = quackmail::fetch::SetField(con, bind.args[0], bind.args[1], bind.args[2], err);
+		// The password is never echoed back, here or on the web page.
+		std::string shown = quackmail::util::Lower(bind.args[1]) == "password" ? "********" : bind.args[2];
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? (bind.args[1] + " = " + shown) : err)});
+		break;
+	}
+	case UmbrellaKind::FEED_REMOVE: {
+		std::string err;
+		bool ok = quackmail::fetch::RemoveFeed(con, bind.args[0], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "feed removed" : err)});
+		break;
+	}
+	case UmbrellaKind::FEED_TEST: {
+		std::string info, err;
+		bool ok = quackmail::fetch::TestFeed(con, bind.args[0], info, err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? info : err)});
+		break;
+	}
+	case UmbrellaKind::FEED_PARSE: {
+		// A pure parse of a feed document. Offline, no network: this is what
+		// makes every shape of RSS/Atom assertable from sqllogictest.
+		quackmail::feed::Feed parsed;
+		if (!quackmail::feed::Parse(bind.args[0], parsed)) {
+			break; // not a feed: an empty listing
+		}
+		for (auto &it : parsed.items) {
+			gstate->rows.push_back({Value(parsed.title), Value(it.guid), Value(it.title), Value(it.link),
+			                        Value(it.author), Value::BIGINT(it.published),
+			                        Value::BOOLEAN(it.html),
+			                        Value(it.content.empty() ? it.summary : it.content)});
+		}
+		break;
+	}
+	case UmbrellaKind::FEED_RENDER: {
+		// The message one feed item becomes, again with no network involved.
+		quackmail::feed::Feed parsed;
+		if (!quackmail::feed::Parse(bind.args[0], parsed) || parsed.items.empty()) {
+			gstate->rows.push_back({Value(LogicalType::VARCHAR), Value("not a feed, or it has no items")});
+			break;
+		}
+		int64_t idx = std::atoll(bind.args[1].c_str());
+		if (idx < 0 || idx >= (int64_t)parsed.items.size()) {
+			gstate->rows.push_back({Value(LogicalType::VARCHAR), Value("no item at that index")});
+			break;
+		}
+		std::string fqdn = quackmail::citadel::GetConfig(con, "c_fqdn", "localhost");
+		gstate->rows.push_back(
+		    {Value(quackmail::feed::ToRfc822(parsed, parsed.items[(size_t)idx], "testfeed", fqdn, "", "")),
+		     Value("ok")});
+		break;
+	}
 	}
 	return std::move(gstate);
 }
@@ -1150,6 +1276,26 @@ void LoadInternal(ExtensionLoader &loader) {
 	RegisterPolicyFn(loader, "qm_list_approve", UmbrellaKind::LIST_APPROVE, {I}, kOkNote, kOkNoteTypes);
 	RegisterPolicyFn(loader, "qm_list_reject", UmbrellaKind::LIST_REJECT, {I}, kOkNote, kOkNoteTypes);
 	RegisterPolicyFn(loader, "qm_list_render", UmbrellaKind::LIST_RENDER, {V, I}, {"message", "note"},
+	                 {V, V});
+
+	// Remote message pulls: POP3/IMAP mailboxes and RSS/Atom feeds, posted into
+	// a room. Polling itself is the qm_fetch worker in quackmail_spool.
+	RegisterPolicyFn(loader, "qm_feeds", UmbrellaKind::FEED_LIST, {},
+	                 {"name", "kind", "enabled", "source", "target", "interval_secs", "last_run_at",
+	                  "last_status", "last_error", "messages_pulled"},
+	                 {V, V, B, V, V, I, I, V, V, I});
+	RegisterPolicyFn(loader, "qm_feed_add", UmbrellaKind::FEED_ADD, {V, V, V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_feed_set", UmbrellaKind::FEED_SET, {V, V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_feed_remove", UmbrellaKind::FEED_REMOVE, {V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_feed_test", UmbrellaKind::FEED_TEST, {V}, kOkNote, kOkNoteTypes);
+
+	// Pure, offline: parse a feed document and render one of its items. These
+	// are what let every shape of RSS/Atom be asserted with no network in the
+	// loop, the same way qm_dkim_verify works against locally stored keys.
+	RegisterPolicyFn(loader, "qm_feed_parse", UmbrellaKind::FEED_PARSE, {V},
+	                 {"feed_title", "guid", "title", "link", "author", "published", "html", "body"},
+	                 {V, V, V, V, V, I, B, V});
+	RegisterPolicyFn(loader, "qm_feed_render", UmbrellaKind::FEED_RENDER, {V, I}, {"message", "note"},
 	                 {V, V});
 }
 

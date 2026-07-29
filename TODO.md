@@ -5,12 +5,32 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-- [ ] **Pull messages from a POP3/IMAP/RSS source into a room.** The tree has
-      POP3/IMAP/HTTP *servers* and no clients, so those are new core code, plus
-      an RSS/Atom parser over the existing `xmlstream` tokenizer. Lands as a
-      second worker in `quackmail_spool`, beside the listserv one.
+Nothing in flight. Next work comes off the backlog below.
 
 ## Shipped
+
+- [x] **Pull messages in from POP3, IMAP and RSS** (`qm_fetch` in
+      `quackmail_spool`, `core/src/fetch.cpp`)
+  - [x] the tree spoke all three protocols only as a server, so the clients are
+        new: `mail_client.cpp` (POP3 `UIDL`/`RETR`/`DELE`; IMAP `UID SEARCH` /
+        `UID FETCH BODY.PEEK[]` with literal handling and `UIDVALIDITY`),
+        `http_client.cpp`, `feed.cpp`
+  - [x] the HTTP client is separate from `core/http.cpp` on purpose: that one
+        refuses chunked transfer encoding, which is right for a server and fatal
+        for a client, because feed servers chunk
+  - [x] RSS 2.0 / RDF / Atom over the `xmlstream` tokenizer already in core for
+        XMPP — which gained CDATA support, without which the tag scanner stops
+        at the first `>` inside a feed's HTML payload
+  - [x] `quackmail_feed_seen` (POP3 UIDLs, IMAP `<uidvalidity>.<uid>`, RSS
+        guids) makes a poll idempotent; ETag/If-Modified-Since turn an unchanged
+        feed into a 304 with no body
+  - [x] messages are left on the server by default, and one dead source records
+        its error on its own row instead of stopping the others
+  - [x] `qm_feed_*` admin functions, `quackcitadm.sh feed`, `/admin/feeds`
+  - [x] `feed::Parse` is a pure function, so `test/sql/feed.test` pins down
+        every shape of feed offline; `test_fetch.py` points the new clients at
+        QuackCit's **own** POP3 and IMAP listeners, so there is no fixture
+        server to drift and any client/server disagreement surfaces there
 
 - [x] **Mailing list manager** (`quackmail_spool`, `core/src/listserv.cpp`)
   - [x] a list *is* a room: `citadel_lists` / `citadel_list_subs` /

@@ -1,6 +1,7 @@
 #include "quackmail/mail_store.hpp"
 
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/fetch.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/websession.hpp"
@@ -88,9 +89,10 @@ void EnsureSchema(Connection &con) {
 	// citadel_config.
 	policy::EnsureSchema(con);
 
-	// Mailing lists over rooms. Must follow the Citadel schema, which owns the
-	// rooms the list rows point at.
+	// Mailing lists over rooms, and remote message pulls into them. Both must
+	// follow the Citadel schema, which owns the rooms their rows point at.
 	listserv::EnsureSchema(con);
+	fetch::EnsureSchema(con);
 
 	// Browser sessions for the HTTP front-end. Created here rather than in the
 	// http module so the admin CLI can list and revoke them without it loaded.

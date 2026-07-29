@@ -92,6 +92,23 @@ bool Tokenizer::Next(Event &out) {
 		return false;
 	}
 
+	// A CDATA section is character data with no escaping inside it. RSS and
+	// Atom wrap HTML payloads in one constantly, and without this the generic
+	// tag scan below would stop at the first '>' *inside* that HTML and produce
+	// nonsense. Emitted verbatim: the whole point of CDATA is that its contents
+	// are not entity-decoded.
+	if (buf_.compare(pos_, 9, "<![CDATA[") == 0) {
+		size_t end = buf_.find("]]>", pos_ + 9);
+		if (end == std::string::npos) {
+			return false; // not complete yet
+		}
+		out = Event();
+		out.kind = Event::TEXT;
+		out.text = buf_.substr(pos_ + 9, end - pos_ - 9);
+		pos_ = end + 3;
+		return true;
+	}
+
 	if (buf_[pos_] != '<') {
 		size_t lt = buf_.find('<', pos_);
 		// Without a following '<' the text may still be incomplete; wait unless
