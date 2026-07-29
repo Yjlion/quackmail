@@ -1,0 +1,234 @@
+/* QuackCit web interface — the component sheet.
+ *
+ * The palette, the reset and the layout skeleton are NOT here: they are inlined
+ * into every page as kCriticalCss (http/src/web_chrome.cpp) so a page still
+ * reads if this file is unreachable, and so there is no flash of unstyled
+ * content while it loads. Everything below is a component, and every component
+ * reads the custom properties rather than naming a colour — that is what lets a
+ * theme be a six-line :root override instead of a second stylesheet.
+ *
+ * Served from /static/qc.<hash>.css, immutable and cached forever; the hash
+ * changes when this file does. Edit it, run tools/gen_assets.py, commit both.
+ */
+
+/* ---- links and headings ------------------------------------------------ */
+
+a { color: var(--accent); }
+a:hover { text-decoration: none; }
+
+h1 { font-size: 1.35rem; margin: .2rem 0 1rem; }
+h2 { font-size: 1.05rem; margin: 1.6rem 0 .6rem; }
+h3 { font-size: .95rem; margin: 1.2rem 0 .4rem; }
+
+code, pre { font-family: var(--mono); font-size: .92em; }
+
+/* A visible focus ring on keyboard navigation only. Without this the sidebar is
+   unusable without a mouse, which for a BBS is exactly the wrong audience to
+   lock out. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.skip {
+  position: absolute; left: -100vw; top: 0; z-index: 10;
+  padding: var(--s2) var(--s3); background: var(--panel); border: 1px solid var(--accent);
+}
+.skip:focus { left: var(--s2); top: var(--s2); }
+
+/* ---- header ------------------------------------------------------------ */
+
+header.top .brand { font-weight: 700; letter-spacing: .02em; }
+header.top .who {
+  margin-left: auto; color: var(--muted); font-size: .9em;
+  display: flex; gap: var(--s2); align-items: baseline;
+}
+
+/* The menu button is a <label> for a hidden checkbox: the sidebar collapses on
+   a phone with no script at all. */
+.navbtn {
+  display: none; cursor: pointer; font-size: 1.3rem; line-height: 1;
+  padding: 0 var(--s2) 0 0; user-select: none;
+}
+
+/* ---- sidebar ----------------------------------------------------------- */
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  padding: var(--s3) 0 var(--s5);
+  overflow-y: auto;
+}
+.sidebar .group { margin-bottom: var(--s3); }
+.sidebar .group > .label {
+  display: block; padding: var(--s1) var(--s4);
+  font-size: .72em; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); font-weight: 600;
+}
+.sidebar a {
+  display: flex; justify-content: space-between; gap: var(--s2);
+  padding: var(--s1) var(--s4);
+  text-decoration: none; color: inherit;
+  border-left: 2px solid transparent;
+}
+.sidebar a:hover { background: var(--bg); }
+.sidebar a[aria-current="page"] {
+  border-left-color: var(--accent); color: var(--accent); font-weight: 600;
+}
+/* The unread count rides along on the right of a room or folder link. */
+.sidebar .count {
+  color: var(--muted); font-size: .85em; font-variant-numeric: tabular-nums;
+}
+.sidebar a[aria-current="page"] .count { color: inherit; }
+
+/* ---- banners ----------------------------------------------------------- */
+
+.flash, .warnbar {
+  padding: var(--s2) var(--s3); background: var(--panel);
+  border-left: 3px solid var(--ok); margin-bottom: var(--s3);
+}
+.warnbar { border-left-color: var(--warn); font-size: .92em; }
+.flash.err { border-left-color: var(--warn); }
+.muted { color: var(--muted); }
+
+/* ---- tables ------------------------------------------------------------ */
+
+table { width: 100%; border-collapse: collapse; margin: var(--s2) 0 var(--s3); }
+th, td {
+  text-align: left; padding: .42rem .55rem;
+  border-bottom: 1px solid var(--line); vertical-align: top;
+}
+th {
+  font-size: .78em; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); font-weight: 600;
+  /* Sticky headers: a 2000-row audit log is unreadable without them. */
+  position: sticky; top: 0; background: var(--bg); z-index: 1;
+}
+tr.unread td { font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover td { background: var(--panel); }
+.wrap { overflow-x: auto; }
+
+/* Long message lists: let the browser skip laying out what is offscreen. */
+.longlist { content-visibility: auto; contain-intrinsic-size: auto 800px; }
+
+/* ---- forms ------------------------------------------------------------- */
+
+form { margin: var(--s2) 0; }
+form.inline { display: inline; }
+
+input[type=text], input[type=password], input[type=number], input[type=email],
+input[type=date], input[type=time], input[type=search], textarea, select {
+  font: inherit; padding: .4rem .5rem;
+  border: 1px solid var(--line); border-radius: var(--r1);
+  background: var(--bg); color: var(--fg); max-width: 100%;
+}
+textarea { width: 100%; font-family: var(--mono); font-size: .92em; }
+
+label.field { display: block; margin: .55rem 0; }
+label.field span {
+  display: block; font-size: .8em; color: var(--muted); margin-bottom: .15rem;
+}
+label.chk {
+  display: inline-flex; gap: .35rem; align-items: center;
+  margin: .2rem var(--s3) .2rem 0;
+}
+
+.btn {
+  font: inherit; padding: .4rem .8rem;
+  border: 1px solid var(--accent); border-radius: var(--r1);
+  background: var(--accent); color: var(--accent-fg); cursor: pointer;
+  text-decoration: none; display: inline-block;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn.sec { background: transparent; color: var(--accent); }
+.btn.danger { background: transparent; color: var(--warn); border-color: var(--warn); }
+
+.actions {
+  display: flex; flex-wrap: wrap; gap: var(--s2);
+  align-items: center; margin: var(--s3) 0;
+}
+
+/* The admin console's second-level nav: one row of buttons per group, with the
+   group name as a quiet label to its left where there is room for it. */
+.adminnav {
+  border: 1px solid var(--line); border-radius: var(--r1);
+  background: var(--panel); padding: var(--s2) var(--s3); margin-bottom: var(--s4);
+}
+.adminnav .group {
+  display: grid; grid-template-columns: 9rem 1fr;
+  align-items: baseline; gap: var(--s2);
+  padding: var(--s1) 0; border-bottom: 1px solid var(--line);
+}
+.adminnav .group:last-child { border-bottom: 0; }
+.adminnav .label {
+  font-size: .72em; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); font-weight: 600;
+}
+.adminnav .actions { margin: 0; gap: var(--s1) var(--s2); }
+.adminnav .btn { padding: .2rem .55rem; font-size: .9em; }
+
+@media (max-width: 40rem) {
+  .adminnav .group { grid-template-columns: 1fr; }
+}
+
+/* ---- messages ---------------------------------------------------------- */
+
+pre.body {
+  white-space: pre-wrap; word-wrap: break-word;
+  background: var(--panel); padding: var(--s3);
+  border: 1px solid var(--line); border-radius: var(--r1);
+}
+iframe.htmlpart {
+  width: 100%; min-height: 24rem;
+  border: 1px solid var(--line); border-radius: var(--r1); background: #fff;
+}
+.msghead {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r1); padding: .7rem var(--s3); margin-bottom: var(--s3);
+}
+.msghead dl {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: .15rem .7rem; margin: 0;
+}
+.msghead dt { color: var(--muted); font-size: .85em; }
+.msghead dd { margin: 0; }
+
+/* ---- misc -------------------------------------------------------------- */
+
+.roomgrid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: .4rem .9rem;
+}
+.pager { display: flex; gap: var(--s3); align-items: baseline; margin: var(--s2) 0; }
+.login { max-width: 22rem; margin: 3rem auto; }
+
+/* Cards, for the admin overview and the Sieve rule builder. */
+.cards {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: var(--s3);
+}
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r1); padding: var(--s3);
+}
+.card h3 { margin-top: 0; }
+
+/* ---- responsive -------------------------------------------------------- */
+
+@media (max-width: 52rem) {
+  .navbtn { display: inline-block; }
+  .app { grid-template-columns: 1fr; }
+  .sidebar {
+    display: none;
+    border-right: 0; border-bottom: 1px solid var(--line);
+  }
+  /* The toggle sits before .app in source order, so a sibling selector reaches
+     the sidebar without any script. */
+  .navtoggle:checked ~ .app .sidebar { display: block; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

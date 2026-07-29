@@ -36,6 +36,17 @@ public:
 	bool StartTlsEnabled();
 	SSL_CTX *TlsCtx();               // for handlers performing STARTTLS
 
+	// Refuse new connections while this many are already open; 0 (the default)
+	// means unlimited, so every protocol that does not set it is unchanged.
+	//
+	// Only HTTP needs this today, and it needs it because it is the only
+	// protocol here that keeps a connection alive across requests: with one
+	// thread per connection, a browser opening six sockets per tab and holding
+	// them idle is a thread-exhaustion vector that `Connection: close` used to
+	// make impossible. Persistence and this cap belong together.
+	void SetMaxConnections(int n);
+	int MaxConnections();
+
 private:
 	void AcceptLoop();
 
@@ -45,6 +56,7 @@ private:
 	std::atomic<bool> stop_ {false};
 	std::atomic<uint64_t> conn_count_ {0};
 	std::atomic<int> active_conns_ {0};
+	std::atomic<int> max_conns_ {0};
 
 	int listen_fd_ = -1;
 	std::string host_;

@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_assets.hpp"
 
 #include "quackmail/mime.hpp"
 
@@ -241,82 +242,92 @@ std::string FlashText(const std::string &slug) {
 
 namespace {
 
-// One stylesheet, inlined. There are no external assets at all: no CDN, no
-// build step, and one request per page — which is also why the connection is
-// closed after every response.
-const char *kCss = R"CSS(
+// The critical stylesheet, inlined into every page. Everything else lives in
+// http/assets/qc.css and is served from /static.
+//
+// The split is not arbitrary. What stays here is exactly what a page cannot be
+// read without: the ten custom properties (which every rule in the external
+// sheet reads), the reset, and the layout skeleton. That means a page renders
+// legibly on the very first packet — no flash of unstyled content — and it
+// stays legible if /static is unreachable behind a misconfigured proxy. It is
+// also why the split has to be "critical inline plus the rest external" rather
+// than "all external": the per-user theme below is a :root override that cannot
+// be a cacheable asset, and it has to arrive with the page.
+const char *kCriticalCss = R"CSS(
 :root { color-scheme: light dark;
   --bg:#fbfbfa; --fg:#1c1b19; --muted:#6b6a66; --line:#e0dfdb;
-  --panel:#ffffff; --accent:#8a5a2b; --accent-fg:#ffffff; --warn:#8c2f00; --ok:#1f6b3a; }
+  --panel:#ffffff; --accent:#8a5a2b; --accent-fg:#ffffff; --warn:#8c2f00; --ok:#1f6b3a;
+  --s1:.25rem; --s2:.5rem; --s3:.8rem; --s4:1.1rem; --s5:2rem; --r1:3px;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace; }
 @media (prefers-color-scheme: dark) { :root {
   --bg:#17171a; --fg:#e9e8e4; --muted:#9d9c97; --line:#2e2e33;
   --panel:#1f1f23; --accent:#c98d54; --accent-fg:#17171a; --warn:#ff9b7a; --ok:#7ecf9a; } }
 * { box-sizing:border-box; }
-body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif; }
-a { color:var(--accent); }
-header.top { display:flex; flex-wrap:wrap; align-items:baseline; gap:.75rem 1.25rem;
-  padding:.7rem 1.1rem; border-bottom:1px solid var(--line); background:var(--panel); }
-header.top .brand { font-weight:700; letter-spacing:.02em; }
-header.top nav { display:flex; flex-wrap:wrap; gap:.9rem; }
-header.top nav a { text-decoration:none; }
-header.top .who { margin-left:auto; color:var(--muted); font-size:.9em; display:flex; gap:.6rem; align-items:baseline; }
-main { max-width:62rem; margin:0 auto; padding:1.2rem 1.1rem 4rem; }
-h1 { font-size:1.35rem; margin:.2rem 0 1rem; }
-h2 { font-size:1.05rem; margin:1.6rem 0 .6rem; }
-.flash { padding:.6rem .8rem; border-left:3px solid var(--ok); background:var(--panel); margin-bottom:1rem; }
-.err { border-left-color:var(--warn); }
-.muted { color:var(--muted); }
-.warnbar { padding:.5rem .8rem; background:var(--panel); border-left:3px solid var(--warn); margin-bottom:1rem; font-size:.92em; }
-table { width:100%; border-collapse:collapse; margin:.4rem 0 1rem; }
-th,td { text-align:left; padding:.42rem .55rem; border-bottom:1px solid var(--line); vertical-align:top; }
-th { font-size:.78em; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:600; }
-tr.unread td { font-weight:600; }
-td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
-.wrap { overflow-x:auto; }
-form { margin:.5rem 0; }
-form.inline { display:inline; }
-input[type=text],input[type=password],input[type=number],input[type=email],textarea,select {
-  font:inherit; padding:.4rem .5rem; border:1px solid var(--line); border-radius:3px;
-  background:var(--bg); color:var(--fg); max-width:100%; }
-textarea { width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em; }
-label.field { display:block; margin:.55rem 0; }
-label.field span { display:block; font-size:.8em; color:var(--muted); margin-bottom:.15rem; }
-label.chk { display:inline-flex; gap:.35rem; align-items:center; margin:.2rem 1rem .2rem 0; }
-.btn { font:inherit; padding:.4rem .8rem; border:1px solid var(--accent); border-radius:3px;
-  background:var(--accent); color:var(--accent-fg); cursor:pointer; }
-.btn.sec { background:transparent; color:var(--accent); }
-.btn.danger { background:transparent; color:var(--warn); border-color:var(--warn); }
-pre.body { white-space:pre-wrap; word-wrap:break-word; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:.92em; background:var(--panel); padding:.8rem; border:1px solid var(--line); border-radius:3px; }
-iframe.htmlpart { width:100%; min-height:24rem; border:1px solid var(--line); border-radius:3px; background:#fff; }
-.msghead { background:var(--panel); border:1px solid var(--line); border-radius:3px; padding:.7rem .8rem; margin-bottom:.8rem; }
-.msghead dl { display:grid; grid-template-columns:max-content 1fr; gap:.15rem .7rem; margin:0; }
-.msghead dt { color:var(--muted); font-size:.85em; }
-.msghead dd { margin:0; }
-.actions { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; margin:.8rem 0; }
-.roomgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(15rem,1fr)); gap:.4rem .9rem; }
-.pager { display:flex; gap:.8rem; align-items:baseline; margin:.6rem 0; }
-.login { max-width:22rem; margin:3rem auto; }
-code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.92em; }
+body { margin:0; background:var(--bg); color:var(--fg);
+  font:15px/1.55 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif; }
+.navtoggle { position:absolute; opacity:0; pointer-events:none; }
+.app { display:grid; grid-template-columns:15rem 1fr; grid-template-rows:auto 1fr;
+  min-height:100vh; }
+header.top { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:baseline;
+  gap:.75rem 1.25rem; padding:.7rem 1.1rem; border-bottom:1px solid var(--line);
+  background:var(--panel); }
+main { padding:1.2rem 1.1rem 4rem; min-width:0; }
+main > .inner { max-width:62rem; }
+body.wide main > .inner { max-width:none; }
 )CSS";
 
-std::string NavFor(const Ctx &ctx) {
+// The sidebar. Grouped, because a flat list stopped scaling somewhere around
+// the fifteenth page and this module now has roughly thirty.
+//
+// `active` marks the current item with aria-current, which is both the
+// accessible answer and the hook the stylesheet colours.
+std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	if (!ctx.Authed()) {
 		return std::string();
 	}
-	std::string nav = "<nav>";
-	nav += Link("/mail/", "Mail");
-	nav += Link("/bbs/", "Rooms");
-	nav += Link("/bbs/who", "Who");
-	nav += Link("/prefs", "Preferences");
+	std::string out = "<nav class=\"sidebar\" aria-label=\"Sections\">";
+
+	auto item = [&](const char *href, const char *label, const char *key) {
+		std::string extra = (active == key) ? " aria-current=\"page\"" : "";
+		out += "<a href=\"" + A(href) + "\"" + extra + "><span>" + T(label) + "</span></a>";
+	};
+	auto group = [&](const char *label) {
+		out += "<div class=\"group\"><span class=\"label\">" + T(label) + "</span>";
+	};
+	auto endgroup = [&]() { out += "</div>"; };
+
+	group("Mail");
+	item("/mail/", "Inbox", "mail");
+	item("/mail/compose", "Compose", "compose");
+	endgroup();
+
+	group("Rooms");
+	item("/bbs/", "All rooms", "bbs");
+	item("/bbs/who", "Who is online", "who");
+	endgroup();
+
+	group("You");
+	item("/prefs", "Preferences", "prefs");
+	item("/prefs/sieve", "Filters", "sieve");
+	item("/prefs/sessions", "Signed-in browsers", "sessions");
+	endgroup();
+
+	// Same gate as the router applies to every /admin route, so the link never
+	// points at a 403.
 	if (ctx.IsAide() && ConfigBool(ctx.con, "qm_web_admin_enabled", false)) {
-		nav += Link("/admin/", "Admin");
+		group("System");
+		item("/admin/", "Admin console", "admin");
+		endgroup();
 	}
-	nav += "</nav>";
-	return nav;
+
+	out += "</nav>";
+	return out;
 }
 
 } // namespace
+
+PageOpts::PageOpts() {
+}
 
 void SecurityHeaders(Ctx &ctx, const std::string &csp) {
 	// default-src 'none' plus a per-response nonce, rather than 'unsafe-inline'.
@@ -324,7 +335,16 @@ void SecurityHeaders(Ctx &ctx, const std::string &csp) {
 	// reflected-XSS bug being inert and being execution.
 	std::string policy = csp;
 	if (policy.empty()) {
-		policy = "default-src 'none'; script-src 'nonce-" + ctx.nonce + "'; style-src 'nonce-" + ctx.nonce +
+		// 'self' covers /static; the nonce covers the critical CSS and the theme
+		// override that have to arrive inline. In CSP3 the two coexist — a nonce
+		// does not suppress host sources, only 'strict-dynamic' does — so this
+		// is additive rather than a weakening.
+		//
+		// Note that the CSP for a *message* body (web_mail.cpp's HTML-part
+		// route) is passed in explicitly and must never gain 'self': that frame
+		// renders markup written by whoever sent the mail.
+		policy = "default-src 'none'; script-src 'self' 'nonce-" + ctx.nonce + "'; style-src 'self' 'nonce-" +
+		         ctx.nonce +
 		         "'; img-src 'self' data:; frame-src 'self'; form-action 'self'; "
 		         "frame-ancestors 'none'; base-uri 'none'";
 	}
@@ -398,25 +418,55 @@ std::vector<std::pair<std::string, std::string>> ThemeOptions() {
 }
 
 void Render(Ctx &ctx, const std::string &title, const std::string &body, int status) {
+	Render(ctx, title, body, PageOpts(), status);
+}
+
+void Render(Ctx &ctx, const std::string &title, const std::string &body, const PageOpts &opts,
+            int status) {
 	SecurityHeaders(ctx);
 
 	std::string node = ConfigStr(ctx.con, "c_humannode", "QuackCit");
 	std::string page = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">";
 	page += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
 	page += "<title>" + T(title.empty() ? node : title + " — " + node) + "</title>";
-	// The palette goes inside this same element: style-src is nonce-only with no
-	// 'unsafe-inline', so a second, unnonced <style> would be dropped silently.
-	page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(kCss) + RawHtml(ThemeCss(ctx)) +
-	        "</style></head><body>";
+	// Order matters twice over. The external sheet comes first so the inline
+	// block below can override it; and the theme goes in the *same* nonced
+	// element as the critical CSS, because style-src has no 'unsafe-inline' and
+	// a second, unnonced <style> would be dropped in silence.
+	page += "<link rel=\"stylesheet\" href=\"" + A(AssetUrl("qc.css")) + "\">";
+	page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(kCriticalCss) + RawHtml(ThemeCss(ctx)) +
+	        "</style>";
+	page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl("qc.js")) + "\" defer></script>";
+	page += "</head>";
 
-	page += "<header class=\"top\"><span class=\"brand\">" + T(node) + "</span>";
-	page += NavFor(ctx);
+	std::string body_class;
+	if (opts.wide) {
+		body_class += " wide";
+	}
+	if (opts.view >= 0) {
+		body_class += " view-" + std::to_string(opts.view);
+	}
+	page += "<body" + (body_class.empty() ? "" : " class=\"" + A(body_class.substr(1)) + "\"") + ">";
+	page += "<a class=\"skip\" href=\"#main\">Skip to content</a>";
+	// The checkbox precedes .app so the stylesheet can reach the sidebar with a
+	// sibling selector: the mobile menu needs no script at all.
+	page += "<input type=\"checkbox\" id=\"navtoggle\" class=\"navtoggle\">";
+	page += "<div class=\"app\">";
+
+	page += "<header class=\"top\">";
+	if (ctx.Authed()) {
+		page += "<label for=\"navtoggle\" class=\"navbtn\" title=\"Sections\">&#9776;</label>";
+	}
+	page += "<span class=\"brand\">" + T(node) + "</span>";
 	if (ctx.Authed()) {
 		page += "<span class=\"who\">" + T(ctx.username);
 		page += FormStart(ctx, "/logout", "inline") + Button("Sign out", "sec") + FormEnd();
 		page += "</span>";
 	}
-	page += "</header><main>";
+	page += "</header>";
+
+	page += SidebarFor(ctx, opts.active);
+	page += "<main id=\"main\"><div class=\"inner\">";
 
 	// A plaintext session is a real risk worth naming on the page itself, not
 	// only in the docs.
@@ -435,8 +485,11 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, int sta
 	if (!title.empty()) {
 		page += "<h1>" + T(title) + "</h1>";
 	}
+	if (!opts.toolbar.empty()) {
+		page += RawHtml(opts.toolbar);
+	}
 	page += RawHtml(body);
-	page += "</main></body></html>";
+	page += "</div></main></div></body></html>";
 
 	ctx.resp.Html(page, status);
 }

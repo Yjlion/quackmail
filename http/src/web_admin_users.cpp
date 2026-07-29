@@ -34,31 +34,55 @@ void ReAuthFailed(Ctx &ctx) {
 	               "this server.");
 }
 
+// The admin console's own second-level nav.
+//
+// This was one strip of nineteen buttons, which is where a flat list stops
+// being navigation and becomes a wall. Grouping it by what an operator is
+// actually doing — managing people, shaping mail policy, watching delivery —
+// costs nothing and makes the console scannable.
 std::string AdminNav() {
-	std::string out = "<div class=\"actions\">";
-	out += Link("/admin/", "Overview", "btn sec");
-	out += Link("/admin/users", "Users", "btn sec");
-	out += Link("/admin/rooms", "Rooms", "btn sec");
-	out += Link("/admin/floors", "Floors", "btn sec");
-	out += Link("/admin/prefs", "Settings", "btn sec");
-	out += Link("/admin/config", "Config", "btn sec");
-	out += Link("/admin/domains", "Domains", "btn sec");
-	out += Link("/admin/aliases", "Aliases", "btn sec");
-	out += Link("/admin/acl", "Access rules", "btn sec");
-	out += Link("/admin/rbl", "Blocklists", "btn sec");
-	out += Link("/admin/dkim", "DKIM", "btn sec");
-	out += Link("/admin/ratelimits", "Quotas", "btn sec");
-	out += Link("/admin/lists", "Mailing lists", "btn sec");
-	out += Link("/admin/feeds", "Feeds", "btn sec");
-	out += Link("/admin/inbound", "Audit log", "btn sec");
-	out += Link("/admin/queue", "Mail queue", "btn sec");
-	out += Link("/admin/sieve", "Filters", "btn sec");
-	out += Link("/admin/websessions", "Web sessions", "btn sec");
+	struct Item {
+		const char *href;
+		const char *label;
+	};
+	struct Group {
+		const char *label;
+		std::vector<Item> items;
+	};
+	static const std::vector<Group> kGroups = {
+	    {"People",
+	     {{"/admin/users", "Users"}, {"/admin/websessions", "Web sessions"}, {"/admin/who", "Who is online"}}},
+	    {"Rooms", {{"/admin/rooms", "Rooms"}, {"/admin/floors", "Floors"}}},
+	    {"Mail policy",
+	     {{"/admin/domains", "Domains"},
+	      {"/admin/aliases", "Aliases"},
+	      {"/admin/acl", "Access rules"},
+	      {"/admin/rbl", "Blocklists"},
+	      {"/admin/dkim", "DKIM"},
+	      {"/admin/ratelimits", "Quotas"}}},
+	    {"Delivery",
+	     {{"/admin/queue", "Mail queue"}, {"/admin/inbound", "Audit log"}, {"/admin/sieve", "Filters"}}},
+	    {"Lists and feeds", {{"/admin/lists", "Mailing lists"}, {"/admin/feeds", "Feeds"}}},
+	    {"System", {{"/admin/", "Overview"}, {"/admin/prefs", "Settings"}, {"/admin/config", "Config"}}},
+	};
+
+	std::string out = "<div class=\"adminnav\">";
+	for (auto &g : kGroups) {
+		out += "<div class=\"group\"><span class=\"label\">" + T(g.label) + "</span>";
+		out += "<div class=\"actions\">";
+		for (auto &it : g.items) {
+			out += Link(it.href, it.label, "btn sec");
+		}
+		out += "</div></div>";
+	}
 	return out + "</div>";
 }
 
 void AdminPage(Ctx &ctx, const std::string &title, const std::string &body) {
-	Render(ctx, title, AdminNav() + body);
+	PageOpts opts;
+	opts.active = "admin";
+	opts.toolbar = AdminNav();
+	Render(ctx, title, body, opts);
 }
 
 namespace {

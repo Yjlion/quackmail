@@ -220,7 +220,10 @@ void GetMailIndex(Ctx &ctx) {
 	body += "</table></div>";
 	body += "<p class=\"muted\">These are ordinary Citadel rooms — the same messages are visible over "
 	        "IMAP, POP3 and the BBS.</p>";
-	Render(ctx, "Mail", body);
+	PageOpts opts;
+	opts.active = "mail";
+	opts.wide = true;
+	Render(ctx, "Mail", body, opts);
 }
 
 // ---- message parts -------------------------------------------------------
@@ -390,7 +393,9 @@ void GetCompose(Ctx &ctx) {
 	body += "<button class=\"btn sec\" name=\"draft\" value=\"1\">Save as draft</button> ";
 	body += Link("/mail/", "Cancel") + "</p>";
 	body += "</form>";
-	Render(ctx, "Write a message", body);
+	PageOpts opts;
+	opts.active = "compose";
+	Render(ctx, "Write a message", body, opts);
 }
 
 void PostSend(Ctx &ctx) {

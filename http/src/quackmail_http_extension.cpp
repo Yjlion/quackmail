@@ -7,11 +7,15 @@
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
+#include "quackmail/citadel_store.hpp"
 #include "quackmail/http.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/net.hpp"
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
+
+#include <chrono>
+#include <cstdlib>
 
 namespace duckdb {
 namespace {
@@ -37,38 +41,88 @@ void WriteEarlyError(net::ClientStream &stream, int status, bool head_only) {
 	http::WriteResponse(stream, resp, head_only);
 }
 
+// Serve requests until the peer stops asking or one of the limits says stop.
+//
+// The schema check and the DuckDB connection are per *connection*, not per
+// request, which is most of what makes serving a page's assets over one socket
+// cheaper than over five.
 void HandleHttp(DatabaseInstance &db, net::ClientStream &stream) {
 	Connection con(db);
 	store::EnsureSchema(con);
 
 	http::Limits limits;
-	http::Request req;
-	auto result = http::ReadRequest(stream, limits, req);
+	auto opened = std::chrono::steady_clock::now();
 
-	// A clean close with no request at all is the common case for port scans
-	// and for a browser opening a speculative connection; say nothing.
-	if (result == http::ReadResult::Eof) {
-		return;
-	}
-	bool head_only = req.method == "HEAD";
-	if (result != http::ReadResult::Ok) {
-		WriteEarlyError(stream, http::StatusForReadResult(result), head_only);
-		return;
-	}
-	if (req.method != "GET" && req.method != "HEAD" && req.method != "POST") {
-		WriteEarlyError(stream, 405, head_only);
-		return;
-	}
+	for (size_t served = 0; served < limits.max_requests_per_conn; served++) {
+		if (served > 0) {
+			auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+			               std::chrono::steady_clock::now() - opened)
+			               .count();
+			if (age > limits.conn_lifetime_ms) {
+				return;
+			}
+			// WaitReadable answers from the internal and OpenSSL buffers before
+			// it polls, so a pipelined request that already arrived is not lost
+			// to a poll() that would block waiting for the next packet.
+			if (!stream.WaitReadable(limits.idle_deadline_ms)) {
+				return;
+			}
+		}
 
-	http::Response resp;
-	qmweb::Dispatch(con, req, resp);
-	http::WriteResponse(stream, resp, head_only);
-	// The connection closes here, always: see WriteResponse.
+		http::Request req;
+		auto result = http::ReadRequest(stream, limits, req, served == 0);
+
+		// A clean close with no request at all is the common case for port
+		// scans, for a browser opening a speculative connection, and for the
+		// ordinary end of a keep-alive socket; say nothing.
+		if (result == http::ReadResult::Eof) {
+			return;
+		}
+		bool head_only = req.method == "HEAD";
+
+		// Every failure below ends the connection, and that is load-bearing
+		// rather than lazy. 413 and 411 answer *without* consuming the body the
+		// peer announced, so those bytes are still on the wire; reading them as
+		// the next request line is exactly the smuggling this codec refuses to
+		// allow chunked encoding in order to prevent. The same goes for a
+		// method we never read a body for.
+		if (result != http::ReadResult::Ok) {
+			WriteEarlyError(stream, http::StatusForReadResult(result), head_only);
+			return;
+		}
+		if (req.method != "GET" && req.method != "HEAD" && req.method != "POST") {
+			WriteEarlyError(stream, 405, head_only);
+			return;
+		}
+
+		// The last request the cap allows is answered, then closed — offering
+		// keep-alive and hanging up would leave the peer waiting on a socket we
+		// have already abandoned.
+		bool keep = (served + 1 < limits.max_requests_per_conn) && http::ShouldKeepAlive(req);
+
+		http::Response resp;
+		qmweb::Dispatch(con, req, resp);
+		if (!http::WriteResponse(stream, resp, head_only, keep) || !keep) {
+			return;
+		}
+	}
 }
 
 void LoadInternal(ExtensionLoader &loader) {
 	Connection con(loader.GetDatabaseInstance());
 	store::EnsureSchema(con);
+
+	// Connections are persistent now, so bound how many may be open at once.
+	// Read here rather than per-accept: this is an operator's ceiling, not a
+	// per-request decision, and `quackcitadm.sh config set` plus a restart is
+	// the documented way to change it.
+	int cap = (int)std::strtol(citadel::GetConfig(con, "qm_http_max_connections", "256").c_str(), nullptr, 10);
+	if (cap < 0) {
+		cap = 0;
+	}
+	g_http.SetMaxConnections(cap);
+	g_https.SetMaxConnections(cap);
+
 	RegisterServerControls(loader, "qm_http", 8080, g_http, HandleHttp);
 	RegisterServerControls(loader, "qm_https", 8443, g_https, HandleHttp);
 }
