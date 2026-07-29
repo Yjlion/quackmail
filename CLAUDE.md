@@ -20,6 +20,7 @@ for what's next.
 | `citadel/` | native Citadel protocol (the centerpiece) |
 | `imap/ pop3/ smtp_in/ smtp_out/ managesieve/` | mail front-ends |
 | `quackmail/` | umbrella extension: schema init, users, room/floor admin, MIME helpers |
+| `spool/` | the timer-driven half: mailing-list distribution. No listener |
 | `test/sql/` | sqllogictest (`make test`) |
 | `test/integration/` | python end-to-end tests, one per protocol |
 | `test/parity/` | captured output from the real Citadel server used as fixtures |
@@ -74,6 +75,18 @@ Besides `<mod>/src/*` you must touch **four** files — the last one is easy to 
 Then add it to the `quackcit_services` table in `deploy/quackcit_common.sh`,
 `test/sql/quackmail.test`, and the README table.
 
+## Adding a background worker
+
+Not everything is a listener. For anything on a timer, declare a
+`PeriodicWorker` (`core/include/quackmail/worker.hpp`), write a tick taking a
+`Connection &`, and register `<prefix>_start/_stop/_status` — `spool/` has the
+registration helper. Then add a row to `quackcit_workers` in
+`deploy/quackcit_common.sh`, which is what actually starts it on a real install.
+
+Always give a worker a one-shot `_run` table function beside its controls. That
+is what makes it testable: an integration test calls the run function and
+asserts, instead of sleeping past a poll interval.
+
 ## Reuse before you write
 
 - `core/include/quackmail/citadel_store.hpp` — rooms, floors, messages,
@@ -99,6 +112,12 @@ Then add it to the `quackcit_services` table in `deploy/quackcit_common.sh`,
   locally stored keys instead of DNS; that is what makes it testable offline.
 - `sieve.hpp` — RFC 5228 `Evaluate` (returns a *list* of actions with implicit
   keep) and `Check` for ManageSieve validation.
+- `listserv.hpp` — mailing lists over rooms: `ResolveAddress` (post vs. command
+  address), `Subscribe`/`Unsubscribe`/`Confirm`, `RenderForList` (the List-*
+  rewriting, pure enough to assert from SQL), `SpoolOnce`/`SpoolRoom`.
+- `worker.hpp` — `PeriodicWorker`, the clock counterpart to `ServerController`.
+  Anything on a timer uses it rather than growing its own thread and sleep loop.
+  Register controls the same way a listener does; see `spool/`.
 - Cross-session state lives in `citadel_sessions` and `citadel_express`
   (already backing `RWHO` / `SEXP` / `GEXP`).
 

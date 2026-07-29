@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <ctime>
 
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
@@ -77,6 +79,27 @@ std::string Lower(const std::string &s) {
 std::string LocalPart(const std::string &addr) {
 	auto at = addr.find('@');
 	return at == std::string::npos ? addr : addr.substr(0, at);
+}
+
+std::string RfcDate(int64_t epoch) {
+	std::time_t t = epoch > 0 ? static_cast<std::time_t>(epoch) : std::time(nullptr);
+	std::tm tm_utc {};
+#if defined(_WIN32)
+	gmtime_s(&tm_utc, &t);
+#else
+	gmtime_r(&t, &tm_utc);
+#endif
+	// The names are spelled out rather than left to strftime's %a/%b, which
+	// follow LC_TIME — a server started under a non-English locale would
+	// otherwise put non-ASCII day names into a header that must be English.
+	static const char *const kDay[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+	static const char *const kMon[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+	                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+	char buf[64];
+	std::snprintf(buf, sizeof buf, "%s, %d %s %d %02d:%02d:%02d +0000", kDay[tm_utc.tm_wday % 7],
+	              tm_utc.tm_mday, kMon[tm_utc.tm_mon % 12], tm_utc.tm_year + 1900, tm_utc.tm_hour,
+	              tm_utc.tm_min, tm_utc.tm_sec);
+	return std::string(buf);
 }
 
 bool RandomBytes(size_t n, std::string &out) {

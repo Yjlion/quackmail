@@ -18,6 +18,10 @@ using net::ClientStream;
 
 namespace {
 
+// A peer that will not complete a TCP handshake should cost the relay drainer
+// half a minute, not the kernel's full SYN retry schedule.
+constexpr int kConnectTimeoutMs = 30000;
+
 // Read one SMTP reply, following multi-line continuations ("250-line" ... "250 line").
 // Returns the 3-digit code (or -1 on I/O error); appends the text to `text`.
 int ReadReply(ClientStream &s, std::string &text) {
@@ -50,36 +54,6 @@ SendStatus Classify(int code) {
 	return SendStatus::Permanent;
 }
 
-int TcpConnect(const std::string &host, int port, std::string &err) {
-	struct addrinfo hints;
-	std::memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	struct addrinfo *res = nullptr;
-	std::string portstr = std::to_string(port);
-	if (getaddrinfo(host.c_str(), portstr.c_str(), &hints, &res) != 0 || !res) {
-		err = "getaddrinfo failed for " + host;
-		return -1;
-	}
-	int fd = -1;
-	for (auto *ai = res; ai; ai = ai->ai_next) {
-		fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-		if (fd < 0) {
-			continue;
-		}
-		if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-			break;
-		}
-		::close(fd);
-		fd = -1;
-	}
-	freeaddrinfo(res);
-	if (fd < 0) {
-		err = "connect failed to " + host;
-	}
-	return fd;
-}
-
 // CRLF-normalize and dot-stuff a message body for the DATA phase.
 std::string DotStuff(const std::string &raw) {
 	std::string out;
@@ -110,7 +84,7 @@ SendResult Deliver(const std::string &host, int port, const std::string &mail_fr
                    const std::string &raw, const ClientOpts &opts) {
 	SendResult result;
 	std::string err;
-	int fd = TcpConnect(host, port, err);
+	int fd = net::Connect(host, port, kConnectTimeoutMs, err);
 	if (fd < 0) {
 		result.status = SendStatus::Transient;
 		result.info = err;

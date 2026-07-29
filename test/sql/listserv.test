@@ -1,0 +1,350 @@
+# name: test/sql/listserv.test
+# description: mailing lists — configuration, subscribers, confirmation tokens, header rewriting
+# group: [quackmail]
+#
+# Configuration and the pure header rewriting are asserted here; *enforcement*
+# (a message actually reaching the outbound queue) lives in
+# test/integration/test_listserv.py, because the umbrella's table functions open
+# their own Connection and cannot see rows this harness connection wrote.
+
+require quackmail
+
+# The list tables come from store::EnsureSchema, so loading the umbrella is
+# enough — but the schema only lands once some qm_* function has run.
+query I
+SELECT count(*) FROM qm_status() WHERE metric = 'rooms';
+----
+1
+
+query I
+SELECT count(*) FROM citadel_lists;
+----
+0
+
+# ---- creating a list ------------------------------------------------------
+
+statement ok
+SELECT ok FROM cit_room_add('Announce');
+
+query II
+SELECT ok, note FROM qm_list_create('Announce', 'announce');
+----
+true	list created at announce@quackmail.test
+
+# A room that is not there is refused rather than silently creating anything.
+query II
+SELECT ok, note FROM qm_list_create('Nowhere', 'nowhere');
+----
+false	no such public room
+
+# The Lobby can be a list; a mailbox room cannot. (Personal rooms are keyed
+# "<usernum>.Mail" and are not resolvable as public rooms at all, which is the
+# first line of that defence — SetList is the second.)
+query II
+SELECT ok, note FROM qm_list_create('Lobby', 'lobby');
+----
+true	list created at lobby@quackmail.test
+
+statement ok
+SELECT ok FROM qm_list_remove('Lobby');
+
+# Two lists cannot share an address.
+statement ok
+SELECT ok FROM cit_room_add('Chatter');
+
+query II
+SELECT ok, note FROM qm_list_create('Chatter', 'announce');
+----
+false	another list already uses the address 'announce'
+
+# Nor may an address end in a reserved command suffix, or a list called
+# "x-subscribe" would intercept the subscribe address of a list called "x".
+query II
+SELECT ok, note FROM qm_list_create('Chatter', 'announce-subscribe');
+----
+false	address may not end in '-subscribe' (reserved for list commands)
+
+query II
+SELECT ok, note FROM qm_list_create('Chatter', 'chatter');
+----
+true	list created at chatter@quackmail.test
+
+# A list address is a local part, not a full address.
+query II
+SELECT ok, note FROM qm_list_set('Chatter', 'address', 'chatter@example.com');
+----
+false	address must be a local part, without a domain
+
+# ---- settings -------------------------------------------------------------
+
+query II
+SELECT ok, note FROM qm_list_set('Announce', 'post_policy', 'moderated');
+----
+true	post_policy = moderated
+
+query II
+SELECT ok, note FROM qm_list_set('Announce', 'subject_tag', '[announce]');
+----
+true	subject_tag = [announce]
+
+query II
+SELECT ok, note FROM qm_list_set('Announce', 'reply_to', 'list');
+----
+true	reply_to = list
+
+query II
+SELECT ok, note FROM qm_list_set('Announce', 'mode', 'both');
+----
+true	mode = both
+
+query II
+SELECT ok, note FROM qm_list_set('Announce', 'nonsense', 'x');
+----
+false	unknown setting 'nonsense'
+
+query IIIII
+SELECT room, address, enabled, mode, post_policy FROM qm_lists() ORDER BY address;
+----
+Announce	announce@quackmail.test	true	both	moderated
+Chatter	chatter@quackmail.test	true	post	subscribers
+
+# ---- subscribers ----------------------------------------------------------
+
+query II
+SELECT ok, note FROM qm_list_sub_add('Announce', 'alice@example.com', 'post');
+----
+true	alice@example.com subscribed
+
+query II
+SELECT ok, note FROM qm_list_sub_add('Announce', 'Bob@Example.COM', 'digest');
+----
+true	Bob@Example.COM subscribed
+
+# Something that is not an address is refused.
+query II
+SELECT ok, note FROM qm_list_sub_add('Announce', 'not-an-address', 'post');
+----
+false	'not-an-address' is not an e-mail address
+
+# Addresses are case-folded on the way in, so one mailbox cannot subscribe twice
+# under different spellings.
+query III
+SELECT address, kind, state FROM qm_list_subs('Announce') ORDER BY address;
+----
+alice@example.com	post	active
+bob@example.com	digest	active
+
+# An aide's subscription is confirmed outright — there is no pending token.
+query I
+SELECT count(*) FROM citadel_list_subs WHERE token <> '';
+----
+0
+
+query II
+SELECT ok, note FROM qm_list_sub_remove('Announce', 'ALICE@example.com');
+----
+true	ALICE@example.com unsubscribed
+
+query I
+SELECT count(*) FROM qm_list_subs('Announce');
+----
+1
+
+# A room that is not a list is reported as such rather than silently accepting.
+query II
+SELECT ok, note FROM qm_list_sub_add('Trashcan', 'x@example.com', 'post');
+----
+false	'Trashcan' is not a mailing list
+
+# ---- the confirmation state machine ---------------------------------------
+#
+# The mail path mints a pending row with a token; only the token activates it.
+# Written directly here because minting one goes through SMTP, which
+# sqllogictest has no way to drive. Expiry times are literals rather than
+# arithmetic on now(): now() is TIMESTAMPTZ, and epoch() over one needs the icu
+# extension, which an offline test run has no way to fetch.
+
+statement ok
+INSERT INTO citadel_list_subs (room_num, address, kind, state, token, token_expires, created_at)
+SELECT room_num, 'carol@example.com', 'post', 'pending', 'tok-carol', 4000000000, 1753660800
+FROM citadel_lists WHERE address = 'announce';
+
+query II
+SELECT address, state FROM qm_list_subs('Announce') WHERE address = 'carol@example.com';
+----
+carol@example.com	pending
+
+# An expired token is dead even though the row is still there.
+statement ok
+INSERT INTO citadel_list_subs (room_num, address, kind, state, token, token_expires, created_at)
+SELECT room_num, 'dave@example.com', 'post', 'pending', 'tok-dave', 1, 1753660800
+FROM citadel_lists WHERE address = 'announce';
+
+# ---- header rewriting -----------------------------------------------------
+#
+# qm_list_render produces exactly the bytes a subscriber would receive, without
+# a subscriber, a queue or a socket in the way.
+
+statement ok
+INSERT INTO citadel_messages (msgnum, author, msgtime, subject, format_type, origin_room, raw)
+VALUES (9001, 'Alice', 1753660800, 'Hello there', 0, 'Announce', 'Body line one.');
+
+statement ok
+INSERT INTO citadel_room_msgs (room_num, msgnum)
+SELECT room_num, 9001 FROM citadel_lists WHERE address = 'announce';
+
+# RFC 2919 / 2369: the identity of the list and the addresses that act on it.
+query I
+SELECT message LIKE '%List-Id: %<announce.quackmail.test>%' FROM qm_list_render('Announce', 9001);
+----
+true
+
+query I
+SELECT message LIKE '%List-Post: <mailto:announce@quackmail.test>%'
+   AND message LIKE '%List-Subscribe: <mailto:announce-subscribe@quackmail.test>%'
+   AND message LIKE '%List-Unsubscribe: <mailto:announce-unsubscribe@quackmail.test>%'
+   AND message LIKE '%List-Help: <mailto:announce-request@quackmail.test>%'
+FROM qm_list_render('Announce', 9001);
+----
+true
+
+query I
+SELECT message LIKE '%Precedence: list%' FROM qm_list_render('Announce', 9001);
+----
+true
+
+# Bounces belong to the list, not to whoever posted.
+query I
+SELECT message LIKE '%Sender: announce-bounces@quackmail.test%' FROM qm_list_render('Announce', 9001);
+----
+true
+
+# reply_to = list was set above.
+query I
+SELECT message LIKE '%Reply-To: announce@quackmail.test%' FROM qm_list_render('Announce', 9001);
+----
+true
+
+# The subject tag is applied.
+query I
+SELECT message LIKE '%Subject: [announce] Hello there%' FROM qm_list_render('Announce', 9001);
+----
+true
+
+# List-Archive is omitted until the site says where its web interface lives —
+# better no header than one pointing at a URL that does not resolve.
+query I
+SELECT message LIKE '%List-Archive%' FROM qm_list_render('Announce', 9001);
+----
+false
+
+statement ok
+SELECT ok FROM qm_config_set('qm_list_archive_base', 'https://bbs.example.com');
+
+query I
+SELECT message LIKE '%List-Archive: <https://bbs.example.com/bbs/room/%' FROM qm_list_render('Announce', 9001);
+----
+true
+
+# The body survives.
+query I
+SELECT message LIKE '%Body line one.%' FROM qm_list_render('Announce', 9001);
+----
+true
+
+# A footer is appended to a plain-text message.
+statement ok
+SELECT ok FROM qm_list_set('Announce', 'footer', 'To leave: announce-unsubscribe@quackmail.test');
+
+query I
+SELECT message LIKE '%Body line one.%To leave: announce-unsubscribe@quackmail.test%'
+FROM qm_list_render('Announce', 9001);
+----
+true
+
+# A message that is not in the list's room is still rendered on request — this
+# function is a rendering primitive for tests and the admin console, not an
+# access-control boundary. What it must not do is invent one.
+query II
+SELECT message IS NULL, note FROM qm_list_render('Announce', 424242);
+----
+true	no such message
+
+query II
+SELECT message IS NULL, note FROM qm_list_render('Trashcan', 9001);
+----
+true	'Trashcan' is not a mailing list
+
+# ---- signatures the rewriting has to drop ---------------------------------
+#
+# The subject tag and footer change bytes a DKIM signature covers, so keeping an
+# inbound signature would turn every distributed copy into a verification
+# failure at the far end.
+
+statement ok
+INSERT INTO citadel_messages (msgnum, author, msgtime, subject, format_type, origin_room, raw)
+VALUES (9002, 'Alice', 1753660800, 'Signed', 4, 'Announce',
+        'From: alice@example.com' || chr(13) || chr(10) ||
+        'Subject: Signed' || chr(13) || chr(10) ||
+        'DKIM-Signature: v=1; a=rsa-sha256; d=example.com; s=s1; b=AAAA' || chr(13) || chr(10) ||
+        'Authentication-Results: mx.example.com; dkim=pass' || chr(13) || chr(10) ||
+        'Return-Path: <alice@example.com>' || chr(13) || chr(10) ||
+        'List-Unsubscribe: <mailto:attacker@evil.example>' || chr(13) || chr(10) ||
+        chr(13) || chr(10) ||
+        'Signed body.');
+
+statement ok
+INSERT INTO citadel_room_msgs (room_num, msgnum)
+SELECT room_num, 9002 FROM citadel_lists WHERE address = 'announce';
+
+query I
+SELECT message LIKE '%DKIM-Signature%'
+    OR message LIKE '%Authentication-Results%'
+    OR message LIKE '%Return-Path%'
+FROM qm_list_render('Announce', 9002);
+----
+false
+
+# A List-Unsubscribe the sender supplied is replaced, not kept beside ours —
+# otherwise a poster could point subscribers' unsubscribe button anywhere.
+query I
+SELECT message LIKE '%attacker@evil.example%' FROM qm_list_render('Announce', 9002);
+----
+false
+
+query I
+SELECT message LIKE '%List-Unsubscribe: <mailto:announce-unsubscribe@quackmail.test>%'
+FROM qm_list_render('Announce', 9002);
+----
+true
+
+# ---- moderation queue -----------------------------------------------------
+
+query I
+SELECT count(*) FROM qm_list_held('Announce');
+----
+0
+
+query II
+SELECT ok, note FROM qm_list_approve(999);
+----
+false	no message 999 is held
+
+# ---- removing a list ------------------------------------------------------
+#
+# The room and its messages stay; only the list configuration goes.
+
+query II
+SELECT ok, note FROM qm_list_remove('Announce');
+----
+true	list removed
+
+query I
+SELECT count(*) FROM qm_list_subs('Announce');
+----
+0
+
+query I
+SELECT count(*) FROM citadel_room_msgs WHERE msgnum IN (9001, 9002);
+----
+2

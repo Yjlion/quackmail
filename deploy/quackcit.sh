@@ -153,6 +153,25 @@ start_call() {
     printf 'CALL %s_start(%s);\n' "$_prefix" "$_args"
 }
 
+# One CALL that brings a background worker up. The relay drainer is the only
+# one that takes more than an interval — a smarthost, when the site relays
+# through one instead of talking to MX hosts itself.
+worker_start_call() {
+    _prefix=$1; _interval=$2
+    _checked=$(sql_int "$_interval")
+    _args="poll_secs => $_checked"
+    # `:-` throughout: set -u is on, and an operator who deletes a line from
+    # quackcit.conf should get direct-to-MX, not a dead server.
+    if [ "$_prefix" = "qm_smtp_relay" ] && [ -n "${QUACKCIT_SMARTHOST_HOST:-}" ]; then
+        _args="$_args, smarthost_host => $(sql_str "${QUACKCIT_SMARTHOST_HOST:-}")"
+        _sh_port=$(sql_int "${QUACKCIT_SMARTHOST_PORT:-25}")
+        _args="$_args, smarthost_port => $_sh_port"
+        _args="$_args, smarthost_user => $(sql_str "${QUACKCIT_SMARTHOST_USER:-}")"
+        _args="$_args, smarthost_pass => $(sql_str "${QUACKCIT_SMARTHOST_PASS:-}")"
+    fi
+    printf 'CALL %s_start(%s);\n' "$_prefix" "$_args"
+}
+
 gen_startup_sql() {
     # Tab-separated and headerless, not duckbox: everything the CLI prints here
     # ends up in the log, and one row per line is what lets each one become a
@@ -179,6 +198,21 @@ gen_startup_sql() {
 $(quackcit_enabled_services)
 EOF
 
+    # A worker's extension may not be carrying any listener (quackmail_spool
+    # never does), so the worker table gets its own LOAD pass over the same
+    # dedup list.
+    while read -r _key _extension _prefix _interval; do
+        case "$_loaded" in
+            *" $_extension "*) continue ;;
+        esac
+        _path=$(ext_path "$_extension") ||
+            die "$_extension.duckdb_extension not found under $QUACKCIT_EXT_DIR (run make first)"
+        printf 'LOAD %s;\n' "$(sql_str "$_path")"
+        _loaded="$_loaded$_extension "
+    done <<EOF
+$(quackcit_enabled_workers)
+EOF
+
     # Each _start returns a row with host, port and a note, so the log records
     # what came up and what failed to bind.
     while read -r _key _extension _prefix _host _port _tls; do
@@ -189,6 +223,14 @@ EOF
         fi
     done <<EOF
 $(quackcit_enabled_services)
+EOF
+
+    # Background workers, after the listeners: outbound relay, mailing-list
+    # distribution. Each _start returns a row, so the log records what came up.
+    while read -r _key _extension _prefix _interval; do
+        worker_start_call "$_prefix" "$_interval"
+    done <<EOF
+$(quackcit_enabled_workers)
 EOF
 
     printf 'SELECT * FROM qm_status();\n'
@@ -204,6 +246,13 @@ EOF
 }
 
 gen_shutdown_sql() {
+    # Workers first: each one joins its thread, and a worker mid-tick holding a
+    # connection open would otherwise race the listeners closing theirs.
+    while read -r _key _extension _prefix _interval; do
+        printf 'CALL %s_stop();\n' "$_prefix"
+    done <<EOF
+$(quackcit_enabled_workers)
+EOF
     while read -r _key _extension _prefix _host _port _tls; do
         printf 'CALL %s_stop();\n' "$_prefix"
     done <<EOF

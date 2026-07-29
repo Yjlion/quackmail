@@ -9,6 +9,7 @@
 #include "quackmail/delivery.hpp"
 #include "quackmail/dkim.hpp"
 #include "quackmail/dmarc.hpp"
+#include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/mime.hpp"
@@ -90,22 +91,24 @@ struct Recipient {
 	std::vector<int64_t> rooms;            // public rooms addressed as room_<name>@
 	std::string detail;                    // RFC 5233 subaddress part, if any
 
+	// Mailing lists. A command address (-subscribe, -confirm-<token>, ...) is
+	// answered at DATA rather than delivered anywhere, and a post the list's
+	// policy will not accept from this sender is parked for an aide instead of
+	// being filed into the room.
+	listserv::List list;
+	listserv::Command list_cmd;
+	bool list_hold = false;
+
+	bool IsList() const {
+		return list_cmd.kind != listserv::Command::None;
+	}
+
 	bool Deliverable() const {
-		return !destinations.empty() || !forwards.empty() || !rooms.empty();
+		return !destinations.empty() || !forwards.empty() || !rooms.empty() || IsList();
 	}
 
 	Recipient() = default;
 };
-
-// RFC 5322 date for the Received header.
-std::string RfcDate() {
-	std::time_t now = std::time(nullptr);
-	std::tm tm_utc {};
-	gmtime_r(&now, &tm_utc);
-	char buf[64];
-	std::strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S +0000", &tm_utc);
-	return buf;
-}
 
 // Everything the per-connection handler carries across commands.
 struct Session {
@@ -341,19 +344,40 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				continue;
 			}
 
-			// Resolution order, in full: a public room address, then aliases,
-			// then a plain local user, and only then the subaddress split. Room
-			// first so a domain catch-all cannot swallow room_*; subaddress last
-			// so an explicit alias for "bob+sales@" still outranks the generic
-			// split of the same address.
+			// Resolution order, in full: a mailing list, then a public room
+			// address, then aliases, then a plain local user, and only then the
+			// subaddress split. List and room first so a domain catch-all cannot
+			// swallow them; subaddress last so an explicit alias for
+			// "bob+sales@" still outranks the generic split of the same address.
 			Recipient r;
 			r.envelope = rcpt;
 
-			int64_t room = citadel::GetConfig(con, "qm_room_mail", "1") == "1"
-			                   ? citadel::ResolveMailRoom(con, util::LocalPart(rcpt))
-			                   : -1;
-			if (room >= 0) {
-				r.rooms.push_back(room);
+			bool listserv_on = citadel::GetConfig(con, "qm_listserv", "1") == "1";
+			if (listserv_on && listserv::ResolveAddress(con, util::LocalPart(rcpt), r.list, r.list_cmd)) {
+				if (r.list_cmd.kind == listserv::Command::Post) {
+					// A list is an explicit opt-in by an aide, so posting to it
+					// does not additionally need the room's "anyone p" grant that
+					// room_<name>@ requires. Whether *this* sender may post is
+					// the list's own policy, and is decided here rather than at
+					// DATA so a refused post costs one RCPT rather than a body.
+					bool may_post = r.list.post_policy == listserv::PostPolicy::Anyone ||
+					                (r.list.post_policy == listserv::PostPolicy::Subscribers &&
+					                 listserv::IsSubscriber(con, r.list.room_num, s.mail_from));
+					if (may_post) {
+						r.rooms.push_back(r.list.room_num);
+					} else {
+						r.list_hold = true;
+					}
+				}
+			}
+
+			if (!r.IsList()) {
+				int64_t room = citadel::GetConfig(con, "qm_room_mail", "1") == "1"
+				                   ? citadel::ResolveMailRoom(con, util::LocalPart(rcpt))
+				                   : -1;
+				if (room >= 0) {
+					r.rooms.push_back(room);
+				}
 			}
 
 			auto expand_into = [&](const std::string &addr) {
@@ -475,7 +499,7 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 			}
 			received += "\r\n\tby " + authserv + " (QuackCit) with " +
 			            (lmtp ? "LMTP" : (s.tls_active ? "ESMTPS" : "ESMTP"));
-			received += ";\r\n\t" + RfcDate() + "\r\n";
+			received += ";\r\n\t" + util::RfcDate() + "\r\n";
 
 			bool quarantine = !lmtp && enforcement.dmarc_enforce && dm.ShouldQuarantine();
 			std::string headers = received + trace;
@@ -522,6 +546,24 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 			// reference-counted, so a message to several local users is stored
 			// once and pointed into each room. Delivering per recipient would
 			// store a duplicate copy per recipient.
+			// Mailing-list traffic is settled before ordinary delivery. A command
+			// address is answered and never stored; a post the list will not take
+			// from this sender is parked for an aide. Both leave the recipient
+			// with nothing to deliver, so neither reaches LocalDeliver below.
+			for (auto &r : s.rcpts) {
+				if (!r.IsList()) {
+					continue;
+				}
+				std::string list_err;
+				if (r.list_cmd.kind == listserv::Command::Post) {
+					if (r.list_hold) {
+						listserv::Hold(con, r.list, s.mail_from, stored, list_err);
+					}
+					continue; // an accepted post is an ordinary room delivery
+				}
+				listserv::HandleCommand(con, r.list, r.list_cmd, s.mail_from, body, list_err);
+			}
+
 			std::vector<std::string> targets;
 			for (const auto &r : s.rcpts) {
 				enqueue_forwards(r);
@@ -562,16 +604,32 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				return reason;
 			};
 
+			// What happened to one envelope recipient, in words, for both the
+			// audit log and the LMTP reply.
+			auto list_detail = [&](const Recipient &r) -> std::string {
+				if (!r.IsList()) {
+					return "";
+				}
+				if (r.list_cmd.kind != listserv::Command::Post) {
+					return "list command accepted";
+				}
+				return r.list_hold ? "held for moderation" : "posted to list " + r.list.address;
+			};
+
 			for (const auto &r : s.rcpts) {
 				std::string refused = ok ? reject_reason(r) : "";
 				const char *disposition = !ok ? "defer"
 				                              : (!refused.empty() ? "reject"
 				                                                  : (quarantine ? "quarantine" : "accept"));
+				std::string list_note = list_detail(r);
 				log_one(r.envelope, disposition,
 				        !ok ? outcome.err
-				            : (!r.destinations.empty()
-				                   ? refused
-				                   : (!r.rooms.empty() ? std::string("delivered to room") : "forwarded")));
+				            : (!list_note.empty()
+				                   ? list_note
+				                   : (!r.destinations.empty()
+				                          ? refused
+				                          : (!r.rooms.empty() ? std::string("delivered to room")
+				                                              : "forwarded"))));
 
 				// LMTP owes one reply per envelope recipient; SMTP sends a
 				// single reply for the transaction, emitted after this loop.
@@ -582,6 +640,8 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 					stream.WriteLine("451 4.3.0 <" + r.envelope + "> local storage error");
 				} else if (!refused.empty()) {
 					stream.WriteLine("550 5.7.1 <" + r.envelope + "> " + refused);
+				} else if (!list_note.empty()) {
+					stream.WriteLine("250 2.0.0 <" + r.envelope + "> " + list_note);
 				} else if (!r.rooms.empty() && r.destinations.empty()) {
 					stream.WriteLine("250 2.0.0 <" + r.envelope + "> delivered to room");
 				} else if (r.destinations.empty()) {

@@ -20,6 +20,8 @@ require quackmail_xmpp
 
 require quackmail_http
 
+require quackmail_spool
+
 # Umbrella version + schema-backed status
 query I
 SELECT version FROM qm_version();
@@ -236,3 +238,38 @@ query I
 SELECT note FROM qm_https_stop();
 ----
 stopped
+
+# The spooler binds nothing — it is a thread and a clock — so its controls are
+# the same start/stop/status trio over a PeriodicWorker rather than a socket.
+query I
+SELECT note FROM qm_listserv_start(poll_secs => 5);
+----
+started
+
+query II
+SELECT worker, running FROM qm_listserv_status();
+----
+listserv	true
+
+# Starting an already-running worker is an error, not a second thread.
+query I
+SELECT note FROM qm_listserv_start();
+----
+error: already running
+
+query I
+SELECT note FROM qm_listserv_stop();
+----
+stopped
+
+query I
+SELECT running FROM qm_listserv_status();
+----
+false
+
+# One pass on demand. With no lists configured there is nothing to do, which is
+# the answer it must give rather than an error.
+query IIII
+SELECT distributed, recipients, digests, note FROM qm_listserv_run();
+----
+0	0	0	ok

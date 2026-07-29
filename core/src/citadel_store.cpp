@@ -298,7 +298,14 @@ void EnsureCitadelSchema(Connection &con) {
 	          // the sender picks the name.
 	          "('qm_room_mail', '1'), "
 	          "('qm_subaddress_sep', '+'), "
-	          "('qm_subaddress_create', '0')");
+	          "('qm_subaddress_create', '0'), "
+	          // Mailing lists. As with room mail this only decides whether the
+	          // lookup happens: no room is a list until an aide makes one, and
+	          // nothing is distributed until the spooler runs. The archive base
+	          // is the site's web root; empty omits the List-Archive header
+	          // rather than guessing a URL that may not resolve.
+	          "('qm_listserv', '1'), "
+	          "('qm_list_archive_base', '')");
 }
 
 std::string GetConfig(Connection &con, const std::string &name, const std::string &dflt) {

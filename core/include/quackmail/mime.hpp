@@ -50,6 +50,13 @@ std::string DecodeContentTransferEncoding(const std::string &encoding, const std
 // transcoded to UTF-8; other charsets yield the raw decoded bytes.
 std::string DecodeEncodedWords(const std::string &in);
 
+// The inverse, for headers we compose ourselves (digest subjects, the subject
+// of a message synthesized from a feed item). Pure ASCII without '=?' is
+// returned unchanged, so the common case stays readable on the wire; anything
+// else becomes one or more "=?UTF-8?B?...?=" words, split so no line exceeds
+// RFC 2047's 75-character limit per encoded word.
+std::string EncodeEncodedWord(const std::string &in);
+
 // Transcode a Latin-1 (ISO-8859-1) byte string to UTF-8.
 std::string Latin1ToUtf8(const std::string &in);
 

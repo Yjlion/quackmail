@@ -31,18 +31,7 @@ int64_t CapNum(const Ctx &ctx, size_t i) {
 	return s.empty() ? -1 : (int64_t)std::strtoll(s.c_str(), nullptr, 10);
 }
 
-std::string RfcDate(int64_t epoch) {
-	std::time_t t = (std::time_t)epoch;
-	struct tm tm {};
-	gmtime_r(&t, &tm);
-	static const char *kDay[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-	static const char *kMon[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-	                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-	char buf[64];
-	std::snprintf(buf, sizeof buf, "%s, %d %s %d %02d:%02d:%02d +0000", kDay[tm.tm_wday % 7], tm.tm_mday,
-	              kMon[tm.tm_mon % 12], tm.tm_year + 1900, tm.tm_hour, tm.tm_min, tm.tm_sec);
-	return buf;
-}
+using quackmail::util::RfcDate;
 
 // Fold a header value that must not contain CR/LF. Anything a user typed goes
 // through this before it becomes a header: an embedded newline would otherwise

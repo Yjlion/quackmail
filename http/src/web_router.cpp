@@ -23,6 +23,7 @@ const std::vector<Route> &Routes() {
 		RegisterAdminUserRoutes(r);
 		RegisterAdminPolicyRoutes(r);
 		RegisterAdminOpsRoutes(r);
+		RegisterAdminListRoutes(r);
 		return r;
 	}();
 	return table;

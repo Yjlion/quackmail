@@ -360,6 +360,19 @@ HTTPS        quackmail_http        qm_https            8443   implicit  -
 EOF
 }
 
+# Background workers: the timer-driven half of the server. Unlike a listener a
+# worker binds nothing, so it has an interval instead of a host and port.
+#
+# "KEY EXTENSION PREFIX DEFAULT_INTERVAL". The relay drainer belongs here as
+# much as the new ones do — until this table existed nothing started it, so a
+# real install queued outbound mail and never sent it.
+quackcit_workers() {
+    cat <<'EOF'
+RELAY     quackmail_smtp_out  qm_smtp_relay  30
+LISTSERV  quackmail_spool     qm_listserv    60
+EOF
+}
+
 env_true() {
     case "$(printf '%s' "$1" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')" in
         1|true|yes|on) return 0 ;;
@@ -388,6 +401,21 @@ quackcit_enabled_services() {
             host=$QUACKCIT_HOST
         fi
         printf '%s %s %s %s %s %s\n' "$key" "$extension" "$prefix" "$host" "$port" "$tls"
+    done
+}
+
+# Emits "KEY EXTENSION PREFIX INTERVAL" for each background worker that should
+# run. Interval precedence: QUACKCIT_INTERVAL_<KEY>, then the table's default.
+quackcit_enabled_workers() {
+    quackcit_workers | while read -r key extension prefix interval; do
+        [ -n "$key" ] || continue
+        eval "_enable=\${QUACKCIT_ENABLE_$key:-}"
+        if [ -n "$_enable" ] && ! env_true "$_enable"; then
+            continue
+        fi
+        eval "_interval=\${QUACKCIT_INTERVAL_$key:-}"
+        if [ -n "$_interval" ]; then interval=$_interval; fi
+        printf '%s %s %s %s\n' "$key" "$extension" "$prefix" "$interval"
     done
 }
 

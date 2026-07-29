@@ -9,6 +9,16 @@
 namespace quackmail {
 namespace net {
 
+// Dial out to host:port and return the connected fd, or -1 with `err` set.
+// Tries every address getaddrinfo returns, so a host with both A and AAAA
+// records falls back rather than failing on the first family.
+//
+// `timeout_ms` bounds each connect attempt (0 = block, the kernel's default).
+// Bounding it matters for anything driven by a background timer: a blocking
+// connect to a host that silently drops packets holds the worker thread for the
+// kernel's full retry schedule, which is minutes.
+int Connect(const std::string &host, int port, int timeout_ms, std::string &err);
+
 // A connected client socket, optionally wrapped in TLS. Provides buffered line
 // reading (CRLF-terminated) suitable for text mail protocols, plus an in-band
 // STARTTLS upgrade.
