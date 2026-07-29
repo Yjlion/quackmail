@@ -301,6 +301,22 @@ sql_int() {
     printf '%s' "$1"
 }
 
+# The current time as a Unix epoch, for the BIGINT epoch columns the web session
+# store keeps. It comes from the shell rather than from SQL because DuckDB's
+# `epoch()` has no TIMESTAMPTZ overload of its own: `epoch(now())` reaches for
+# the icu extension and dies outright on an install that has never run
+# `INSTALL icu`, and casting to TIMESTAMP first only moves the problem, since
+# that cast silently shifts the value by the session's UTC offset once icu *is*
+# loaded. core/src/websession.cpp binds a computed epoch for the same reason.
+# Call this in a plain assignment, like sql_int and for the same reason.
+sql_now() {
+    _now=$(date +%s 2>/dev/null || true)
+    case "$_now" in
+        ''|*[!0-9]*) die "date +%s did not return a Unix timestamp (got '$_now')" ;;
+    esac
+    printf '%s' "$_now"
+}
+
 # The CLI needs a terminated statement; callers write SQL without one.
 sql_terminate() {
     case "$(printf '%s' "$1" | sed -e 's/[[:space:]]*$//')" in
