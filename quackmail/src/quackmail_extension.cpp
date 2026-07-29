@@ -14,7 +14,9 @@
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/dkim.hpp"
 #include "quackmail/dmarc.hpp"
+#include "quackmail/citadel_msg.hpp"
 #include "quackmail/http.hpp"
+#include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/mime.hpp"
@@ -22,6 +24,7 @@
 #include "quackmail/rbl.hpp"
 #include "quackmail/sieve.hpp"
 #include "quackmail/spf.hpp"
+#include "quackmail/util.hpp"
 
 #include <cstdlib>
 #include <ctime>
@@ -74,6 +77,18 @@ enum class UmbrellaKind {
 	CONFIG_GET,
 	CONFIG_SET,
 	CONFIG_LIST,
+	// Mailing lists.
+	LIST_LIST,
+	LIST_CREATE,
+	LIST_SET,
+	LIST_REMOVE,
+	LIST_SUBS,
+	LIST_SUB_ADD,
+	LIST_SUB_REMOVE,
+	LIST_HELD,
+	LIST_APPROVE,
+	LIST_REJECT,
+	LIST_RENDER,
 };
 
 struct RowsBindData : public FunctionData {
@@ -92,6 +107,57 @@ struct RowsGlobalState : public GlobalTableFunctionState {
 	vector<vector<Value>> rows;
 	idx_t idx = 0;
 };
+
+// ---- mailing-list helpers --------------------------------------------------
+// The enums are internal to listserv; these are the names the SQL surface uses.
+
+const char *ListModeName(quackmail::listserv::Mode m) {
+	switch (m) {
+	case quackmail::listserv::Mode::Digest:
+		return "digest";
+	case quackmail::listserv::Mode::Both:
+		return "both";
+	default:
+		return "post";
+	}
+}
+
+const char *ListPolicyName(quackmail::listserv::PostPolicy p) {
+	switch (p) {
+	case quackmail::listserv::PostPolicy::Anyone:
+		return "anyone";
+	case quackmail::listserv::PostPolicy::Moderated:
+		return "moderated";
+	default:
+		return "subscribers";
+	}
+}
+
+const char *ListStateName(quackmail::listserv::SubState s) {
+	switch (s) {
+	case quackmail::listserv::SubState::Active:
+		return "active";
+	case quackmail::listserv::SubState::UnsubPending:
+		return "unsub_pending";
+	default:
+		return "pending";
+	}
+}
+
+// Resolve the room-name argument these functions take into the list on it.
+bool ResolveListArg(Connection &con, const std::string &room_name, quackmail::listserv::List &out,
+                    std::string &err) {
+	quackmail::citadel::Room room;
+	if (!quackmail::citadel::ResolveRoom(con, "", room_name, room)) {
+		err = "no such public room";
+		return false;
+	}
+	if (!quackmail::listserv::GetList(con, room.room_num, out)) {
+		err = "'" + room.display_name + "' is not a mailing list";
+		return false;
+	}
+	return true;
+}
 
 unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<RowsBindData>();
@@ -439,6 +505,156 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 				gstate->rows.push_back({r->GetValue(0, i), r->GetValue(1, i)});
 			}
 		}
+		break;
+	}
+
+	// ---- mailing lists --------------------------------------------------
+	//
+	// Lists are named by room in these functions, because that is what a list
+	// *is*. The room is given by display name so the CLI reads the same way
+	// `cit_room_acl` does.
+	case UmbrellaKind::LIST_LIST: {
+		for (auto &l : quackmail::listserv::ListLists(con)) {
+			int64_t active = 0, pending = 0;
+			for (auto &s : quackmail::listserv::Subscribers(con, l.room_num, "")) {
+				(s.state == quackmail::listserv::SubState::Active ? active : pending)++;
+			}
+			gstate->rows.push_back(
+			    {Value::BIGINT(l.room_num), Value(l.display_name),
+			     Value(quackmail::listserv::ListAddress(con, l)), Value::BOOLEAN(l.enabled),
+			     Value(ListModeName(l.mode)), Value(ListPolicyName(l.post_policy)),
+			     Value::BIGINT(active), Value::BIGINT(pending), Value::BIGINT(l.last_sent)});
+		}
+		break;
+	}
+	case UmbrellaKind::LIST_CREATE: {
+		quackmail::citadel::Room room;
+		std::string err;
+		if (!quackmail::citadel::ResolveRoom(con, "", bind.args[0], room)) {
+			gstate->rows.push_back({Value::BOOLEAN(false), Value("no such public room")});
+			break;
+		}
+		quackmail::listserv::List l;
+		l.room_num = room.room_num;
+		l.address = bind.args.size() > 1 ? bind.args[1] : "";
+		bool ok = quackmail::listserv::SetList(con, l, err);
+		if (ok) {
+			quackmail::listserv::GetList(con, room.room_num, l);
+		}
+		gstate->rows.push_back(
+		    {Value::BOOLEAN(ok),
+		     Value(ok ? ("list created at " + quackmail::listserv::ListAddress(con, l)) : err)});
+		break;
+	}
+	case UmbrellaKind::LIST_SET: {
+		quackmail::citadel::Room room;
+		std::string err;
+		if (!quackmail::citadel::ResolveRoom(con, "", bind.args[0], room)) {
+			gstate->rows.push_back({Value::BOOLEAN(false), Value("no such public room")});
+			break;
+		}
+		bool ok = quackmail::listserv::SetField(con, room.room_num, bind.args[1], bind.args[2], err);
+		gstate->rows.push_back(
+		    {Value::BOOLEAN(ok), Value(ok ? (bind.args[1] + " = " + bind.args[2]) : err)});
+		break;
+	}
+	case UmbrellaKind::LIST_REMOVE: {
+		quackmail::citadel::Room room;
+		std::string err;
+		if (!quackmail::citadel::ResolveRoom(con, "", bind.args[0], room)) {
+			gstate->rows.push_back({Value::BOOLEAN(false), Value("no such public room")});
+			break;
+		}
+		bool ok = quackmail::listserv::RemoveList(con, room.room_num, err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "list removed" : err)});
+		break;
+	}
+	case UmbrellaKind::LIST_SUBS: {
+		quackmail::citadel::Room room;
+		if (!quackmail::citadel::ResolveRoom(con, "", bind.args[0], room)) {
+			break; // no such room: an empty listing
+		}
+		for (auto &s : quackmail::listserv::Subscribers(con, room.room_num, "")) {
+			gstate->rows.push_back({Value(s.address),
+			                        Value(s.kind == quackmail::listserv::SubKind::Digest ? "digest" : "post"),
+			                        Value(ListStateName(s.state)), Value::BIGINT(s.created_at),
+			                        Value::BIGINT(s.confirmed_at)});
+		}
+		break;
+	}
+	case UmbrellaKind::LIST_SUB_ADD: {
+		quackmail::listserv::List l;
+		std::string err;
+		if (!ResolveListArg(con, bind.args[0], l, err)) {
+			gstate->rows.push_back({Value::BOOLEAN(false), Value(err)});
+			break;
+		}
+		auto kind = (bind.args.size() > 2 && quackmail::util::Lower(bind.args[2]) == "digest")
+		                ? quackmail::listserv::SubKind::Digest
+		                : quackmail::listserv::SubKind::Post;
+		std::string token;
+		// An aide adding a subscriber confirms it outright: they are asserting
+		// the address belongs on the list, which is exactly what the mail
+		// confirmation loop exists to establish for anyone else.
+		bool ok = quackmail::listserv::Subscribe(con, l, bind.args[1], kind, true, token, err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? (bind.args[1] + " subscribed") : err)});
+		break;
+	}
+	case UmbrellaKind::LIST_SUB_REMOVE: {
+		quackmail::listserv::List l;
+		std::string err;
+		if (!ResolveListArg(con, bind.args[0], l, err)) {
+			gstate->rows.push_back({Value::BOOLEAN(false), Value(err)});
+			break;
+		}
+		std::string token;
+		bool ok = quackmail::listserv::Unsubscribe(con, l, bind.args[1], true, token, err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? (bind.args[1] + " unsubscribed") : err)});
+		break;
+	}
+	case UmbrellaKind::LIST_HELD: {
+		int64_t room_num = -1;
+		quackmail::citadel::Room room;
+		if (!bind.args[0].empty() && quackmail::citadel::ResolveRoom(con, "", bind.args[0], room)) {
+			room_num = room.room_num;
+		}
+		for (auto &h : quackmail::listserv::HeldMessages(con, room_num, "held")) {
+			gstate->rows.push_back({Value::BIGINT(h.id), Value::BIGINT(h.room_num), Value(h.mail_from),
+			                        Value(h.subject), Value::BIGINT(h.received_at), Value(h.state)});
+		}
+		break;
+	}
+	case UmbrellaKind::LIST_APPROVE: {
+		std::string err;
+		bool ok = quackmail::listserv::Approve(con, std::atoll(bind.args[0].c_str()), err);
+		gstate->rows.push_back(
+		    {Value::BOOLEAN(ok),
+		     Value(ok ? "posted to the room; the spooler will distribute it" : err)});
+		break;
+	}
+	case UmbrellaKind::LIST_REJECT: {
+		std::string err;
+		bool ok = quackmail::listserv::Reject(con, std::atoll(bind.args[0].c_str()), err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "rejected" : err)});
+		break;
+	}
+	case UmbrellaKind::LIST_RENDER: {
+		// The copy a subscriber would receive for one stored message. Exists so
+		// the header rewriting can be asserted from sqllogictest without a
+		// socket, a subscriber or a queue.
+		quackmail::listserv::List l;
+		std::string err;
+		quackmail::citadel::Message msg;
+		if (!ResolveListArg(con, bind.args[0], l, err)) {
+			gstate->rows.push_back({Value(LogicalType::VARCHAR), Value(err)});
+			break;
+		}
+		int64_t msgnum = std::atoll(bind.args[1].c_str());
+		if (!quackmail::citadel::LoadMessage(con, msgnum, msg)) {
+			gstate->rows.push_back({Value(LogicalType::VARCHAR), Value("no such message")});
+			break;
+		}
+		gstate->rows.push_back({Value(quackmail::listserv::RenderForList(con, l, msg)), Value("ok")});
 		break;
 	}
 	}
@@ -912,6 +1128,29 @@ void LoadInternal(ExtensionLoader &loader) {
 	RegisterPolicyFn(loader, "qm_config_get", UmbrellaKind::CONFIG_GET, {V}, {"name", "value"}, {V, V});
 	RegisterPolicyFn(loader, "qm_config_set", UmbrellaKind::CONFIG_SET, {V, V}, kOkNote, kOkNoteTypes);
 	RegisterPolicyFn(loader, "qm_config", UmbrellaKind::CONFIG_LIST, {}, {"name", "value"}, {V, V});
+
+	// Mailing lists. A list is a room, so every one of these names its room the
+	// same way cit_room_acl does — by display name.
+	RegisterPolicyFn(loader, "qm_lists", UmbrellaKind::LIST_LIST, {},
+	                 {"room_num", "room", "address", "enabled", "mode", "post_policy", "subscribers",
+	                  "pending", "last_sent"},
+	                 {I, V, V, B, V, V, I, I, I});
+	RegisterPolicyFn(loader, "qm_list_create", UmbrellaKind::LIST_CREATE, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_list_set", UmbrellaKind::LIST_SET, {V, V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_list_remove", UmbrellaKind::LIST_REMOVE, {V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_list_subs", UmbrellaKind::LIST_SUBS, {V},
+	                 {"address", "kind", "state", "created_at", "confirmed_at"}, {V, V, V, I, I});
+	RegisterPolicyFn(loader, "qm_list_sub_add", UmbrellaKind::LIST_SUB_ADD, {V, V, V}, kOkNote,
+	                 kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_list_sub_remove", UmbrellaKind::LIST_SUB_REMOVE, {V, V}, kOkNote,
+	                 kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_list_held", UmbrellaKind::LIST_HELD, {V},
+	                 {"id", "room_num", "mail_from", "subject", "received_at", "state"},
+	                 {I, I, V, V, I, V});
+	RegisterPolicyFn(loader, "qm_list_approve", UmbrellaKind::LIST_APPROVE, {I}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_list_reject", UmbrellaKind::LIST_REJECT, {I}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_list_render", UmbrellaKind::LIST_RENDER, {V, I}, {"message", "note"},
+	                 {V, V});
 }
 
 } // namespace

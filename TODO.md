@@ -5,9 +5,37 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-Nothing in flight. Next work comes off the backlog below.
+- [ ] **Pull messages from a POP3/IMAP/RSS source into a room.** The tree has
+      POP3/IMAP/HTTP *servers* and no clients, so those are new core code, plus
+      an RSS/Atom parser over the existing `xmlstream` tokenizer. Lands as a
+      second worker in `quackmail_spool`, beside the listserv one.
 
 ## Shipped
+
+- [x] **Mailing list manager** (`quackmail_spool`, `core/src/listserv.cpp`)
+  - [x] a list *is* a room: `citadel_lists` / `citadel_list_subs` /
+        `citadel_list_held`, which is Citadel's `listrecp`/`digestrecp` model in
+        tables
+  - [x] distribution is a spooler over the room's message pointers, not a hook
+        in the SMTP handler — so a post from telnet, NNTP, webmail or `ENT0`
+        reaches subscribers, which a delivery-path hook would silently miss
+  - [x] RFC 2369/2919 `List-*` headers, a `<list>-bounces@` envelope, subject
+        tags and footers; inbound `DKIM-Signature`/`Authentication-Results`/
+        `Return-Path`/`List-*` stripped (the rewriting invalidates a signature,
+        and a sender-supplied `List-Unsubscribe` is a hijack)
+  - [x] self-service by mail (`-subscribe`, `-unsubscribe`, `-request`,
+        `-confirm-<token>`) and at `/lists`, both gated on a token mailed to the
+        address claimed; `multipart/digest` batching; a moderation queue where
+        approval posts into the room and the spooler does the sending
+  - [x] `qm_list_*` admin functions, `quackcitadm.sh list`, `/admin/lists`
+  - [x] `core/worker.hpp` — `PeriodicWorker`, lifted out of `smtp_out`'s relay
+        drainer and now shared by it. `util::RfcDate` and `net::Connect`
+        (with a connect timeout the old private copy lacked) lifted likewise
+  - [x] **`deploy/` starts background workers at all.** `qm_smtp_relay_start`
+        appeared nowhere in `deploy/`, so on a real install the outbound queue
+        was drained by nothing: submitted mail, alias forwards and Sieve
+        redirects all queued and never left. `quackcit_workers` now covers the
+        relay drainer and the listserv spooler.
 
 - [x] **Misc fixes and features.**
   - [x] IMAPS: the implicit-TLS twin of the IMAP listener (993; dev 1993), so

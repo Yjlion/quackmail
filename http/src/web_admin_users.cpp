@@ -48,6 +48,7 @@ std::string AdminNav() {
 	out += Link("/admin/rbl", "Blocklists", "btn sec");
 	out += Link("/admin/dkim", "DKIM", "btn sec");
 	out += Link("/admin/ratelimits", "Quotas", "btn sec");
+	out += Link("/admin/lists", "Mailing lists", "btn sec");
 	out += Link("/admin/inbound", "Audit log", "btn sec");
 	out += Link("/admin/queue", "Mail queue", "btn sec");
 	out += Link("/admin/sieve", "Filters", "btn sec");

@@ -20,15 +20,12 @@
 #include "quackmail/server_controls.hpp"
 #include "quackmail/smtp_client.hpp"
 #include "quackmail/util.hpp"
+#include "quackmail/worker.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cctype>
-#include <chrono>
 #include <ctime>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace duckdb {
@@ -77,15 +74,6 @@ std::string LowerStr(std::string s) {
 std::string DomainOf(const std::string &addr) {
 	auto at = addr.rfind('@');
 	return at == std::string::npos ? "" : LowerStr(addr.substr(at + 1));
-}
-
-std::string RfcDate() {
-	std::time_t now = std::time(nullptr);
-	std::tm tm_utc {};
-	gmtime_r(&now, &tm_utc);
-	char buf[64];
-	std::strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S +0000", &tm_utc);
-	return buf;
 }
 
 // Sign a submitted message with the key for its author domain, if we hold one.
@@ -259,7 +247,7 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 			                       " (submission, authenticated as " + auth_user + ")\r\n\tby " +
 			                       citadel::GetConfig(con, "c_fqdn", "quackmail.test") +
 			                       " (QuackCit) with " + (tls_active ? "ESMTPSA" : "ESMTPA") + ";\r\n\t" +
-			                       RfcDate() + "\r\n";
+			                       util::RfcDate() + "\r\n";
 			body = SignOutbound(con, mail_from, received + body);
 
 			// Local recipients are delivered directly; remote ones are queued.
@@ -324,67 +312,36 @@ public:
 
 	bool Start(DatabaseInstance &db, int poll_secs, const std::string &sh_host, int sh_port,
 	           const std::string &sh_user, const std::string &sh_pass, std::string &err) {
-		std::lock_guard<std::mutex> lock(mutex_);
-		if (running_) {
+		if (worker_.IsRunning()) {
 			err = "relay already running";
 			return false;
 		}
-		db_ = &db;
-		poll_secs_ = poll_secs > 0 ? poll_secs : 30;
 		sh_host_ = sh_host;
 		sh_port_ = sh_port > 0 ? sh_port : 25;
 		sh_user_ = sh_user;
 		sh_pass_ = sh_pass;
-		stop_ = false;
-		running_ = true;
-		thread_ = std::thread(&RelayManager::Loop, this);
-		return true;
+		return worker_.Start(db, poll_secs > 0 ? poll_secs : 30, [this](Connection &con) { Drain(con); },
+		                     err);
 	}
 
-	bool Stop(std::string &) {
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			if (!running_) {
-				return true;
-			}
-			stop_ = true;
-		}
-		if (thread_.joinable()) {
-			thread_.join();
-		}
-		running_ = false;
-		return true;
+	bool Stop(std::string &err) {
+		return worker_.Stop(err);
 	}
 
 	bool IsRunning() {
-		return running_;
+		return worker_.IsRunning();
 	}
 	int PollSecs() {
-		return poll_secs_;
+		return worker_.PollSecs();
 	}
 	std::string Smarthost() {
 		return sh_host_;
 	}
 
 private:
-	void Loop() {
-		while (!stop_) {
-			try {
-				Connection con(*db_);
-				store::EnsureSchema(con);
-				auto items = store::ClaimOutboundDue(con, 20);
-				for (auto &it : items) {
-					if (stop_) {
-						break;
-					}
-					ProcessOne(con, it);
-				}
-			} catch (...) {
-				// Swallow and retry on the next tick.
-			}
-			for (int i = 0; i < poll_secs_ * 10 && !stop_; i++) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
-			}
+	void Drain(Connection &con) {
+		for (auto &it : store::ClaimOutboundDue(con, 20)) {
+			ProcessOne(con, it);
 		}
 	}
 
@@ -432,12 +389,7 @@ private:
 		}
 	}
 
-	std::mutex mutex_;
-	std::thread thread_;
-	std::atomic<bool> running_ {false};
-	std::atomic<bool> stop_ {false};
-	DatabaseInstance *db_ = nullptr;
-	int poll_secs_ = 30;
+	PeriodicWorker worker_;
 	std::string sh_host_;
 	int sh_port_ = 25;
 	std::string sh_user_;

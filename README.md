@@ -62,6 +62,7 @@ extension.
 | `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
 | `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
 | `quackmail_http` | `qm_http_start/_stop/_status`, `qm_https_*` | ✅ webmail, the BBS over the web, and the admin console (80/443; dev 8080/8443) — server-rendered, no JavaScript framework |
+| `quackmail_spool` | `qm_listserv_start/_stop/_status`, `qm_listserv_run` | ✅ periodic background work — the only module with no listener. Distributes mailing lists: rooms marked as lists are fanned out to their subscribers, with digests and moderation |
 
 `*_start(host, port)` also accepts named params: `tls_cert`, `tls_key`,
 `implicit_tls`, `starttls`. With `starttls => true` and no cert paths, a
@@ -118,6 +119,41 @@ mail only for `c_fqdn`, queries no blocklist, and signs nothing.
 | `quackmail_rate_limits` | Per-user send quotas; the row with an empty username is the default (100 per 300 s, 500 per 24 h). |
 | `quackmail_send_log` | The sliding window the limiter counts over. |
 | `quackmail_inbound_log` | What the inbound checks decided, per recipient: SPF/DKIM/DMARC/DNSBL verdicts and the disposition. |
+
+## Mailing lists
+
+A mailing list **is a room**. `citadel_lists` marks a room as one and gives it a
+posting address; `citadel_list_subs` holds the subscribers. This is Citadel's
+own model — `listrecp` / `digestrecp` entries on a room — in tables.
+
+| Table | Purpose |
+|---|---|
+| `citadel_lists` | One row per list room: the posting address, `mode` (`post`/`digest`/`both`), `post_policy` (`anyone`/`subscribers`/`moderated`), subject tag, footer, digest settings, and the `last_sent`/`last_digest` watermarks. |
+| `citadel_list_subs` | `(room_num, address)`, with `kind` (`post`/`digest`) and `state` (`pending`/`active`/`unsub_pending`). A pending row carries a confirmation token and an expiry. |
+| `citadel_list_held` | Posts parked for an aide, with the raw message. Approving posts it into the room; the spooler distributes it from there. |
+
+Distribution is driven from the **room**, not from the SMTP handler: the
+`qm_listserv` spooler walks each list room for messages past its watermark and
+queues a copy per subscriber. That is what makes a post from the BBS, NNTP,
+webmail or a native Citadel client reach subscribers too — mail is only one of
+the ways a message gets into a room. Sending itself goes onto
+`quackmail_outbound`, so retries and backoff stay in one place.
+
+Every copy carries the RFC 2369/2919 `List-*` headers and a
+`<list>-bounces@` envelope sender, and any inbound `DKIM-Signature`,
+`Authentication-Results`, `Return-Path` or `List-*` header is stripped — the
+subject tag and footer change bytes a signature covers, and a sender-supplied
+`List-Unsubscribe` would point subscribers' unsubscribe button wherever they
+liked.
+
+Self-service works by mail at `<list>-subscribe@`, `<list>-unsubscribe@` and
+`<list>-request@` (help), and over the web at `/lists`. Neither takes effect on
+its own: both mail a confirmation containing a token to the address named, and
+only `<list>-confirm-<token>@` — or the link in that mail — completes the
+change. Without that, either interface would be a way to sign anybody up for
+anything.
+
+Administered with `quackcitadm.sh list` or at `/admin/lists`.
 
 ## Mail authentication
 

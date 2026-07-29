@@ -79,6 +79,9 @@ void RegisterPrefsRoutes(std::vector<Route> &out);
 void RegisterAdminUserRoutes(std::vector<Route> &out);
 void RegisterAdminPolicyRoutes(std::vector<Route> &out);
 void RegisterAdminOpsRoutes(std::vector<Route> &out);
+// Also contributes the anonymous /lists self-service pages, which live beside
+// the admin ones because they share the same model.
+void RegisterAdminListRoutes(std::vector<Route> &out);
 
 // Handle one already-parsed request: resolve the session, apply the transport
 // and role gates, verify CSRF, dispatch. Always fills `resp`.

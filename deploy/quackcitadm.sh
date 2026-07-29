@@ -179,6 +179,42 @@ cmd_floor() {
     esac
 }
 
+cmd_list() {
+    action=${1:-list}; shift 2>/dev/null || true
+    case "$action" in
+        list)   q "SELECT * FROM qm_lists()" ;;
+        create) need 1 "$@"
+                q "SELECT ok, note FROM qm_list_create($(sql_str "$1"), $(sql_str "${2:-}"))" ;;
+        set)    need 3 "$@"
+                q "SELECT ok, note FROM qm_list_set($(sql_str "$1"), $(sql_str "$2"), $(sql_str "$3"))" ;;
+        remove) need 1 "$@"; q "SELECT ok, note FROM qm_list_remove($(sql_str "$1"))" ;;
+        subs)   need 1 "$@"; q "SELECT * FROM qm_list_subs($(sql_str "$1"))" ;;
+        subscribe)
+                need 2 "$@"
+                q "SELECT ok, note FROM qm_list_sub_add($(sql_str "$1"), $(sql_str "$2"), $(sql_str "${3:-post}"))" ;;
+        unsubscribe)
+                need 2 "$@"
+                q "SELECT ok, note FROM qm_list_sub_remove($(sql_str "$1"), $(sql_str "$2"))" ;;
+        held)   q "SELECT * FROM qm_list_held($(sql_str "${1:-}"))" ;;
+        approve)
+                need 1 "$@"
+                id=$(sql_int "$1")
+                q "SELECT ok, note FROM qm_list_approve($id)" ;;
+        reject) need 1 "$@"
+                id=$(sql_int "$1")
+                q "SELECT ok, note FROM qm_list_reject($id)" ;;
+        # Distribution normally happens on the spooler's timer; this forces a
+        # pass now, which is what you want after changing something.
+        run)    if [ $# -ge 1 ]; then
+                    n=$(sql_int "$1")
+                    q "SELECT * FROM qm_listserv_run(room_num => $n)"
+                else
+                    q "SELECT * FROM qm_listserv_run()"
+                fi ;;
+        *) die "unknown list command '$action' (list|create|set|remove|subs|subscribe|unsubscribe|held|approve|reject|run)" ;;
+    esac
+}
+
 cmd_queue() {
     action=${1:-list}; shift 2>/dev/null || true
     case "$action" in
@@ -314,6 +350,16 @@ usage: quackcitadm.sh <object> <action> [arguments]
               RFC 4314 rights: lrswipkxtea. Granting "anyone" the p right opens
               the room to mail at room_<name>@<fqdn>; no rights removes the entry
   floor     add <name> | list
+  list      list | create <room> [address] | set <room> <key> <value> | remove <room>
+            subs <room> | subscribe <room> <address> [post|digest]
+            unsubscribe <room> <address> | held [room] | approve <id> | reject <id>
+            run [room_num]
+              a mailing list is a room: posts to it are archived there and fanned
+              out to its subscribers. set keys: address, enabled, mode
+              (post|digest|both), post_policy (anyone|subscribers|moderated),
+              reply_to (sender|list), subject_tag, footer, digest_interval,
+              digest_max. subscribe from here is confirmed outright; anyone
+              mailing <list>-subscribe@ must answer a confirmation first
   queue     list | retry <id> | flush
   websession list | revoke <token_hash> | revoke-user <name> | prune
               signed-in browsers; only the hash of each token is stored
@@ -342,6 +388,7 @@ case "$object" in
     config)    cmd_config "$@" ;;
     room)      cmd_room "$@" ;;
     floor)     cmd_floor "$@" ;;
+    list)      cmd_list "$@" ;;
     queue)     cmd_queue "$@" ;;
     websession) cmd_websession "$@" ;;
     spf)       cmd_spf "$@" ;;

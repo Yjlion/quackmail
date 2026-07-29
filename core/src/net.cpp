@@ -1,11 +1,14 @@
 #include "quackmail/net.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -16,6 +19,69 @@ namespace quackmail {
 namespace net {
 
 static constexpr size_t kChunk = 8192;
+
+namespace {
+
+// Connect one resolved address with a bounded wait. Returns true on success,
+// leaving `fd` connected and back in blocking mode.
+bool ConnectOne(int fd, const struct sockaddr *addr, socklen_t addrlen, int timeout_ms) {
+	if (timeout_ms <= 0) {
+		return ::connect(fd, addr, addrlen) == 0;
+	}
+	int flags = ::fcntl(fd, F_GETFL, 0);
+	if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+		return ::connect(fd, addr, addrlen) == 0; // cannot go non-blocking; take the default
+	}
+	bool ok = false;
+	if (::connect(fd, addr, addrlen) == 0) {
+		ok = true;
+	} else if (errno == EINPROGRESS) {
+		struct pollfd pfd {};
+		pfd.fd = fd;
+		pfd.events = POLLOUT;
+		if (::poll(&pfd, 1, timeout_ms) == 1) {
+			// poll reports writability for both success and failure; SO_ERROR
+			// is the only thing that tells them apart.
+			int soerr = 0;
+			socklen_t len = sizeof(soerr);
+			ok = ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0 && soerr == 0;
+		}
+	}
+	::fcntl(fd, F_SETFL, flags);
+	return ok;
+}
+
+} // namespace
+
+int Connect(const std::string &host, int port, int timeout_ms, std::string &err) {
+	struct addrinfo hints;
+	std::memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	struct addrinfo *res = nullptr;
+	std::string portstr = std::to_string(port);
+	if (getaddrinfo(host.c_str(), portstr.c_str(), &hints, &res) != 0 || !res) {
+		err = "getaddrinfo failed for " + host;
+		return -1;
+	}
+	int fd = -1;
+	for (auto *ai = res; ai; ai = ai->ai_next) {
+		fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		if (fd < 0) {
+			continue;
+		}
+		if (ConnectOne(fd, ai->ai_addr, ai->ai_addrlen, timeout_ms)) {
+			break;
+		}
+		::close(fd);
+		fd = -1;
+	}
+	freeaddrinfo(res);
+	if (fd < 0) {
+		err = "connect failed to " + host + ":" + portstr;
+	}
+	return fd;
+}
 
 ClientStream::ClientStream(int fd) : fd_(fd) {
 }

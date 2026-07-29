@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace quackmail {
@@ -18,6 +19,10 @@ std::string Lower(const std::string &s);
 
 // The local-part of an address (before '@'); returns the whole string if no '@'.
 std::string LocalPart(const std::string &addr);
+
+// The RFC 5322 date a message header carries ("Mon, 28 Jul 2026 12:00:00 +0000"),
+// always in UTC. `epoch` of 0 means now.
+std::string RfcDate(int64_t epoch = 0);
 
 // ---- randomness and digests ---------------------------------------------
 // Cryptographically strong bytes from OpenSSL. Returns false if the RNG failed;

@@ -209,6 +209,22 @@ std::string FlashText(const std::string &slug) {
 	if (slug == "activated") {
 		return "Script activated.";
 	}
+	if (slug == "distributed") {
+		return "Spooler run. Anything new in a list room is on the outbound queue.";
+	}
+	if (slug == "approved") {
+		return "Approved and posted. The spooler will distribute it on its next pass.";
+	}
+	if (slug == "rejected") {
+		return "Rejected. Nothing was sent.";
+	}
+	if (slug == "confirm_sent") {
+		// Deliberately says nothing about whether the list or the subscription
+		// exists: this page is anonymous, and a more helpful message would let
+		// anyone test whether a given address is on a given list.
+		return "If that list exists, a confirmation has been e-mailed to the address you gave. "
+		       "Nothing changes until you follow the link in it.";
+	}
 	return std::string();
 }
 

@@ -227,5 +227,44 @@ std::string DecodeEncodedWords(const std::string &in) {
 	return out;
 }
 
+std::string EncodeEncodedWord(const std::string &in) {
+	bool needs = in.find("=?") != std::string::npos;
+	for (unsigned char c : in) {
+		if (c >= 0x80 || c == '\r' || c == '\n') {
+			needs = true;
+			break;
+		}
+	}
+	if (!needs) {
+		return in;
+	}
+
+	// "=?UTF-8?B?" + payload + "?=" must fit in 75 characters, leaving 63 for
+	// base64, i.e. 45 input bytes. Chunks are cut on a UTF-8 character boundary
+	// so no encoded word ends mid-sequence.
+	const std::string prefix = "=?UTF-8?B?";
+	const size_t kMaxRaw = 45;
+	std::string out;
+	size_t i = 0;
+	while (i < in.size()) {
+		size_t take = std::min(kMaxRaw, in.size() - i);
+		while (take > 0 && i + take < in.size() &&
+		       (static_cast<unsigned char>(in[i + take]) & 0xC0) == 0x80) {
+			take--; // back off a continuation byte
+		}
+		if (take == 0) {
+			take = std::min(kMaxRaw, in.size() - i); // not valid UTF-8; split anyway
+		}
+		if (!out.empty()) {
+			// Adjacent encoded words are joined by a fold, which the decoder
+			// (and RFC 2047 §6.2) drops rather than rendering as a space.
+			out += "\r\n ";
+		}
+		out += prefix + util::Base64Encode(in.substr(i, take)) + "?=";
+		i += take;
+	}
+	return out;
+}
+
 } // namespace mime
 } // namespace quackmail
