@@ -707,7 +707,9 @@ def main():
         msgnum = con.execute(
             "SELECT max(msgnum) FROM citadel_room_msgs WHERE room_num = ?", [mailbox]
         ).fetchone()[0]
-        status, headers, _ = request(op, f"{BASE}/bbs/room/{mailbox}/msg/{msgnum}/html")
+        # A fresh session: the logout check above revoked the one `op` held.
+        frame_op, _ = sign_in(BASE, "webuser", "secret")
+        status, headers, _ = request(frame_op, f"{BASE}/bbs/room/{mailbox}/msg/{msgnum}/html")
         assert status == 200, f"the HTML part returned {status}"
         frame_csp = headers["Content-Security-Policy"]
         assert "script-src" not in frame_csp or "'self'" not in frame_csp.split("script-src")[1].split(";")[0], (
