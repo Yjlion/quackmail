@@ -370,6 +370,7 @@ quackcit_workers() {
     cat <<'EOF'
 RELAY     quackmail_smtp_out  qm_smtp_relay  30
 LISTSERV  quackmail_spool     qm_listserv    60
+FETCH     quackmail_spool     qm_fetch       60
 EOF
 }
 

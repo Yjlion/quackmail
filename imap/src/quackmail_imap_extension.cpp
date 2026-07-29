@@ -7,6 +7,7 @@
 #include "duckdb/main/materialized_query_result.hpp"
 
 #include "quackmail/auth.hpp"
+#include "quackmail/citadel_msg.hpp"
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mime.hpp"
@@ -247,8 +248,8 @@ std::string HeaderVal(const mime::ParsedMessage &p, const std::string &name) {
 	return "";
 }
 
-std::string BuildEnvelope(const citadel::Message &msg) {
-	auto p = mime::Parse(msg.raw);
+std::string BuildEnvelope(const citadel::Message &msg, const std::string &rfc822) {
+	auto p = mime::Parse(rfc822);
 	std::string date = HeaderVal(p, "Date");
 	std::string from = HeaderVal(p, "From");
 	std::string sender = from;
@@ -330,6 +331,14 @@ void FetchOne(Connection &con, Session &s, net::ClientStream &stream, size_t pos
 		return;
 	}
 
+	// Every byte IMAP serves is the RFC822 *view* of the message, not the
+	// stored bytes. For a format 4 message the two are the same; for a native
+	// (format 0) one — anything posted from the BBS, telnet, a Citadel client —
+	// msg.raw is bare body text with no header block at all, so serving it
+	// directly handed clients a message with no From, Subject or Date. POP3 and
+	// NNTP have rendered this view for some time; this is IMAP catching up.
+	std::string rfc822 = citadel::RenderRfc822(msg, citadel::GetConfig(con, "c_nodename", "quackcit"));
+
 	bool want_flags = items_up.find("FLAGS") != std::string::npos;
 	bool want_uid = is_uid || items_up.find("UID") != std::string::npos;
 	bool want_size = items_up.find("RFC822.SIZE") != std::string::npos || items_up.find("FULL") != std::string::npos ||
@@ -378,13 +387,13 @@ void FetchOne(Connection &con, Session &s, net::ClientStream &stream, size_t pos
 		add("UID " + std::to_string(uid));
 	}
 	if (want_size) {
-		add("RFC822.SIZE " + std::to_string(msg.raw.size()));
+		add("RFC822.SIZE " + std::to_string(rfc822.size()));
 	}
 	if (want_date) {
 		add("INTERNALDATE " + ImapQuote(InternalDate(msg.msgtime)));
 	}
 	if (want_env) {
-		add("ENVELOPE " + BuildEnvelope(msg));
+		add("ENVELOPE " + BuildEnvelope(msg, rfc822));
 	}
 
 	// A body section is returned as a literal; assemble the leading part first,
@@ -392,17 +401,17 @@ void FetchOne(Connection &con, Session &s, net::ClientStream &stream, size_t pos
 	std::string section, payload;
 	if (body_header) {
 		std::string h, b;
-		SplitHeaderBody(msg.raw, h, b);
+		SplitHeaderBody(rfc822, h, b);
 		section = sect.find("RFC822.HEADER") != std::string::npos ? "RFC822.HEADER" : "BODY[HEADER]";
 		payload = h;
 	} else if (body_text) {
 		std::string h, b;
-		SplitHeaderBody(msg.raw, h, b);
+		SplitHeaderBody(rfc822, h, b);
 		section = sect.find("RFC822.TEXT") != std::string::npos ? "RFC822.TEXT" : "BODY[TEXT]";
 		payload = b;
 	} else if (body_full) {
 		section = sect.find("BODY[]") != std::string::npos ? "BODY[]" : "RFC822";
-		payload = msg.raw;
+		payload = rfc822;
 	}
 
 	std::string head = "* " + std::to_string(pos) + " FETCH (" + parts;

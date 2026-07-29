@@ -215,6 +215,27 @@ cmd_list() {
     esac
 }
 
+cmd_feed() {
+    action=${1:-list}; shift 2>/dev/null || true
+    case "$action" in
+        list)   q "SELECT * FROM qm_feeds()" ;;
+        add)    need 4 "$@"
+                q "SELECT ok, note FROM qm_feed_add($(sql_str "$1"), $(sql_str "$2"), $(sql_str "$3"), $(sql_str "$4"))" ;;
+        set)    need 3 "$@"
+                q "SELECT ok, note FROM qm_feed_set($(sql_str "$1"), $(sql_str "$2"), $(sql_str "$3"))" ;;
+        remove) need 1 "$@"; q "SELECT ok, note FROM qm_feed_remove($(sql_str "$1"))" ;;
+        test)   need 1 "$@"; q "SELECT ok, note FROM qm_feed_test($(sql_str "$1"))" ;;
+        # Poll now rather than waiting for the interval. No argument polls every
+        # enabled feed.
+        run)    if [ $# -ge 1 ]; then
+                    q "SELECT * FROM qm_fetch_run(feed => $(sql_str "$1"))"
+                else
+                    q "SELECT * FROM qm_fetch_run()"
+                fi ;;
+        *) die "unknown feed command '$action' (list|add|set|remove|test|run)" ;;
+    esac
+}
+
 cmd_queue() {
     action=${1:-list}; shift 2>/dev/null || true
     case "$action" in
@@ -360,6 +381,14 @@ usage: quackcitadm.sh <object> <action> [arguments]
               reply_to (sender|list), subject_tag, footer, digest_interval,
               digest_max. subscribe from here is confirmed outright; anyone
               mailing <list>-subscribe@ must answer a confirmation first
+  feed      list | add <name> <pop3|imap|rss> <source> <target> | set <name> <key> <value>
+            remove <name> | test <name> | run [name]
+              pull messages from somewhere else into a room. <source> is a URL
+              for rss, or user:password@host[:port] for a mailbox; <target> is a
+              room name, or user:<name> to route through that user's filters.
+              set keys: kind, enabled, url, host, port, tls (none|starttls|
+              implicit), username, password, mailbox, room, user, author,
+              subject_prefix, interval, leave_on_server, max_per_run
   queue     list | retry <id> | flush
   websession list | revoke <token_hash> | revoke-user <name> | prune
               signed-in browsers; only the hash of each token is stored
@@ -389,6 +418,7 @@ case "$object" in
     room)      cmd_room "$@" ;;
     floor)     cmd_floor "$@" ;;
     list)      cmd_list "$@" ;;
+    feed)      cmd_feed "$@" ;;
     queue)     cmd_queue "$@" ;;
     websession) cmd_websession "$@" ;;
     spf)       cmd_spf "$@" ;;

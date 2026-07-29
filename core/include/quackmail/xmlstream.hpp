@@ -13,6 +13,11 @@ namespace xmlstream {
 // parser cannot be used and the extension build has no expat. This produces
 // start/end/text events from whatever bytes have arrived so far, and reports
 // "need more data" instead of blocking.
+//
+// Also used, driven to completion over a whole document, as the RSS/Atom parser
+// behind core/feed.cpp — which is where CDATA support comes from: feeds wrap
+// HTML payloads in it constantly. TEXT events are entity-decoded except inside
+// a CDATA section, whose contents are by definition literal.
 struct Event {
 	enum Kind { START, END, TEXT } kind = TEXT;
 	std::string name;                                        // element name, prefix included

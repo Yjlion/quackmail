@@ -62,7 +62,7 @@ extension.
 | `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
 | `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
 | `quackmail_http` | `qm_http_start/_stop/_status`, `qm_https_*` | ✅ webmail, the BBS over the web, and the admin console (80/443; dev 8080/8443) — server-rendered, no JavaScript framework |
-| `quackmail_spool` | `qm_listserv_start/_stop/_status`, `qm_listserv_run` | ✅ periodic background work — the only module with no listener. Distributes mailing lists: rooms marked as lists are fanned out to their subscribers, with digests and moderation |
+| `quackmail_spool` | `qm_listserv_start/_stop/_status`, `qm_listserv_run`, `qm_fetch_*` | ✅ periodic background work — the only module with no listener. Distributes mailing lists (fan-out, digests, moderation) and pulls messages in from remote POP3/IMAP mailboxes and RSS/Atom feeds |
 
 `*_start(host, port)` also accepts named params: `tls_cert`, `tls_key`,
 `implicit_tls`, `starttls`. With `starttls => true` and no cert paths, a
@@ -154,6 +154,34 @@ change. Without that, either interface would be a way to sign anybody up for
 anything.
 
 Administered with `quackcitadm.sh list` or at `/admin/lists`.
+
+## Pulling messages in
+
+The other direction: poll a POP3 or IMAP mailbox on someone else's server, or an
+RSS/Atom feed, and post what is new into a room. A newsgroup, a webmail account
+and a blog then all read through the same BBS, mail client or newsreader as
+everything else.
+
+| Table | Purpose |
+|---|---|
+| `quackmail_feeds` | What to poll, where to put it, and how to resume: source, credentials, target room (or target user, which routes through their Sieve script), interval, per-run cap, and the `uidvalidity`/`last_uid`/`etag`/`last_modified` resume state plus the last run's status. |
+| `quackmail_feed_seen` | Identifiers already posted — POP3 `UIDL`s, IMAP `<uidvalidity>.<uid>`, RSS guids. This is what makes a poll idempotent; it is pruned to the newest few thousand per feed. |
+
+The clients are new core code, since the tree only spoke these protocols as a
+server: `core/mail_client.cpp` (POP3 `UIDL`/`RETR`/`DELE`, IMAP `UID SEARCH` /
+`UID FETCH BODY.PEEK[]`) and `core/http_client.cpp` + `core/feed.cpp`. The HTTP
+client is separate from `core/http.cpp` because that one deliberately refuses
+chunked transfer encoding — sound for a server, fatal for a client, since feed
+servers chunk. RSS/Atom parsing runs over the XML tokenizer already in core for
+XMPP, so nothing new is linked in.
+
+Messages are left on the server by default: pulling from a mailbox must not
+empty it by accident. Credentials are stored in the clear, as
+`quackmail_dkim_keys` stores private keys — the database file's permissions are
+the boundary — and a stored password is never rendered back into the admin page.
+
+Polling runs on the `qm_fetch` worker. Administered with `quackcitadm.sh feed` or
+at `/admin/feeds`.
 
 ## Mail authentication
 

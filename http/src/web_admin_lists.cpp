@@ -1,5 +1,6 @@
 #include "web.hpp"
 
+#include "quackmail/fetch.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mime.hpp"
 #include "quackmail/util.hpp"
@@ -431,6 +432,160 @@ void GetPublicConfirm(Ctx &ctx) {
 	Render(ctx, "Mailing list confirmation", body);
 }
 
+// ---- remote message pulls ------------------------------------------------
+
+std::string KindLabel(quackmail::fetch::Kind k) {
+	return quackmail::fetch::KindName(k);
+}
+
+void GetFeeds(Ctx &ctx) {
+	auto feeds = quackmail::fetch::ListFeeds(ctx.con);
+
+	std::string body = "<div class=\"wrap\"><table><tr>" + Head("Name") + Head("Kind") + Head("Source") +
+	                   Head("Target") + Head("Every") + Head("Last run") + Head("Status") +
+	                   Head("Pulled") + Head("") + "</tr>";
+	for (auto &f : feeds) {
+		std::string source = f.kind == quackmail::fetch::Kind::Rss
+		                         ? f.url
+		                         : (f.username + "@" + f.host +
+		                            (f.port > 0 ? (":" + std::to_string(f.port)) : ""));
+		std::string target = f.target_user.empty() ? "" : ("user " + f.target_user);
+		if (target.empty()) {
+			quackmail::citadel::Room room;
+			target = quackmail::citadel::GetRoomByNum(ctx.con, f.target_room, room)
+			             ? room.display_name
+			             : ("room " + std::to_string(f.target_room));
+		}
+		body += "<tr>";
+		body += Cell(f.name + (f.enabled ? "" : " (disabled)"));
+		body += Cell(KindLabel(f.kind));
+		body += Cell(source);
+		body += Cell(target);
+		body += Cell(std::to_string(f.interval_secs) + "s");
+		body += Cell(f.last_run_at > 0 ? FormatTime(f.last_run_at) : "never");
+		body += Cell(f.last_status + (f.last_error.empty() ? "" : (": " + f.last_error)));
+		body += Cell(std::to_string(f.messages_pulled));
+		body += "<td>" + FormStart(ctx, "/admin/feeds/run", "inline") + Hidden("name", f.name) +
+		        Button("Run") + FormEnd() + FormStart(ctx, "/admin/feeds/test", "inline") +
+		        Hidden("name", f.name) + Button("Test", "sec") + FormEnd() +
+		        FormStart(ctx, "/admin/feeds/remove", "inline") + Hidden("name", f.name) +
+		        Button("Remove", "danger") + FormEnd() + "</td>";
+		body += "</tr>";
+	}
+	body += "</table></div>";
+	if (feeds.empty()) {
+		body += "<p class=\"muted\">No feeds configured.</p>";
+	}
+
+	body += "<h2>Add a feed</h2>";
+	body += FormStart(ctx, "/admin/feeds/add");
+	body += "<label class=\"field\"><span>Name</span>" +
+	        TextInput("name", "", "text", "letters, digits, - _ .") + "</label>";
+	body += "<label class=\"field\"><span>Kind</span>" +
+	        Select("kind", {{"rss", "rss — an RSS or Atom feed"},
+	                        {"pop3", "pop3 — a remote POP3 mailbox"},
+	                        {"imap", "imap — a remote IMAP mailbox"}},
+	               "rss") +
+	        "</label>";
+	body += "<label class=\"field\"><span>URL (rss)</span>" +
+	        TextInput("url", "", "text", "https://example.com/feed.xml") + "</label>";
+	body += "<label class=\"field\"><span>Host (pop3/imap)</span>" + TextInput("host", "") + "</label>";
+	body += "<label class=\"field\"><span>Port (0 = the default for the transport)</span>" +
+	        TextInput("port", "0", "number") + "</label>";
+	body += "<label class=\"field\"><span>Transport</span>" +
+	        Select("tls", {{"starttls", "STARTTLS"}, {"implicit", "implicit TLS (995/993)"},
+	                       {"none", "plaintext"}},
+	               "starttls") +
+	        "</label>";
+	body += "<label class=\"field\"><span>Username</span>" + TextInput("username", "") + "</label>";
+	body += "<label class=\"field\"><span>Password</span>" +
+	        TextInput("password", "", "password") + "</label>";
+	body += "<label class=\"field\"><span>Mailbox (imap)</span>" +
+	        TextInput("mailbox", "INBOX") + "</label>";
+	body += "<label class=\"field\"><span>Post into room</span>" + TextInput("room", "") + "</label>";
+	body += "<label class=\"field\"><span>…or deliver to user (their filters run)</span>" +
+	        TextInput("user", "") + "</label>";
+	body += "<label class=\"field\"><span>Poll every, seconds</span>" +
+	        TextInput("interval", "900", "number") + "</label>";
+	body += "<p>" + Checkbox("leave_on_server", true, "Leave messages on the server") + "</p>";
+	body += "<p>" + Button("Add") + "</p>";
+	body += FormEnd();
+	body += "<p class=\"muted\">Credentials are stored in the database in the clear, exactly as DKIM "
+	        "private keys are — the database file's permissions are the boundary. A stored password is "
+	        "never rendered back into this page.</p>";
+	body += "<p class=\"muted\">Polling happens on the <code>qm_fetch</code> spooler. If it is not "
+	        "started, nothing is pulled until you press Run.</p>";
+
+	AdminPage(ctx, "Feeds", body);
+}
+
+void PostFeedAdd(Ctx &ctx) {
+	quackmail::fetch::Feed f;
+	f.name = ctx.req.Form("name");
+	f.kind = quackmail::fetch::ParseKind(ctx.req.Form("kind"));
+	f.url = ctx.req.Form("url");
+	f.host = ctx.req.Form("host");
+	f.port = ctx.FormInt("port", 0);
+	f.tls = quackmail::fetch::ParseTls(ctx.req.Form("tls"));
+	f.username = ctx.req.Form("username");
+	f.password = ctx.req.Form("password");
+	f.mailbox = ctx.req.Form("mailbox");
+	f.interval_secs = ctx.FormInt("interval", 900);
+	f.leave_on_server = ctx.req.HasForm("leave_on_server");
+	f.author_override = ctx.req.Form("author");
+	f.subject_prefix = ctx.req.Form("subject_prefix");
+
+	std::string user = ctx.req.Form("user");
+	if (!user.empty()) {
+		f.target_user = user;
+	} else {
+		quackmail::citadel::Room room;
+		if (!quackmail::citadel::ResolveRoom(ctx.con, "", ctx.req.Form("room"), room)) {
+			BadRequest(ctx, "no such public room");
+			return;
+		}
+		f.target_room = room.room_num;
+	}
+
+	std::string err;
+	if (!quackmail::fetch::SetFeed(ctx.con, f, err)) {
+		BadRequest(ctx, err);
+		return;
+	}
+	// The credential is deliberately not in the log line.
+	AideLog(ctx, "Feed added",
+	        "Feed '" + f.name + "' (" + KindLabel(f.kind) + ") now pulls into this server.");
+	RedirectTo(ctx, "/admin/feeds", "created");
+}
+
+void PostFeedRemove(Ctx &ctx) {
+	std::string err;
+	std::string name = ctx.req.Form("name");
+	if (!quackmail::fetch::RemoveFeed(ctx.con, name, err)) {
+		BadRequest(ctx, err);
+		return;
+	}
+	AideLog(ctx, "Feed removed", "Feed '" + name + "' was removed.");
+	RedirectTo(ctx, "/admin/feeds", "deleted");
+}
+
+void PostFeedRun(Ctx &ctx) {
+	quackmail::fetch::Feed f;
+	if (!quackmail::fetch::GetFeed(ctx.con, ctx.req.Form("name"), f)) {
+		BadRequest(ctx, "no such feed");
+		return;
+	}
+	quackmail::fetch::RunResult res;
+	quackmail::fetch::RunFeed(ctx.con, f, res);
+	RedirectTo(ctx, "/admin/feeds", res.status == "error" ? "feed_failed" : "fetched");
+}
+
+void PostFeedTest(Ctx &ctx) {
+	std::string info, err;
+	bool ok = quackmail::fetch::TestFeed(ctx.con, ctx.req.Form("name"), info, err);
+	RedirectTo(ctx, "/admin/feeds", ok ? "feed_ok" : "feed_failed");
+}
+
 } // namespace
 
 void RegisterAdminListRoutes(std::vector<Route> &out) {
@@ -444,6 +599,12 @@ void RegisterAdminListRoutes(std::vector<Route> &out) {
 	out.push_back({"POST", "/admin/lists/:n/unsubscribe", Role::Aide, PostListUnsubscribe});
 	out.push_back({"POST", "/admin/lists/:n/approve", Role::Aide, PostListApprove});
 	out.push_back({"POST", "/admin/lists/:n/reject", Role::Aide, PostListReject});
+
+	out.push_back({"GET", "/admin/feeds", Role::Aide, GetFeeds});
+	out.push_back({"POST", "/admin/feeds/add", Role::Aide, PostFeedAdd});
+	out.push_back({"POST", "/admin/feeds/remove", Role::Aide, PostFeedRemove});
+	out.push_back({"POST", "/admin/feeds/run", Role::Aide, PostFeedRun});
+	out.push_back({"POST", "/admin/feeds/test", Role::Aide, PostFeedTest});
 
 	// Self-service, open to anyone: see the note above PostPublicRequest.
 	out.push_back({"GET", "/lists", Role::Anon, GetPublicLists});

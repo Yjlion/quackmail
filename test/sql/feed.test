@@ -1,0 +1,402 @@
+# name: test/sql/feed.test
+# description: RSS 2.0 / RDF / Atom parsing and the message a feed item becomes
+# group: [quackmail]
+#
+# Every assertion here is offline. feed::Parse is a pure function over a string
+# and qm_feed_parse exposes it directly, which is what lets each shape of feed
+# be pinned down without a network in the loop — the same lever dkim::Verify's
+# injectable key lookup provides.
+
+require quackmail
+
+statement ok
+SELECT count(*) FROM qm_status();
+
+# ---- RSS 2.0 --------------------------------------------------------------
+
+query I
+SELECT count(*) FROM qm_feed_parse('<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Example News</title>
+    <link>https://example.com/</link>
+    <description>Things that happened</description>
+    <item>
+      <title>First item</title>
+      <link>https://example.com/1</link>
+      <guid isPermaLink="false">tag:example.com,2026:1</guid>
+      <pubDate>Mon, 27 Jul 2026 10:00:00 +0000</pubDate>
+      <description>The first thing.</description>
+    </item>
+    <item>
+      <title>Second item</title>
+      <link>https://example.com/2</link>
+      <description>The second thing.</description>
+    </item>
+  </channel>
+</rss>');
+----
+2
+
+query IIIII
+SELECT feed_title, guid, title, link, published FROM qm_feed_parse('<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>Example News</title>
+    <item>
+      <title>First item</title>
+      <link>https://example.com/1</link>
+      <guid isPermaLink="false">tag:example.com,2026:1</guid>
+      <pubDate>Mon, 27 Jul 2026 10:00:00 +0000</pubDate>
+      <description>The first thing.</description>
+    </item>
+  </channel>
+</rss>');
+----
+Example News	tag:example.com,2026:1	First item	https://example.com/1	1785146400
+
+# An item with no guid falls back to its link. Something has to identify it, or
+# every poll would post it again.
+query II
+SELECT guid, title FROM qm_feed_parse('<rss version="2.0"><channel>
+  <item><title>No guid</title><link>https://example.com/only</link></item>
+</channel></rss>');
+----
+https://example.com/only	No guid
+
+# And with neither, to the title.
+query I
+SELECT guid FROM qm_feed_parse('<rss version="2.0"><channel>
+  <item><title>Bare</title></item>
+</channel></rss>');
+----
+Bare
+
+# dc:creator is where most RSS feeds actually put the author.
+query I
+SELECT author FROM qm_feed_parse('<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel><item><title>x</title><guid>g1</guid>
+  <dc:creator>Ada Lovelace</dc:creator></item></channel></rss>');
+----
+Ada Lovelace
+
+# A <title> inside <image> is the image's, not the feed's.
+query I
+SELECT feed_title FROM qm_feed_parse('<rss version="2.0"><channel>
+  <title>Real Title</title>
+  <image><title>Logo Title</title><url>https://example.com/l.png</url></image>
+  <item><title>x</title><guid>g1</guid></item>
+</channel></rss>');
+----
+Real Title
+
+# ---- CDATA ----------------------------------------------------------------
+#
+# Feeds wrap HTML in CDATA constantly. Without CDATA support the tag scanner
+# stops at the first '>' *inside* that HTML and the rest is nonsense, so this is
+# the assertion that keeps the tokenizer honest.
+
+query III
+SELECT title, html, body FROM qm_feed_parse('<rss version="2.0"><channel>
+  <item>
+    <title><![CDATA[Tags & <brackets>]]></title>
+    <guid>g-cdata</guid>
+    <description><![CDATA[<p>Hello <a href="https://x.example/?a=1&b=2">world</a></p>]]></description>
+  </item>
+</channel></rss>');
+----
+Tags & <brackets>	true	<p>Hello <a href="https://x.example/?a=1&b=2">world</a></p>
+
+# content:encoded outranks description when both are present.
+query I
+SELECT body FROM qm_feed_parse('<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel><item><title>x</title><guid>g1</guid>
+  <description>short</description>
+  <content:encoded><![CDATA[the long version]]></content:encoded>
+</item></channel></rss>');
+----
+the long version
+
+# ---- entity decoding ------------------------------------------------------
+
+query I
+SELECT title FROM qm_feed_parse('<rss version="2.0"><channel>
+  <item><title>Caf&#233; &amp; cr&#xE8;me</title><guid>g1</guid></item>
+</channel></rss>');
+----
+Café & crème
+
+# ---- Atom -----------------------------------------------------------------
+#
+# Atom puts the link in an attribute, nests the author, and dates are ISO 8601
+# rather than RFC 2822 — three things RSS does differently.
+
+query IIIIII
+SELECT feed_title, guid, title, link, author, published FROM qm_feed_parse('<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom Example</title>
+  <link href="https://example.org/" rel="alternate"/>
+  <entry>
+    <title>An entry</title>
+    <link rel="alternate" href="https://example.org/e/1"/>
+    <id>urn:uuid:1225c695-cfb8-4ebb-aaaa-80da344efa6a</id>
+    <updated>2026-07-27T10:00:00Z</updated>
+    <author><name>Grace Hopper</name></author>
+    <summary>A summary.</summary>
+  </entry>
+</feed>');
+----
+Atom Example	urn:uuid:1225c695-cfb8-4ebb-aaaa-80da344efa6a	An entry	https://example.org/e/1	Grace Hopper	1785146400
+
+# An ISO 8601 offset is applied, not ignored.
+query I
+SELECT published FROM qm_feed_parse('<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>g1</id><title>x</title><updated>2026-07-27T12:00:00+02:00</updated></entry>
+</feed>');
+----
+1785146400
+
+# A rel="edit" or rel="self" link is not the entry's address.
+query I
+SELECT link FROM qm_feed_parse('<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>g1</id><title>x</title>
+    <link rel="edit" href="https://example.org/edit/1"/>
+    <link rel="alternate" href="https://example.org/e/1"/>
+  </entry>
+</feed>');
+----
+https://example.org/e/1
+
+# type="html" on the content declares it, without having to guess from markup.
+query I
+SELECT html FROM qm_feed_parse('<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>g1</id><title>x</title><content type="html">plain looking</content></entry>
+</feed>');
+----
+true
+
+# ---- RSS 1.0 / RDF --------------------------------------------------------
+#
+# Items are siblings of <channel>, not children of it.
+
+query II
+SELECT feed_title, count(*) OVER () FROM qm_feed_parse('<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/">
+  <channel rdf:about="https://example.net/">
+    <title>RDF Example</title>
+    <link>https://example.net/</link>
+  </channel>
+  <item rdf:about="https://example.net/a">
+    <title>Item A</title>
+    <link>https://example.net/a</link>
+  </item>
+  <item rdf:about="https://example.net/b">
+    <title>Item B</title>
+    <link>https://example.net/b</link>
+  </item>
+</rdf:RDF>') LIMIT 1;
+----
+RDF Example	2
+
+# ---- what is not a feed ---------------------------------------------------
+
+query I
+SELECT count(*) FROM qm_feed_parse('<html><body><p>Not a feed at all.</p></body></html>');
+----
+0
+
+query I
+SELECT count(*) FROM qm_feed_parse('this is not xml');
+----
+0
+
+# Truncated mid-document: whatever parsed cleanly is kept. A feed that is
+# half-broken half the time is still worth reading.
+query I
+SELECT count(*) FROM qm_feed_parse('<rss version="2.0"><channel>
+  <item><title>Complete</title><guid>g1</guid></item>
+  <item><title>Truncat');
+----
+1
+
+# ---- the message an item becomes ------------------------------------------
+
+query I
+SELECT message LIKE '%Subject: An entry%' FROM qm_feed_render('<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>g1</id><title>An entry</title><link rel="alternate" href="https://example.org/e/1"/>
+    <author><name>Grace Hopper</name></author><summary>A summary.</summary></entry>
+</feed>', 0);
+----
+true
+
+# The author goes in the display name, never the address: it is free text out of
+# somebody else's XML, and in an addr-spec it would be a header-forgery vector.
+query I
+SELECT message LIKE '%From: "Grace Hopper" <feed-testfeed@quackmail.test>%'
+FROM qm_feed_render('<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>g1</id><title>An entry</title>
+    <author><name>Grace Hopper</name></author><summary>A summary.</summary></entry>
+</feed>', 0);
+----
+true
+
+query I
+SELECT message LIKE '%<feed-testfeed@quackmail.test>%'
+FROM qm_feed_render('<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>g1</id><title>x</title>
+    <author><name>Nice Try" <evil@attacker.example</name></author></entry>
+</feed>', 0);
+----
+true
+
+# The link is carried, and comes first in the plain-text part so the item is
+# useful in a terminal client that renders no HTML.
+query I
+SELECT message LIKE '%X-Feed-Link: https://example.org/e/1%'
+FROM qm_feed_render('<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>g1</id><title>x</title><link rel="alternate" href="https://example.org/e/1"/>
+    <summary>A summary.</summary></entry>
+</feed>', 0);
+----
+true
+
+# An HTML body becomes multipart/alternative, so both kinds of reader are served.
+query I
+SELECT message LIKE '%multipart/alternative%'
+   AND message LIKE '%Content-Type: text/plain%'
+   AND message LIKE '%Content-Type: text/html%'
+FROM qm_feed_render('<rss version="2.0"><channel><item>
+  <title>x</title><guid>g1</guid>
+  <description><![CDATA[<p>rich</p>]]></description>
+</item></channel></rss>', 0);
+----
+true
+
+# A plain item stays a single text/plain part rather than a pointless multipart.
+query I
+SELECT message LIKE '%multipart%'
+FROM qm_feed_render('<rss version="2.0"><channel><item>
+  <title>x</title><guid>g1</guid><description>just words</description>
+</item></channel></rss>', 0);
+----
+false
+
+# The Message-ID is derived from the guid, so the same item re-fetched after a
+# restore threads as one message rather than two.
+query I
+SELECT (SELECT message FROM qm_feed_render('<rss version="2.0"><channel><item>
+  <title>x</title><guid>stable-guid</guid></item></channel></rss>', 0)) =
+       (SELECT message FROM qm_feed_render('<rss version="2.0"><channel><item>
+  <title>x</title><guid>stable-guid</guid></item></channel></rss>', 0));
+----
+true
+
+query II
+SELECT message IS NULL, note FROM qm_feed_render('<html></html>', 0);
+----
+true	not a feed, or it has no items
+
+query II
+SELECT message IS NULL, note FROM qm_feed_render('<rss version="2.0"><channel>
+  <item><title>x</title><guid>g1</guid></item></channel></rss>', 5);
+----
+true	no item at that index
+
+# ---- feed configuration ---------------------------------------------------
+
+query I
+SELECT count(*) FROM qm_feeds();
+----
+0
+
+statement ok
+SELECT ok FROM cit_room_add('News');
+
+query II
+SELECT ok, note FROM qm_feed_add('example', 'rss', 'https://example.com/feed.xml', 'News');
+----
+true	feed added
+
+# A name that could not survive being put into an address is refused.
+query II
+SELECT ok, note FROM qm_feed_add('bad name!', 'rss', 'https://example.com/f.xml', 'News');
+----
+false	a feed name may only contain letters, digits, '-', '_' and '.'
+
+query II
+SELECT ok, note FROM qm_feed_add('nourl', 'rss', 'not-a-url', 'News');
+----
+false	an rss feed needs an http:// or https:// url
+
+query II
+SELECT ok, note FROM qm_feed_add('nohost', 'imap', 'user:pw@', 'News');
+----
+false	imap needs a host
+
+query II
+SELECT ok, note FROM qm_feed_add('noroom', 'rss', 'https://example.com/f.xml', 'Nowhere');
+----
+false	no such public room
+
+query IIIII
+SELECT name, kind, enabled, source, target FROM qm_feeds();
+----
+example	rss	true	https://example.com/feed.xml	News
+
+# A mailbox source is split into its parts.
+query II
+SELECT ok, note FROM qm_feed_add('mailbox', 'imap', 'alice:hunter2@imap.example.com:1993', 'News');
+----
+true	feed added
+
+query III
+SELECT name, kind, source FROM qm_feeds() WHERE name = 'mailbox';
+----
+mailbox	imap	alice@imap.example.com:1993
+
+# The password never comes back out of the SQL surface.
+query I
+SELECT count(*) FROM qm_feeds() WHERE source LIKE '%hunter2%';
+----
+0
+
+query II
+SELECT ok, note FROM qm_feed_set('example', 'interval', '3600');
+----
+true	interval = 3600
+
+query I
+SELECT interval_secs FROM qm_feeds() WHERE name = 'example';
+----
+3600
+
+# Setting the password reports a mask rather than echoing it back.
+query II
+SELECT ok, note FROM qm_feed_set('mailbox', 'password', 'newsecret');
+----
+true	password = ********
+
+query II
+SELECT ok, note FROM qm_feed_set('example', 'nonsense', 'x');
+----
+false	unknown setting 'nonsense'
+
+query II
+SELECT ok, note FROM qm_feed_set('ghost', 'interval', '60');
+----
+false	no feed called 'ghost'
+
+query II
+SELECT ok, note FROM qm_feed_remove('mailbox');
+----
+true	feed removed
+
+query II
+SELECT ok, note FROM qm_feed_remove('mailbox');
+----
+false	no feed called 'mailbox'
+
+query I
+SELECT count(*) FROM qm_feeds();
+----
+1

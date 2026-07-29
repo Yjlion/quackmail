@@ -8,6 +8,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
+#include "quackmail/fetch.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/worker.hpp"
@@ -30,11 +31,18 @@ using namespace quackmail;
 // ---------------------------------------------------------------------------
 
 PeriodicWorker g_listserv;
+PeriodicWorker g_fetch;
 
 void ListservTick(Connection &con) {
 	listserv::SpoolResult res;
 	std::string err;
 	listserv::SpoolOnce(con, res, err);
+}
+
+void FetchTick(Connection &con) {
+	// RunDue records each feed's outcome on its own row, so a source that is
+	// down shows up in `qm_feeds()` rather than stopping the others.
+	fetch::RunDue(con, false);
 }
 
 // ---- worker control table functions ----------------------------------------
@@ -233,15 +241,103 @@ void RunFunc(ClientContext &, TableFunctionInput &data, DataChunk &output) {
 	g.emitted = true;
 }
 
+// ---------------------------------------------------------------------------
+// qm_fetch_run(feed := NULL, force := true) — poll now, one row per feed.
+//
+// The same reasoning as qm_listserv_run: the worker exists to do this on a
+// timer, and everything that asserts on a pull goes through here instead.
+// `force` defaults to true because calling this by hand means "now", not "if
+// the interval happens to have elapsed".
+// ---------------------------------------------------------------------------
+
+struct FetchRunBindData : public FunctionData {
+	std::string feed;
+	bool force = true;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<FetchRunBindData>(*this);
+	}
+	bool Equals(const FunctionData &) const override {
+		return false;
+	}
+};
+
+struct FetchRunGlobalState : public GlobalTableFunctionState {
+	std::vector<fetch::RunResult> results;
+	idx_t idx = 0;
+};
+
+unique_ptr<FunctionData> FetchRunBind(ClientContext &, TableFunctionBindInput &input,
+                                      vector<LogicalType> &return_types, vector<string> &names) {
+	auto result = make_uniq<FetchRunBindData>();
+	for (auto &kv : input.named_parameters) {
+		auto key = StringUtil::Lower(kv.first);
+		if (key == "feed") {
+			result->feed = kv.second.IsNull() ? std::string() : kv.second.ToString();
+		} else if (key == "force") {
+			result->force = kv.second.GetValue<bool>();
+		}
+	}
+	names = {"feed", "fetched", "stored", "skipped", "status", "error"};
+	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT,
+	                LogicalType::BIGINT,  LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+unique_ptr<GlobalTableFunctionState> FetchRunInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto &bind = input.bind_data->Cast<FetchRunBindData>();
+	auto gstate = make_uniq<FetchRunGlobalState>();
+	Connection con(*context.db);
+	store::EnsureSchema(con);
+	if (bind.feed.empty()) {
+		gstate->results = fetch::RunDue(con, bind.force);
+	} else {
+		fetch::Feed f;
+		fetch::RunResult res;
+		res.feed = bind.feed;
+		if (!fetch::GetFeed(con, bind.feed, f)) {
+			res.status = "error";
+			res.error = "no feed called '" + bind.feed + "'";
+		} else {
+			fetch::RunFeed(con, f, res);
+		}
+		gstate->results.push_back(res);
+	}
+	return std::move(gstate);
+}
+
+void FetchRunFunc(ClientContext &, TableFunctionInput &data, DataChunk &output) {
+	auto &g = data.global_state->Cast<FetchRunGlobalState>();
+	idx_t count = 0;
+	while (g.idx < g.results.size() && count < STANDARD_VECTOR_SIZE) {
+		const auto &r = g.results[g.idx];
+		output.SetValue(0, count, Value(r.feed));
+		output.SetValue(1, count, Value::BIGINT(r.fetched));
+		output.SetValue(2, count, Value::BIGINT(r.stored));
+		output.SetValue(3, count, Value::BIGINT(r.skipped));
+		output.SetValue(4, count, Value(r.status));
+		output.SetValue(5, count, Value(r.error));
+		g.idx++;
+		count++;
+	}
+	output.SetCardinality(count);
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	Connection con(loader.GetDatabaseInstance());
 	store::EnsureSchema(con);
 
 	RegisterWorkerControls(loader, "qm_listserv", "listserv", g_listserv, ListservTick);
+	RegisterWorkerControls(loader, "qm_fetch", "fetch", g_fetch, FetchTick);
 
 	TableFunction run("qm_listserv_run", {}, RunFunc, RunBind, RunInit);
 	run.named_parameters["room_num"] = LogicalType::BIGINT;
 	loader.RegisterFunction(run);
+
+	TableFunction fetch_run("qm_fetch_run", {}, FetchRunFunc, FetchRunBind, FetchRunInit);
+	fetch_run.named_parameters["feed"] = LogicalType::VARCHAR;
+	fetch_run.named_parameters["force"] = LogicalType::BOOLEAN;
+	loader.RegisterFunction(fetch_run);
 }
 
 } // namespace

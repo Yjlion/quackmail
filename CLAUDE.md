@@ -20,7 +20,7 @@ for what's next.
 | `citadel/` | native Citadel protocol (the centerpiece) |
 | `imap/ pop3/ smtp_in/ smtp_out/ managesieve/` | mail front-ends |
 | `quackmail/` | umbrella extension: schema init, users, room/floor admin, MIME helpers |
-| `spool/` | the timer-driven half: mailing-list distribution. No listener |
+| `spool/` | the timer-driven half: mailing-list distribution and remote message pulls. No listener |
 | `test/sql/` | sqllogictest (`make test`) |
 | `test/integration/` | python end-to-end tests, one per protocol |
 | `test/parity/` | captured output from the real Citadel server used as fixtures |
@@ -118,6 +118,10 @@ asserts, instead of sleeping past a poll interval.
 - `worker.hpp` — `PeriodicWorker`, the clock counterpart to `ServerController`.
   Anything on a timer uses it rather than growing its own thread and sleep loop.
   Register controls the same way a listener does; see `spool/`.
+- `mail_client.hpp` (POP3/IMAP *clients*), `http_client.hpp`, `feed.hpp`
+  (RSS/Atom over the existing `xmlstream` tokenizer), `fetch.hpp` (the model).
+  `net::Connect` is the shared dialer, with a connect timeout — never write
+  another `getaddrinfo`/`connect` pair.
 - Cross-session state lives in `citadel_sessions` and `citadel_express`
   (already backing `RWHO` / `SEXP` / `GEXP`).
 

@@ -218,6 +218,15 @@ std::string FlashText(const std::string &slug) {
 	if (slug == "rejected") {
 		return "Rejected. Nothing was sent.";
 	}
+	if (slug == "fetched") {
+		return "Polled. Anything new is in the target room.";
+	}
+	if (slug == "feed_ok") {
+		return "Connected and authenticated successfully.";
+	}
+	if (slug == "feed_failed") {
+		return "The feed could not be reached — see its status in the table.";
+	}
 	if (slug == "confirm_sent") {
 		// Deliberately says nothing about whether the list or the subscription
 		// exists: this page is anonymous, and a more helpful message would let
