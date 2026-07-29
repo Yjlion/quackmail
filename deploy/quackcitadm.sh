@@ -259,12 +259,13 @@ cmd_status() {
 cmd_websession() {
     action=${1:-list}; shift 2>/dev/null || true
     case "$action" in
-        list) q "SELECT token_hash, username, peer_ip, tls, user_agent,
+        list) now=$(sql_now)
+              q "SELECT token_hash, username, peer_ip, tls, user_agent,
                         to_timestamp(created_at) AS created,
                         to_timestamp(last_seen)  AS last_seen,
                         to_timestamp(expires_at) AS expires
                  FROM quackmail_web_sessions
-                 WHERE NOT revoked AND expires_at > epoch(now())
+                 WHERE NOT revoked AND expires_at > $now
                  ORDER BY last_seen DESC" ;;
         revoke)
             need 1 "$@"
@@ -275,8 +276,9 @@ cmd_websession() {
             q "DELETE FROM quackmail_web_sessions WHERE username = $(sql_str "$1")
                RETURNING token_hash, username" ;;
         prune)
+            now=$(sql_now)
             q "DELETE FROM quackmail_web_sessions
-               WHERE revoked OR expires_at <= epoch(now())
+               WHERE revoked OR expires_at <= $now
                RETURNING token_hash, username" ;;
         *) die "unknown websession command '$action' (list|revoke|revoke-user|prune)" ;;
     esac
