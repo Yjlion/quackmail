@@ -28,6 +28,7 @@ prefixes still say `quackmail`; the product is QuackCit.
 | 9 | Telnet BBS depth (floors, zap, skip, registration, admin verbs) + `quackmail_http`: webmail, the BBS over the web, and the admin console | PR #15 |
 | 10 | Web overhaul phase 1: persistent connections, `/static` assets, a grouped sidebar | PR #24 |
 | 10 | Web overhaul phase 2a: bundled IANA tz database, vCard/iCalendar, `UpsertByEuid`, the contacts view | PR #25 |
+| 10 | Web overhaul phase 2b: shared content-line grammar, vNote, viewer time zone, calendar/tasks/notes/blog views | PR #26 |
 
 Phases 2 and 3 were validated byte-for-byte against the real Citadel server, and
 the **official `citadel` text client drives a full clean session** against
@@ -91,6 +92,40 @@ RFC 8536 says the first non-DST type), and converting a wall clock back to an
 instant has to probe the offset a day either side rather than at the wall time
 itself, or the two candidates converge and an ambiguous time is silently
 resolved instead of reported.
+
+### An all-day value is a date, not an instant
+
+`ical::DateTime::epoch` means a UTC instant when `all_day` is false and a
+**wall-clock** value when it is true, because `VALUE=DATE` names a day rather
+than a moment. Shifting an all-day value through a zone anyway moves the date:
+a 1 April due date became 31 March, and Christmas became Christmas Eve, for any
+viewer west of Greenwich. Every renderer takes the flag rather than the bare
+epoch, and the header says so where the old comment claimed "always UTC".
+
+The same shape of bug on the write side: `FoldItemInto` only *wrote*
+`PERCENT-COMPLETE` and `PRIORITY` when non-zero, so reopening a completed task
+left the stored `100` in place and the task read as done again on reload. Zero
+means removal, the same rule the contacts form follows for an emptied field.
+
+### The three groupware formats share one line grammar
+
+vCard, iCalendar and vNote are the same format with different property names, so
+`core/contentline.cpp` owns the unfolder, the 75-octet folder and the escaper and
+each format owns only what is specific to it (which properties are structured,
+what they mean). It was extracted when vNote would have made a third copy.
+
+Notes are `text/vnote` rather than iCalendar `VJOURNAL`, which would have needed
+no new code at all. The reason is parity: WebCit and the Citadel clients read
+vNote, and cross-protocol readability is the entire point of storing groupware as
+ordinary messages.
+
+### Blog and journal rooms are not groupware
+
+They hold ordinary messages. What makes the view different is that it shows whole
+entries newest-first instead of a list of subjects — so it reuses `RenderMessage`
+and the existing compose and read routes rather than growing an item/edit/save
+path. A second way to edit the same object would be a second place to keep
+correct.
 
 ### `default_view` decides how a room renders, and `?view=raw` always escapes
 

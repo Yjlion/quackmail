@@ -8,18 +8,6 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 **Bringing the web interface up to WebCit-level capability**, in four PRs.
 Phase 1 is done; the rest follow in order.
 
-- [ ] **Phase 2b — the remaining room views.** 2a (below) shipped the
-      groupware core and the contacts view; what is left is the other renderers
-      on top of it.
-  - [ ] `web_calendar.cpp` — month grid and agenda over `ical::Expand`, plus
-        VTODO tasks. `VIEW_CALBRIEF` is the same data in list layout, not a
-        second handler.
-  - [ ] `web_notes.cpp` and `web_blog.cpp` (blog and journal are the same
-        renderer: full bodies newest-first, permalinks by euid).
-  - [ ] `VIEW_DRAFTS` — the mailbox view plus "resume editing".
-  - [ ] deliberately **not** wiki (`VIEW_WIKI`/`WIKIMD` need versioning, a
-        name→euid resolver and a markdown renderer — its own PR) or
-        `VIEW_QUEUE` (Citadel's internal spool view, not a user view).
 - [ ] **Phase 3 — rich mail and a Sieve rule builder**
   - [ ] `core/src/mime_build.cpp`: one `multipart/alternative`/`related`/`mixed`
         builder, replacing the third hand-rolled one in the tree.
@@ -46,6 +34,31 @@ Phase 1 is done; the rest follow in order.
         against names colliding with the `0000000002.Mail` mailbox keyspace.
 
 ## Shipped
+
+- [x] **The remaining room views** (phase 2b of the web overhaul)
+  - [x] `core/contentline.{hpp,cpp}` — the line grammar vCard, iCalendar and
+        vNote share, extracted rather than copied a third time.
+  - [x] `core/vnote.{hpp,cpp}` — what real Citadel stores a sticky note in
+        (`text/vnote`), so WebCit and the Citadel clients can read ours. VJOURNAL
+        would have needed no new code but would not have been readable by them.
+  - [x] a viewer time zone: `web_tz` per user, `qm_default_tz` for the site, with
+        a picker on `/prefs`. `FormatTime` used `localtime_r`, so every timestamp
+        rendered in the *server's* zone.
+  - [x] `web_calendar.cpp` — month grid and agenda over `ical::Expand`, events
+        written with a TZID so a recurrence keeps its local hour across a DST
+        change. `VIEW_CALBRIEF` shares the handler.
+  - [x] `web_tasks.cpp` — VTODO with due/priority/progress, sorted as a work
+        queue, complete toggled by POST.
+  - [x] `web_notes.cpp` — a vNote card grid, colours validated before they reach
+        a style attribute.
+  - [x] `web_blog.cpp` — blog and journal, which hold *ordinary messages*: whole
+        entries newest-first, reusing `RenderMessage` and the existing compose
+        and read routes rather than growing a second edit path.
+  - [x] `test/sql/vnote.test` and `test/integration/test_groupware.py`.
+  - [x] deliberately **not** wiki (`VIEW_WIKI`/`WIKIMD` need versioning, a
+        name→euid resolver and a markdown renderer — its own PR) or
+        `VIEW_QUEUE` (Citadel's internal spool view, not a user view). Drafts
+        stay on the mailbox path under `/mail/`.
 
 - [x] **Groupware core and the contacts view** (phase 2a of the web overhaul)
   - [x] a bundled IANA time zone database: `core/tz.{hpp,cpp}` +
