@@ -240,6 +240,237 @@ std::vector<Script> LoadScripts(Ctx &ctx, const std::string &user) {
 }
 
 // Shared by /prefs/sieve and the admin console's per-user view.
+bool SaveScript(Ctx &ctx, const std::string &user, const std::string &name,
+                const std::string &script, std::string &err);
+
+// ---- the rule builder ----------------------------------------------------
+//
+// Every control here is a plain form that posts. There is no JavaScript: adding
+// a rule, deleting one and reordering are each a submit, which means the builder
+// works in a text browser and cannot get into a state the server disagrees with.
+//
+// The round trip is always text -> rules -> edit -> text. Nothing structured is
+// stored, so a script rewritten over ManageSieve simply shows up as different
+// rules on the next page load rather than being clobbered.
+
+const std::pair<const char *, const char *> kRuleFields[] = {
+    {"from", "From"},
+    {"to", "To"},
+    {"cc", "Cc"},
+    {"subject", "Subject"},
+    {"body", "Message body"},
+    {"size", "Size in bytes"},
+};
+
+const std::pair<const char *, const char *> kTextOps[] = {
+    {"contains", "contains"},
+    {"is", "is exactly"},
+    {"matches", "matches (with * and ?)"},
+};
+
+const std::pair<const char *, const char *> kSizeOps[] = {
+    {"over", "is over"},
+    {"under", "is under"},
+};
+
+// Only the actions the evaluator implements. `Capabilities()` is
+// "fileinto reject envelope body copy subaddress", so there is no vacation here
+// — offering one would be a lie about what the server does with the message.
+const std::pair<const char *, const char *> kRuleActions[] = {
+    {"fileinto", "File into a folder"},
+    {"keep", "Keep in the inbox"},
+    {"redirect", "Forward to an address"},
+    {"reject", "Refuse with a reason"},
+    {"discard", "Discard silently"},
+};
+
+std::string DescribeTest(const quackmail::sieve::RuleTest &t) {
+	std::string field = t.field;
+	for (auto &f : kRuleFields) {
+		if (field == f.first) {
+			field = f.second;
+			break;
+		}
+	}
+	if (field.rfind("header:", 0) == 0) {
+		field = "header " + field.substr(7);
+	}
+	std::string op = t.op;
+	for (auto &o : kTextOps) {
+		if (op == o.first) {
+			op = o.second;
+			break;
+		}
+	}
+	for (auto &o : kSizeOps) {
+		if (op == o.first) {
+			op = o.second;
+			break;
+		}
+	}
+	return field + (t.negate ? " does not " : " ") + op + " " + t.value;
+}
+
+std::string DescribeAction(const quackmail::sieve::Action &a) {
+	switch (a.type) {
+	case quackmail::sieve::Action::FILEINTO:
+		return "file into " + a.folder;
+	case quackmail::sieve::Action::REDIRECT:
+		return "forward to " + a.address;
+	case quackmail::sieve::Action::REJECT:
+		return "refuse: " + a.reason;
+	case quackmail::sieve::Action::DISCARD:
+		return "discard";
+	default:
+		return "keep";
+	}
+}
+
+// One card per rule, each with its own small forms. A rule is identified by its
+// index in the decomposed list — which is stable for the text as it stands, and
+// re-derived on every load, so a concurrent change over ManageSieve cannot make
+// a button act on the wrong rule silently: the indices simply describe whatever
+// the script says now.
+std::string RuleCards(Ctx &ctx, const std::string &action_prefix, const std::string &user,
+                      const std::string &script_name,
+                      const std::vector<quackmail::sieve::Rule> &rules) {
+	std::string out = "<div class=\"rules\">";
+	for (size_t i = 0; i < rules.size(); i++) {
+		const auto &r = rules[i];
+		out += "<div class=\"card rule\">";
+		out += "<h3>" + T(r.name.empty() ? "Rule " + std::to_string(i + 1) : r.name) + "</h3>";
+
+		out += "<p class=\"muted\">If " + T(r.all ? "all" : "any") + " of:</p><ul>";
+		for (auto &t : r.tests) {
+			out += "<li>" + T(DescribeTest(t)) + "</li>";
+		}
+		out += "</ul><p class=\"muted\">then:</p><ul>";
+		for (auto &a : r.actions) {
+			out += "<li>" + T(DescribeAction(a)) + "</li>";
+		}
+		if (r.stop) {
+			out += "<li>" + T("stop — later rules do not run") + "</li>";
+		}
+		out += "</ul>";
+
+		out += "<div class=\"actions\">";
+		auto hidden = [&]() {
+			return Hidden("user", user) + Hidden("name", script_name) +
+			       Hidden("rule", std::to_string(i));
+		};
+		if (i > 0) {
+			out += FormStart(ctx, action_prefix + "/rule/move", "inline") + hidden() +
+			       Hidden("dir", "up") + Button("Move up", "sec") + FormEnd();
+		}
+		if (i + 1 < rules.size()) {
+			out += FormStart(ctx, action_prefix + "/rule/move", "inline") + hidden() +
+			       Hidden("dir", "down") + Button("Move down", "sec") + FormEnd();
+		}
+		out += FormStart(ctx, action_prefix + "/rule/delete", "inline") + hidden() +
+		       "<button class=\"btn danger\" type=\"submit\" data-confirm=\"Delete this rule?\">"
+		       "Delete rule</button>" +
+		       FormEnd();
+		out += "</div></div>";
+	}
+	return out + "</div>";
+}
+
+// The add form. One condition at a time: a multi-condition rule is built by
+// adding the rule and then adding conditions to it, which keeps every step a
+// single POST with no client-side state to lose.
+std::string AddRuleForm(Ctx &ctx, const std::string &action_prefix, const std::string &user,
+                        const std::string &script_name) {
+	std::vector<std::pair<std::string, std::string>> fields;
+	for (auto &f : kRuleFields) {
+		fields.push_back({f.first, f.second});
+	}
+	std::vector<std::pair<std::string, std::string>> ops;
+	for (auto &o : kTextOps) {
+		ops.push_back({o.first, o.second});
+	}
+	for (auto &o : kSizeOps) {
+		ops.push_back({o.first, o.second});
+	}
+	std::vector<std::pair<std::string, std::string>> actions;
+	for (auto &a : kRuleActions) {
+		actions.push_back({a.first, a.second});
+	}
+
+	std::string out = "<h3>Add a rule</h3>";
+	out += FormStart(ctx, action_prefix + "/rule/add");
+	out += Hidden("user", user);
+	out += Hidden("name", script_name);
+	out += "<label class=\"field\"><span>Name (optional)</span>" + TextInput("rule_name", "") +
+	       "</label>";
+	out += "<label class=\"field\"><span>When</span>" + Select("field", fields, "from") + "</label>";
+	out += "<label class=\"field\"><span>Test</span>" + Select("op", ops, "contains") + "</label>";
+	out += "<label class=\"field\"><span>Value</span>" + TextInput("value", "") + "</label>";
+	out += Checkbox("negate", false, "Invert this condition") + "<br>";
+	out += "<label class=\"field\"><span>Then</span>" + Select("action", actions, "fileinto") +
+	       "</label>";
+	out += "<label class=\"field\"><span>Folder or address</span>" + TextInput("argument", "") +
+	       "</label>";
+	out += Checkbox("stop", false, "Stop: do not run later rules") + "<br>";
+	out += "<p>" + Button("Add rule") + "</p>";
+	out += "<p class=\"muted\">Adding a rule rewrites the script text below. A rule with more than one "
+	       "condition is built by adding it and then adding a condition to it.</p>";
+	out += FormEnd();
+	return out;
+}
+
+// ---- rule POST handlers --------------------------------------------------
+//
+// Each one decomposes the current text, changes one thing, and composes it back.
+// A script the rule view cannot represent is refused rather than rewritten:
+// otherwise a stray click would silently replace filtering the user wrote by
+// hand with an approximation of it.
+
+// The named script's text, and the decomposed rules, or false having rendered
+// the reason.
+bool LoadRules(Ctx &ctx, const std::string &user, const std::string &name, std::string &text,
+               std::vector<quackmail::sieve::Rule> &rules) {
+	auto r = Exec(ctx.con,
+	              "SELECT script FROM quackmail_sieve_scripts WHERE username = $1 AND name = $2 LIMIT 1",
+	              {Value(user), Value(name)});
+	if (!r) {
+		NotFound(ctx);
+		return false;
+	}
+	auto &mat = r->Cast<duckdb::MaterializedQueryResult>();
+	text = mat.RowCount() ? mat.GetValue(0, 0).ToString() : std::string();
+
+	std::string why;
+	if (!text.empty() && !quackmail::sieve::Decompose(text, rules, why)) {
+		ErrorPage(ctx, 400, "This script cannot be edited as rules",
+		          why + " Edit it as text instead — the rule editor reads it back from the text, so "
+		                "nothing is lost by doing so.");
+		return false;
+	}
+	return true;
+}
+
+bool StoreRules(Ctx &ctx, const std::string &user, const std::string &name,
+                const std::vector<quackmail::sieve::Rule> &rules) {
+	std::string composed = quackmail::sieve::Compose(rules);
+	std::string err;
+	// Compose is the only writer, so this should never fail — but it goes through
+	// the same validation as a hand-typed script rather than trusting that.
+	if (!SaveScript(ctx, user, name, composed, err)) {
+		ErrorPage(ctx, 500, "The rules could not be saved", err);
+		return false;
+	}
+	return true;
+}
+
+std::string SieveHref(const std::string &action_prefix, const std::string &user,
+                      const std::string &name) {
+	std::string out = action_prefix + "?name=" + http::PercentEncode(name);
+	if (!user.empty()) {
+		out += "&user=" + http::PercentEncode(user);
+	}
+	return out;
+}
+
 std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &action_prefix) {
 	auto scripts = LoadScripts(ctx, user);
 	std::string editing = ctx.req.Param("name");
@@ -270,14 +501,39 @@ std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &acti
 	}
 	body += "</table></div>";
 
-	body += "<h2>" + T(editing.empty() ? "New script" : "Edit " + editing) + "</h2>";
+	// ---- the rule view ---------------------------------------------------
+	// Rules are derived from the script text every time, never stored beside it:
+	// ManageSieve and the admin console write the same row, so a table of rules
+	// would either be overwritten silently or start describing filtering that is
+	// not what runs. See the note in core/include/quackmail/sieve.hpp.
+	if (!editing.empty() || !current.empty()) {
+		body += "<h2>Rules</h2>";
+		std::vector<quackmail::sieve::Rule> rules;
+		std::string why;
+		if (!quackmail::sieve::Decompose(current, rules, why)) {
+			// Refuse to show a partial decomposition: describing filtering that
+			// is not what happens is worse than admitting the view cannot show
+			// it. Only the text editor below is offered.
+			body += "<div class=\"warnbar\">" + T(why) +
+			        " Edit it as text below — the rules here are read back from that text, so nothing "
+			        "is lost by doing so.</div>";
+		} else if (rules.empty()) {
+			body += "<p class=\"muted\">This script has no rules yet.</p>";
+		} else {
+			body += RawHtml(RuleCards(ctx, action_prefix, user, editing, rules));
+		}
+		body += RawHtml(AddRuleForm(ctx, action_prefix, user, editing));
+	}
+
+	body += "<h2>" + T(editing.empty() ? "New script" : "Source of " + editing) + "</h2>";
 	body += FormStart(ctx, action_prefix + "/save");
 	body += Hidden("user", user);
 	body += "<label class=\"field\"><span>Name</span>" + TextInput("name", editing) + "</label>";
 	body += "<label class=\"field\"><span>Script</span>" + TextArea("script", current, 18) + "</label>";
 	body += "<p>" + Button("Save") + "</p>";
-	body += "<p class=\"muted\">Scripts are validated with the same parser the delivery path uses, so a "
-	        "script that saves is a script that runs.</p>";
+	body += "<p class=\"muted\">This text is what runs, and what the rules above are read from. Scripts "
+	        "are validated with the same parser the delivery path uses, so a script that saves is a "
+	        "script that runs.</p>";
 	body += FormEnd();
 	return body;
 }
@@ -311,6 +567,152 @@ void ActivateScript(Ctx &ctx, const std::string &user, const std::string &name) 
 	     {Value(user)});
 	Exec(ctx.con, "UPDATE quackmail_sieve_scripts SET active = true WHERE username = $1 AND name = $2",
 	     {Value(user), Value(name)});
+}
+
+// The rule handlers. `user` is only honoured for an aide editing someone else's
+// script through /admin/sieve; for /prefs/sieve it is the signed-in user, and
+// the router's Role gate is what keeps the two apart.
+std::string RuleUser(Ctx &ctx) {
+	std::string requested = ctx.req.Form("user");
+	if (requested.empty() || !ctx.IsAide()) {
+		return ctx.username;
+	}
+	return requested;
+}
+
+void PostRuleAdd(Ctx &ctx, const std::string &action_prefix) {
+	std::string user = RuleUser(ctx);
+	std::string name = ctx.req.Form("name");
+	if (name.empty()) {
+		BadRequest(ctx, "Choose or name a script first.");
+		return;
+	}
+	std::string text;
+	std::vector<quackmail::sieve::Rule> rules;
+	if (!LoadRules(ctx, user, name, text, rules)) {
+		return;
+	}
+
+	quackmail::sieve::Rule rule;
+	rule.name = ctx.req.Form("rule_name");
+	rule.all = true;
+	rule.stop = !ctx.req.Form("stop").empty();
+
+	quackmail::sieve::RuleTest test;
+	test.field = ctx.req.Form("field");
+	test.op = ctx.req.Form("op");
+	test.value = ctx.req.Form("value");
+	test.negate = !ctx.req.Form("negate").empty();
+	if (test.field.empty() || test.value.empty()) {
+		BadRequest(ctx, "A rule needs something to test and a value to test it against.");
+		return;
+	}
+	// A size test only means anything against a number, and the two operator sets
+	// are not interchangeable.
+	if (test.field == "size") {
+		if (test.op != "over" && test.op != "under") {
+			test.op = "over";
+		}
+		for (char c : test.value) {
+			if (c < '0' || c > '9') {
+				BadRequest(ctx, "A size is a number of bytes.");
+				return;
+			}
+		}
+	} else if (test.op != "is" && test.op != "contains" && test.op != "matches") {
+		test.op = "contains";
+	}
+	rule.tests.push_back(test);
+
+	std::string action = ctx.req.Form("action");
+	std::string argument = ctx.req.Form("argument");
+	quackmail::sieve::Action a;
+	if (action == "fileinto") {
+		if (argument.empty()) {
+			BadRequest(ctx, "Filing a message needs a folder to file it into.");
+			return;
+		}
+		a.type = quackmail::sieve::Action::FILEINTO;
+		a.folder = argument;
+	} else if (action == "redirect") {
+		if (argument.find('@') == std::string::npos) {
+			BadRequest(ctx, "Forwarding needs an e-mail address.");
+			return;
+		}
+		a.type = quackmail::sieve::Action::REDIRECT;
+		a.address = argument;
+	} else if (action == "reject") {
+		a.type = quackmail::sieve::Action::REJECT;
+		a.reason = argument.empty() ? "message refused by the recipient's filter" : argument;
+	} else if (action == "discard") {
+		a.type = quackmail::sieve::Action::DISCARD;
+	} else {
+		a.type = quackmail::sieve::Action::KEEP;
+	}
+	rule.actions.push_back(a);
+
+	rules.push_back(rule);
+	if (!StoreRules(ctx, user, name, rules)) {
+		return;
+	}
+	RedirectTo(ctx, SieveHref(action_prefix, ctx.req.Form("user"), name), "saved");
+}
+
+void PostRuleDelete(Ctx &ctx, const std::string &action_prefix) {
+	std::string user = RuleUser(ctx);
+	std::string name = ctx.req.Form("name");
+	std::string text;
+	std::vector<quackmail::sieve::Rule> rules;
+	if (!LoadRules(ctx, user, name, text, rules)) {
+		return;
+	}
+	int64_t which = ctx.FormInt("rule", -1);
+	if (which < 0 || (size_t)which >= rules.size()) {
+		NotFound(ctx);
+		return;
+	}
+	rules.erase(rules.begin() + (size_t)which);
+	if (!StoreRules(ctx, user, name, rules)) {
+		return;
+	}
+	RedirectTo(ctx, SieveHref(action_prefix, ctx.req.Form("user"), name), "deleted");
+}
+
+void PostRuleMove(Ctx &ctx, const std::string &action_prefix) {
+	std::string user = RuleUser(ctx);
+	std::string name = ctx.req.Form("name");
+	std::string text;
+	std::vector<quackmail::sieve::Rule> rules;
+	if (!LoadRules(ctx, user, name, text, rules)) {
+		return;
+	}
+	int64_t which = ctx.FormInt("rule", -1);
+	if (which < 0 || (size_t)which >= rules.size()) {
+		NotFound(ctx);
+		return;
+	}
+	// Order matters in Sieve: a rule with `stop` prevents everything after it, so
+	// moving one is a real change rather than cosmetic.
+	size_t i = (size_t)which;
+	if (ctx.req.Form("dir") == "up" && i > 0) {
+		std::swap(rules[i], rules[i - 1]);
+	} else if (ctx.req.Form("dir") == "down" && i + 1 < rules.size()) {
+		std::swap(rules[i], rules[i + 1]);
+	}
+	if (!StoreRules(ctx, user, name, rules)) {
+		return;
+	}
+	RedirectTo(ctx, SieveHref(action_prefix, ctx.req.Form("user"), name), "saved");
+}
+
+void PostSieveRuleAdd(Ctx &ctx) {
+	PostRuleAdd(ctx, "/prefs/sieve");
+}
+void PostSieveRuleDelete(Ctx &ctx) {
+	PostRuleDelete(ctx, "/prefs/sieve");
+}
+void PostSieveRuleMove(Ctx &ctx) {
+	PostRuleMove(ctx, "/prefs/sieve");
 }
 
 void GetSieve(Ctx &ctx) {
@@ -409,6 +811,9 @@ void RegisterPrefsRoutes(std::vector<Route> &out) {
 	out.push_back({"POST", "/prefs/sieve/save", Role::User, PostSieveSave});
 	out.push_back({"POST", "/prefs/sieve/activate", Role::User, PostSieveActivate});
 	out.push_back({"POST", "/prefs/sieve/delete", Role::User, PostSieveDelete});
+	out.push_back({"POST", "/prefs/sieve/rule/add", Role::User, PostSieveRuleAdd});
+	out.push_back({"POST", "/prefs/sieve/rule/delete", Role::User, PostSieveRuleDelete});
+	out.push_back({"POST", "/prefs/sieve/rule/move", Role::User, PostSieveRuleMove});
 	out.push_back({"GET", "/prefs/sessions", Role::User, GetSessions});
 	out.push_back({"POST", "/prefs/sessions/revoke", Role::User, PostRevokeSession});
 }
