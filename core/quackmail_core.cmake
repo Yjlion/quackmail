@@ -67,6 +67,8 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/vcard.cpp
         ${QUACKMAIL_CORE_DIR}/src/ical.cpp
         ${QUACKMAIL_CORE_DIR}/src/vnote.cpp
+        ${QUACKMAIL_CORE_DIR}/src/mime_build.cpp
+        ${QUACKMAIL_CORE_DIR}/src/html_sanitize.cpp
     )
     # Linked into loadable .so extensions, so it must be position independent.
     set_target_properties(quackmail_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
