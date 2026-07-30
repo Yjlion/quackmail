@@ -232,3 +232,79 @@ iframe.htmlpart {
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ---- calendar ---------------------------------------------------------- */
+
+.calmonth { table-layout: fixed; }
+.calmonth th {
+  text-align: center; position: static;   /* the grid is short; no sticky needed */
+}
+.calmonth td.calday {
+  height: 7rem; vertical-align: top; padding: var(--s1);
+  border: 1px solid var(--line);
+}
+/* Days spilling in from the neighbouring months are context, not content. */
+.calmonth td.calday.other { background: var(--panel); }
+.calmonth td.calday.other .num a { color: var(--muted); }
+.calmonth td.calday.today { box-shadow: inset 0 0 0 2px var(--accent); }
+.calmonth .num {
+  font-variant-numeric: tabular-nums; font-size: .85em;
+  text-align: right; margin-bottom: var(--s1);
+}
+.calmonth .num a { text-decoration: none; color: inherit; }
+.calmonth .ev {
+  font-size: .82em; line-height: 1.3; margin-bottom: 2px;
+  padding: 1px 3px; border-radius: 2px; background: var(--bg);
+  border-left: 2px solid var(--accent);
+  /* One line per event: a busy day must not stretch the whole row. */
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.calmonth .ev.allday { background: var(--accent); border-left-color: var(--accent); }
+.calmonth .ev.allday a { color: var(--accent-fg); }
+.calmonth .ev a { text-decoration: none; }
+
+@media (max-width: 52rem) {
+  /* A seven-column grid does not fit a phone. Let it scroll rather than
+     crushing every day to nothing. */
+  .calmonth { min-width: 44rem; }
+  .calmonth td.calday { height: 5rem; }
+}
+
+/* ---- tasks ------------------------------------------------------------- */
+
+tr.taskdone td { color: var(--muted); }
+tr.taskdone td a { color: var(--muted); text-decoration: line-through; }
+
+/* ---- notes ------------------------------------------------------------- */
+
+.notegrid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: var(--s3);
+}
+.note {
+  /* --note is set per-note from its own colour; the fallback is the panel. */
+  background: var(--note, var(--panel));
+  border: 1px solid var(--line); border-radius: var(--r1);
+  padding: var(--s3); min-height: 8rem;
+}
+/* A coloured note needs dark text whatever the theme: the colours come from
+   Outlook and are all pale. */
+.note[style*="--note"] { color: #1c1b19; }
+.note[style*="--note"] h3 a { color: #1c1b19; }
+.note h3 { margin: 0 0 var(--s2); font-size: .95rem; }
+.note h3 a { text-decoration: none; }
+.note pre {
+  margin: 0; white-space: pre-wrap; word-wrap: break-word;
+  font-family: inherit; font-size: .9em;
+}
+
+/* ---- blog and journal entries ------------------------------------------ */
+
+.entry {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--s4); margin-bottom: var(--s4);
+}
+.entry:last-child { border-bottom: 0; }
+.entry h2 { margin-top: 0; }
+.entry h2 a { text-decoration: none; }
+.entry .byline { margin-top: calc(-1 * var(--s2)); font-size: .88em; }

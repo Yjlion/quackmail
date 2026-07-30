@@ -48,6 +48,17 @@ bool HasCustomView(int default_view);
 
 // Each view file contributes its handler.
 const RoomViewHandler &ContactsView();
+const RoomViewHandler &CalendarView();
+const RoomViewHandler &CalBriefView();
+const RoomViewHandler &TasksView();
+const RoomViewHandler &NotesView();
+const RoomViewHandler &BlogView();
+const RoomViewHandler &JournalView();
+
+// The tasks list's one-click complete toggle. It is not part of RoomViewHandler
+// because no other view has an equivalent, and inventing a generic "toggle" slot
+// for one caller would be worse than one extra route.
+void TasksComplete(Ctx &ctx, const quackmail::citadel::Room &room);
 
 // The /bbs/room/:n/item/... routes, which every object view shares.
 void RegisterViewRoutes(std::vector<Route> &out);

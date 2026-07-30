@@ -26,7 +26,23 @@ const RoomViewHandler &ViewFor(int default_view) {
 	switch (default_view) {
 	case quackmail::citadel::VIEW_ADDRESSBOOK:
 		return ContactsView();
+	case quackmail::citadel::VIEW_CALENDAR:
+		return CalendarView();
+	case quackmail::citadel::VIEW_CALBRIEF:
+		return CalBriefView();
+	case quackmail::citadel::VIEW_TASKS:
+		return TasksView();
+	case quackmail::citadel::VIEW_NOTES:
+		return NotesView();
+	case quackmail::citadel::VIEW_BLOG:
+		return BlogView();
+	case quackmail::citadel::VIEW_JOURNAL:
+		return JournalView();
 	default:
+		// VIEW_BBS, VIEW_MAILBOX, VIEW_DRAFTS, VIEW_WIKI, VIEW_WIKIMD,
+		// VIEW_QUEUE. Mail rooms are reached through /mail/ rather than here;
+		// the wikis need versioning and a markdown renderer, and the queue is
+		// Citadel's own spool view rather than a user one.
 		return kBoardView;
 	}
 }
@@ -203,6 +219,21 @@ void PostItemDelete(Ctx &ctx) {
 	vh->remove(ctx, room);
 }
 
+// Only the tasks view has this, so it checks the view rather than dispatching
+// through a slot that would be null everywhere else.
+void PostItemComplete(Ctx &ctx) {
+	Room room;
+	const RoomViewHandler *vh = nullptr;
+	if (!ViewRoom(ctx, room, &vh)) {
+		return;
+	}
+	if (vh->view != quackmail::citadel::VIEW_TASKS) {
+		NotFound(ctx);
+		return;
+	}
+	TasksComplete(ctx, room);
+}
+
 } // namespace
 
 void RegisterViewRoutes(std::vector<Route> &out) {
@@ -211,6 +242,7 @@ void RegisterViewRoutes(std::vector<Route> &out) {
 	out.push_back({"GET", "/bbs/room/:n/item/new", Role::User, GetItemNew});
 	out.push_back({"POST", "/bbs/room/:n/item/save", Role::User, PostItemSave});
 	out.push_back({"POST", "/bbs/room/:n/item/delete", Role::User, PostItemDelete});
+	out.push_back({"POST", "/bbs/room/:n/item/complete", Role::User, PostItemComplete});
 	out.push_back({"GET", "/bbs/room/:n/item/:m/edit", Role::User, GetItemEdit});
 	out.push_back({"GET", "/bbs/room/:n/item/:m", Role::User, GetItem});
 }

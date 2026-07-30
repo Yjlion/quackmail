@@ -31,6 +31,7 @@
 #include "quackmail/tz.hpp"
 #include "quackmail/util.hpp"
 #include "quackmail/vcard.hpp"
+#include "quackmail/vnote.hpp"
 
 #include <cstdlib>
 #include <ctime>
@@ -1237,6 +1238,76 @@ void VcardEmitScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	    });
 }
 
+// ---- vNote ---------------------------------------------------------------
+// The format Citadel stores a sticky note in. Same grammar as vCard, different
+// property names — see core/vnote.cpp for why it is not VJOURNAL.
+
+void VnoteCountScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, int64_t>(args.data[0], result, args.size(), [&](string_t in) {
+		std::vector<quackmail::vnote::Note> notes;
+		quackmail::vnote::Parse(in.GetString(), notes);
+		return (int64_t)notes.size();
+	});
+}
+
+// qm_vnote_get(text, field) -> "summary" | "body" | "uid" | "color", or any
+// property name for the ones this does not model.
+void VnoteGetScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, string_t field, ValidityMask &mask, idx_t idx) {
+		    quackmail::vnote::Note note;
+		    if (!quackmail::vnote::ParseOne(text.GetString(), note)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    std::string want = quackmail::util::Upper(field.GetString());
+		    if (want == "SUMMARY") {
+			    return StringVector::AddString(result, note.summary);
+		    }
+		    if (want == "BODY") {
+			    return StringVector::AddString(result, note.body);
+		    }
+		    if (want == "UID") {
+			    return StringVector::AddString(result, note.uid);
+		    }
+		    if (want == "COLOR" || want == "X-OUTLOOK-COLOR") {
+			    return StringVector::AddString(result, note.color);
+		    }
+		    for (auto &kv : note.props) {
+			    if (kv.first == want) {
+				    return StringVector::AddString(result, kv.second);
+			    }
+		    }
+		    mask.SetInvalid(idx);
+		    return string_t();
+	    });
+}
+
+void VnoteTitleScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    quackmail::vnote::Note note;
+		    if (!quackmail::vnote::ParseOne(in.GetString(), note)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::vnote::TitleOf(note));
+	    });
+}
+
+void VnoteEmitScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    quackmail::vnote::Note note;
+		    if (!quackmail::vnote::ParseOne(in.GetString(), note)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::vnote::Emit(note));
+	    });
+}
+
 // ---- iCalendar -----------------------------------------------------------
 // Events, tasks and journal entries, stored as a text/calendar part of an
 // ordinary message. Exposed as scalars so recurrence expansion — the part with
@@ -1580,6 +1651,11 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_vcard_fn", {V}, V, VcardFnScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_euid", {V}, V, VcardEuidScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_emit", {V, I}, V, VcardEmitScalar));
+
+	loader.RegisterFunction(ScalarFunction("qm_vnote_count", {V}, I, VnoteCountScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vnote_get", {V, V}, V, VnoteGetScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vnote_title", {V}, V, VnoteTitleScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vnote_emit", {V}, V, VnoteEmitScalar));
 
 	loader.RegisterFunction(ScalarFunction("qm_ical_count", {V}, I, IcalCountScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_get", {V, V, V}, V, IcalGetScalar));
