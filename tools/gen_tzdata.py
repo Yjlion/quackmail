@@ -9,7 +9,7 @@ therefore part of the source tree, exactly like core/src/psl_data.cpp.
     python3 tools/gen_tzdata.py                      # from /usr/share/zoneinfo
     python3 tools/gen_tzdata.py --from DIR           # from another compiled tree
     python3 tools/gen_tzdata.py --from DIR --links backward
-    python3 tools/gen_tzdata.py --check              # CI: is the file current?
+    python3 tools/gen_tzdata.py --check              # does the file match --from?
 
 `--links` takes IANA's `backward` file, whose `Link` lines are the only
 authoritative statement of which names are renames of which. Without it the
@@ -29,6 +29,13 @@ If no compiled tree is available (Windows, a minimal container), the pip
 
     python3 -m pip install --target /tmp/tzpkg tzdata
     python3 tools/gen_tzdata.py --from /tmp/tzpkg/tzdata/zoneinfo
+
+`--check` is for confirming a regeneration was committed, not for CI. It diffs
+the committed file against whatever tree it is pointed at, and any machine with
+a different IANA release will legitimately disagree — so running it on a CI
+runner would fail for the wrong reason. That is also why there is no CI step for
+it, unlike tools/gen_assets.py, whose input lives in this repo and really can
+drift by accident.
 """
 import argparse
 import os

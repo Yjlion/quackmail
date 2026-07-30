@@ -26,12 +26,85 @@ prefixes still say `quackmail`; the product is QuackCit.
 | 7 | XMPP c2s bridged to Citadel express messages (`quackmail_xmpp`) | PR #13 |
 | 8 | SMTP authentication (SPF/DKIM/DMARC/DNSBL), site policy, outbound signing + rate limiting, LMTP, real Sieve/ManageSieve, `deploy/` CLI tooling | PR #14 |
 | 9 | Telnet BBS depth (floors, zap, skip, registration, admin verbs) + `quackmail_http`: webmail, the BBS over the web, and the admin console | PR #15 |
+| 10 | Web overhaul phase 1: persistent connections, `/static` assets, a grouped sidebar | PR #24 |
+| 10 | Web overhaul phase 2a: bundled IANA tz database, vCard/iCalendar, `UpsertByEuid`, the contacts view | PR #25 |
 
 Phases 2 and 3 were validated byte-for-byte against the real Citadel server, and
 the **official `citadel` text client drives a full clean session** against
 QuackCit (login banner, `<K>nown rooms`, no spurious errors).
 
 ## Decisions worth remembering
+
+### Groupware objects are ordinary messages, keyed by euid
+
+A contact or event is a `format_type = 4` message wrapping one `text/vcard` or
+`text/calendar` part, with `citadel_messages.euid` set to the object's own UID —
+Citadel's own arrangement. `format_type == 4` already means "serve `raw`
+verbatim" everywhere in the tree, so a contact created in the browser is a
+readable MIME message over IMAP, NNTP and POP3 with **no new code**, and
+`mime::FlattenParts` finds the part. `test/integration/test_contacts.py` checks
+that rather than assuming it.
+
+Saving an object again replaces it: `citadel::UpsertByEuid` inserts and then
+unlinks the previous one. It is a separate call rather than something
+`InsertMessage` learned to do, because ordinary messages have no identity and
+must keep appending. It lives in core so the native `ENT0`/`EUID` path, the web
+UI and any future CalDAV module cannot disagree about what a second save means.
+An empty euid is **refused** rather than treated as an insert — without one there
+is nothing to replace, so accepting it would turn every later save into a
+duplicate.
+
+Insert-then-unlink, not unlink-then-insert: `InsertMessage` runs its own
+transaction so the pair cannot be wrapped in an outer one, and of the two
+failure modes, briefly having two copies is visible and recoverable while
+unlinking and then failing to insert loses the object.
+
+### Recurrence expands on the clock, not on the instant
+
+"Every Tuesday at 09:00" means 09:00 *local*. `ical::Expand` therefore steps in
+wall-clock terms in the event's own zone and converts each occurrence back
+through the bundled tz database. Expanding in UTC is the bug every naive
+calendar has: a weekly meeting silently moves an hour when the clocks change.
+This is the reason the zone database had to land before the calendar, not
+alongside it.
+
+Two representations exist for the same reason: `ical::Component` is the tree as
+it arrived, `ical::Item` is the flat shape a form edits. Saving goes tree → item
+→ form → item → tree, so alarms, `X-` properties and attendee parameters survive
+an edit. `EmitItem` builds a *fresh* component and is only for creating an
+object; using it to save an edit is how someone's phone reminder disappears, and
+its docstring says so.
+
+### The time zone database is bundled, like the PSL
+
+Not DuckDB's `icu` extension — PR #23 deliberately removed that dependency, and
+a calendar that works only when an optional extension is installed is not a
+calendar. Not `/usr/share/zoneinfo` either: minimal containers ship without it,
+and reading it would make two installs of the same release disagree about when a
+meeting is based on their base image.
+
+The cost is dated data that goes stale by political decree several times a year,
+so `tz::Version()` is surfaced and refreshing is a `gen_tzdata.py` run plus a
+commit. Two bugs worth remembering from building it: the type in force *before*
+a zone's first transition is not `type_at[0]` (that is what applies after it —
+RFC 8536 says the first non-DST type), and converting a wall clock back to an
+instant has to probe the offset a day either side rather than at the wall time
+itself, or the two candidates converge and an ambiguous time is silently
+resolved instead of reported.
+
+### `default_view` decides how a room renders, and `?view=raw` always escapes
+
+The view codes go on the wire in `GETR`/`SETR`, so they are transcribed from the
+`ROOM_VIEWS` enum in `libcitadel/lib/libcitadel.h` on the oracle rather than
+from documentation: 6 WIKI, 7 CALBRIEF, 8 JOURNAL, 9 DRAFTS, 10 BLOG, 11 QUEUE.
+A different, plausible-looking ordering was in circulation and is wrong. It is an
+`enum`, not a `#define`, so `grep 'define VIEW_'` finds nothing and looks like
+the constants are absent.
+
+A room whose view has no renderer keeps rendering as a message board, which is
+always truthful — the objects really are messages. `?view=raw` forces that for
+any room, and you want it the first time a Contacts room contains something that
+is not a vCard.
 
 - **Greeting format.** The Citadel greeting must be `200 <node> Citadel server
   ready.` The pipe-delimited variant QuackCit used first was rejected outright by

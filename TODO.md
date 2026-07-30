@@ -8,25 +8,18 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 **Bringing the web interface up to WebCit-level capability**, in four PRs.
 Phase 1 is done; the rest follow in order.
 
-- [ ] **Phase 2 — groupware core and room view modes**
-  - [ ] a bundled IANA time zone database: `core/tz.{hpp,cpp}` +
-        `tools/gen_tzdata.py` → committed `core/src/tzdata.cpp`, on the same
-        terms as the PSL. Not DuckDB's `icu` (PR #23 deliberately dropped that
-        dependency) and not `/usr/share/zoneinfo` (minimal containers lack it).
-  - [ ] `core/vcard.{hpp,cpp}` and `core/ical.{hpp,cpp}` — parse *and* emit,
-        preserving unknown `X-` properties so editing in the browser never
-        destroys what a phone wrote. Recurrence capped at 750 occurrences.
-  - [ ] `citadel::UpsertByEuid`/`FindByEuid` + an index on
-        `citadel_messages.euid` (there is none today, so every item lookup is a
-        table scan). Items are ordinary `format_type = 4` messages wrapping one
-        `text/vcard` or `text/calendar` part, so IMAP serves them with no new
-        code.
-  - [ ] extend `enum RoomView` — **verify the numbers against
-        `/root/citadel/libcitadel/lib/libcitadel.h` on debian.lan first**, they
-        go on the wire in `GETR`/`SETR`.
-  - [ ] `web_views.cpp` dispatch keyed on `default_view`, then `web_contacts`,
-        `web_calendar`, `web_notes`, `web_blog`. Skip wiki (needs versioning and
-        a markdown renderer) and queue (Citadel-internal).
+- [ ] **Phase 2b — the remaining room views.** 2a (below) shipped the
+      groupware core and the contacts view; what is left is the other renderers
+      on top of it.
+  - [ ] `web_calendar.cpp` — month grid and agenda over `ical::Expand`, plus
+        VTODO tasks. `VIEW_CALBRIEF` is the same data in list layout, not a
+        second handler.
+  - [ ] `web_notes.cpp` and `web_blog.cpp` (blog and journal are the same
+        renderer: full bodies newest-first, permalinks by euid).
+  - [ ] `VIEW_DRAFTS` — the mailbox view plus "resume editing".
+  - [ ] deliberately **not** wiki (`VIEW_WIKI`/`WIKIMD` need versioning, a
+        name→euid resolver and a markdown renderer — its own PR) or
+        `VIEW_QUEUE` (Citadel's internal spool view, not a user view).
 - [ ] **Phase 3 — rich mail and a Sieve rule builder**
   - [ ] `core/src/mime_build.cpp`: one `multipart/alternative`/`related`/`mixed`
         builder, replacing the third hand-rolled one in the tree.
@@ -53,6 +46,32 @@ Phase 1 is done; the rest follow in order.
         against names colliding with the `0000000002.Mail` mailbox keyspace.
 
 ## Shipped
+
+- [x] **Groupware core and the contacts view** (phase 2a of the web overhaul)
+  - [x] a bundled IANA time zone database: `core/tz.{hpp,cpp}` +
+        `tools/gen_tzdata.py` → committed `core/src/tzdata.cpp` (598 zones, 341
+        distinct after dedup, 252 links, IANA 2026c), on the same terms as the
+        PSL. Verified against Python's `zoneinfo` over the same release: 318,136
+        offset/DST/abbreviation checks across every zone and 1971–2055, plus
+        71,760 wall-clock round trips, zero mismatches.
+  - [x] `core/vcard.{hpp,cpp}` — vCard 3.0/4.0, preserving unknown properties,
+        folding at 75 octets on a UTF-8 boundary.
+  - [x] `core/ical.{hpp,cpp}` — VEVENT/VTODO/VJOURNAL, a Component tree beside
+        a flat Item so an edit cannot drop an alarm, `EmitVtimezone` from the
+        bundled database, and recurrence that steps in **wall-clock** terms so a
+        weekly 09:00 meeting keeps its local hour across a DST change. Capped at
+        750 occurrences.
+  - [x] `citadel::UpsertByEuid`/`FindByEuid` and an index on
+        `citadel_messages.euid` (there were no indexes on that table at all).
+  - [x] `enum RoomView` extended with the numbering transcribed from
+        `libcitadel.h` on the oracle — 6 WIKI, 7 CALBRIEF, 8 JOURNAL, 9 DRAFTS,
+        10 BLOG, 11 QUEUE. A different, plausible-looking ordering was in
+        circulation and is wrong.
+  - [x] `web_views.cpp` dispatch on `default_view` with `?view=raw` as the
+        escape hatch, and `web_contacts.cpp`: browse, view, create, edit in
+        place, delete.
+  - [x] `test/sql/{tz,vcard,ical}.test` and `test/integration/test_contacts.py`,
+        which reads objects created in the browser back over IMAP.
 
 - [x] **Web: persistent connections, `/static` assets, a sidebar** (phase 1 of
       the web overhaul)
