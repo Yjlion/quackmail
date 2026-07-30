@@ -56,12 +56,25 @@ Ada Lovelace	Ada Lovelace	ada@example.org	(no name)
 # ---- escaping --------------------------------------------------------------
 # \n \, \; and \\ all resolve on the way in. A structured property keeps its
 # components; a plain one keeps its semicolons as text.
+#
+# The newline is rendered as <LF> here rather than left in the value: an
+# embedded newline cannot be written in a sqllogictest expected block, and a
+# test that cannot state what it wants is not asserting anything.
 
 query II
-SELECT qm_vcard_get(E'BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE:one\\ntwo\\; three\\, four\r\nEND:VCARD\r\n', 'NOTE'),
+SELECT replace(qm_vcard_get(E'BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE:one\\ntwo\\; three\\, four\r\nEND:VCARD\r\n', 'NOTE'), E'\n', '<LF>'),
        qm_vcard_get(E'BEGIN:VCARD\r\nVERSION:3.0\r\nADR:;;12 Main St.\\, Apt 3;Dublin;;D02;IE\r\nEND:VCARD\r\n', 'ADR');
 ----
-one\ntwo; three, four	;;12 Main St., Apt 3;Dublin;;D02;IE
+one<LF>two; three, four	;;12 Main St., Apt 3;Dublin;;D02;IE
+
+# A backslash that escapes nothing keeps both characters rather than being
+# guessed at: vCard in the wild is full of stray backslashes that were never
+# meant as escapes, and dropping them silently corrupts addresses.
+
+query I
+SELECT qm_vcard_get(E'BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE:C:\\\\path\\\\file\r\nEND:VCARD\r\n', 'NOTE');
+----
+C:\path\file
 
 # ---- tolerance -------------------------------------------------------------
 # Real input has LF instead of CRLF, lowercase property names, folded lines and
