@@ -125,3 +125,96 @@ SELECT name, value FROM qm_mime_headers(
 ----
 Subject	Hi
 From	a@b.com
+
+# ---- building --------------------------------------------------------------
+# Assembling a message is the inverse of parsing it, and the nesting a set of
+# parts turns into is a decision with several wrong answers. qm_mime_shape
+# reports the tree the parser then finds, which is the real question: did each
+# part end up somewhere a mail client will look for it?
+
+# One text part stays one part. Wrapping a plain note in a pointless multipart is
+# the classic mistake here.
+query I
+SELECT qm_mime_shape('Just a note.', '', 0, 0);
+----
+text/plain
+
+# Two bodies become alternative, and text/plain comes *first*: the list is
+# least-preferred first, and a client shows the last part it understands. Getting
+# this backwards shows the plain text to everyone.
+query I
+SELECT qm_mime_shape('Plain.', '<p>Rich.</p>', 0, 0);
+----
+alternative(text/plain,text/html)
+
+# An inline image the HTML refers to by cid: goes in a related wrapper around the
+# alternative — not beside it, or the client cannot resolve the reference.
+query I
+SELECT qm_mime_shape('Plain.', '<p><img src="cid:img0@test"></p>', 1, 0);
+----
+related(alternative(text/plain,text/html),image/png)
+
+# Attachments go outermost, so a client that shows the body never has to walk
+# past them.
+query II
+SELECT qm_mime_shape('Plain.', '<p>Rich.</p>', 0, 1),
+       qm_mime_shape('Plain.', '<p>Rich.</p>', 1, 1);
+----
+mixed(alternative(text/plain,text/html),application/pdf)	mixed(related(alternative(text/plain,text/html),image/png),application/pdf)
+
+# Attachments on a plain-text message need no alternative at all.
+query II
+SELECT qm_mime_shape('Just text.', '', 0, 1),
+       qm_mime_shape('Just text.', '', 0, 2);
+----
+mixed(text/plain,application/pdf)	mixed(text/plain,application/pdf,application/pdf)
+
+# An HTML-only message is a single part, not an alternative with one child.
+query I
+SELECT qm_mime_shape('', '<p>Rich only.</p>', 0, 0);
+----
+text/html
+
+# A message with nothing in it is still a message rather than a parse error.
+query I
+SELECT qm_mime_shape('', '', 0, 0);
+----
+text/plain
+
+# The framing headers are the builder's to set. A caller cannot also supply them
+# and so cannot disagree with what is emitted — exactly one MIME-Version.
+query II
+SELECT length(qm_mime_build('x', '', 0, 0)) -
+       length(replace(qm_mime_build('x', '', 0, 0), 'MIME-Version:', '')),
+       qm_mime_build('x', '<p>y</p>', 0, 0) LIKE '%multipart/alternative; boundary="=_qc_%';
+----
+13	true
+
+# An inline part is marked inline and carries the Content-ID the HTML refers to;
+# an attachment is marked as one and names its file.
+query II
+SELECT qm_mime_build('p', '<p>h</p>', 1, 0) LIKE '%Content-ID: <img0@test>%',
+       qm_mime_build('p', '', 0, 1) LIKE '%Content-Disposition: attachment; filename="file0.pdf"%';
+----
+true	true
+
+# ---- transfer encodings ----------------------------------------------------
+# 8bit keeps a message readable in a raw dump, so it is preferred while the text
+# allows it. A control character or an over-long line forces quoted-printable;
+# anything not text/* is base64 regardless.
+
+query IIIII
+SELECT qm_mime_encoding('text/plain', 'hello'),
+       qm_mime_encoding('text/plain', 'caf' || chr(233)),
+       qm_mime_encoding('text/plain', 'a' || chr(1) || 'b'),
+       qm_mime_encoding('text/plain', repeat('x', 1200)),
+       qm_mime_encoding('image/png', 'hello');
+----
+8bit	8bit	quoted-printable	quoted-printable	base64
+
+# A long *message* is fine as long as no single line is long: line length is what
+# SMTP limits, not total size.
+query I
+SELECT qm_mime_encoding('text/plain', repeat('short line' || chr(10), 500));
+----
+8bit

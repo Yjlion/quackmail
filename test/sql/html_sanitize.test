@@ -1,0 +1,200 @@
+# name: test/sql/html_sanitize.test
+# description: the two HTML sanitizer profiles
+# group: [quackmail]
+#
+# `qm_html_compose` is an allow-list, and it is the one that matters most: HTML a
+# user composes is *stored* and then *re-served from our origin* to the
+# recipient, to everyone in a public room, to every subscriber of a mailing
+# list. "It is the user's own input" stops being true the moment paste is
+# involved — markup copied out of a hostile page is a stored-XSS vector aimed at
+# third parties.
+#
+# `qm_html_display` is a deny-list, which is only defensible because it is not
+# the boundary: a received part is served into a sandboxed frame under its own
+# `default-src 'none'` policy, and this is defence in depth behind that.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# ---- compose: nothing scriptable survives ---------------------------------
+# Every row here must sanitize to something with no live script in it. Counting
+# the survivors rather than listing outputs keeps the intent visible: the answer
+# has to be zero.
+
+query I
+SELECT count(*) FROM (VALUES
+    ('<script>alert(1)</script>'),
+    ('<SCRIPT>alert(1)</SCRIPT>'),
+    ('<ScRiPt>alert(1)</sCrIpT>'),
+    ('<iframe src="//evil"></iframe>'),
+    ('<object data="x"></object>'),
+    ('<embed src="x">'),
+    ('<applet code="x">'),
+    ('<form action="//evil"><input name="p"></form>'),
+    ('<style>body{background:url(//evil)}</style>'),
+    ('<meta http-equiv="refresh" content="0;url=//evil">'),
+    ('<link rel="stylesheet" href="//evil">'),
+    ('<base href="//evil/">')
+) AS t(h)
+WHERE qm_html_compose(h) SIMILAR TO '.*<\s*(script|iframe|object|embed|applet|form|style|meta|link|base).*';
+----
+0
+
+# Event handlers, in any spelling. The element may survive; the handler may not.
+
+query I
+SELECT count(*) FROM (VALUES
+    ('<img src=x onerror=alert(1)>'),
+    ('<img src="x" ONERROR="alert(1)">'),
+    ('<p onclick="x()">t</p>'),
+    ('<div onmouseover=x>t</div>'),
+    ('<body onload=x>t</body>')
+) AS t(h)
+WHERE lower(qm_html_compose(h)) LIKE '%onerror%'
+   OR lower(qm_html_compose(h)) LIKE '%onclick%'
+   OR lower(qm_html_compose(h)) LIKE '%onmouseover%'
+   OR lower(qm_html_compose(h)) LIKE '%onload%';
+----
+0
+
+# Scripting URL schemes, including the whitespace evasions. A scheme is compared
+# after control characters are stripped, because that is what a browser does.
+
+query I
+SELECT count(*) FROM (VALUES
+    ('<a href="javascript:alert(1)">x</a>'),
+    ('<a href="JaVaScRiPt:alert(1)">x</a>'),
+    (E'<a href="java\tscript:alert(1)">x</a>'),
+    (E'<a href="java\nscript:alert(1)">x</a>'),
+    ('<a href="  javascript:alert(1)">x</a>'),
+    ('<a href="vbscript:msgbox">x</a>'),
+    ('<a href="data:text/html,<script>1</script>">x</a>')
+) AS t(h)
+WHERE lower(qm_html_compose(h)) LIKE '%script:%';
+----
+0
+
+# A `data:image/svg+xml` is an image by content type and a script host in
+# practice, so it is refused where the real image formats are allowed.
+
+query II
+SELECT qm_html_compose('<img src="data:image/svg+xml;base64,PHN2Zz4=">'),
+       qm_html_compose('<img src="data:image/png;base64,iVBOR">');
+----
+<img>	<img src="data:image/png;base64,iVBOR">
+
+# An `http:` image in a composed message is a tracking pixel, so it is dropped
+# on the way in. The reader can still opt in to remote images on the display
+# side, where it is their choice rather than the sender's.
+
+query I
+SELECT qm_html_compose('<img src="http://evil/track.gif">');
+----
+<img>
+
+# A `style` attribute keeps appearance and loses everything else. `url()` and
+# `expression()` are the payloads; `position` is how a message escapes its frame.
+
+query III
+SELECT qm_html_compose('<p style="color: #333; text-align: center">x</p>'),
+       qm_html_compose('<p style="background:url(//evil)">x</p>'),
+       qm_html_compose('<p style="position:absolute;top:0">x</p>');
+----
+<p style="color: #333; text-align: center">x</p>	<p>x</p>	<p>x</p>
+
+# A comment can hide markup from a naive scanner, so comments go whole. An
+# unterminated tag has its '<' escaped rather than being allowed to swallow the
+# rest of the message — the remainder becomes visible text, which is inert.
+
+query II
+SELECT qm_html_compose('<!--<script>alert(1)</script>-->'),
+       qm_html_compose('<img src=x onerror=alert(1)');
+----
+(empty)	&lt;img src=x onerror=alert(1)
+
+# An attribute value containing '>' must not truncate the tag — otherwise the
+# href after it would be parsed as text and never sanitized.
+
+query I
+SELECT qm_html_compose('<a title="a>b" href="javascript:1">x</a>');
+----
+<a title="a&gt;b">x</a>
+
+# ---- compose: what must survive ------------------------------------------
+# A sanitizer that eats the message is no better than one that lets scripts
+# through, so the other half of the contract is asserted too.
+
+query IIII
+SELECT qm_html_compose('<b>bold</b> and <em>italic</em>'),
+       qm_html_compose('<ul><li>one</li><li>two</li></ul>'),
+       qm_html_compose('<blockquote>quoted reply</blockquote>'),
+       qm_html_compose('<table><tr><td>cell</td></tr></table>');
+----
+<b>bold</b> and <em>italic</em>	<ul><li>one</li><li>two</li></ul>	<blockquote>quoted reply</blockquote>	<table><tr><td>cell</td></tr></table>
+
+# A safe link keeps its href and gains rel=noopener: a link out of a mail body
+# should not be able to reach back into the frame that opened it.
+
+query II
+SELECT qm_html_compose('<a href="https://example.org/x">x</a>'),
+       qm_html_compose('<a href="mailto:a@b.org">a</a>') LIKE '%mailto:a@b.org%';
+----
+<a href="https://example.org/x" rel="noopener noreferrer">x</a>	true
+
+# An inline image the composer just uploaded, and a numeric dimension. A
+# non-numeric one is dropped rather than reflected into the attribute.
+
+query III
+SELECT qm_html_compose('<img src="cid:logo@x" alt="Logo">'),
+       qm_html_compose('<img src="cid:a" width="64">'),
+       qm_html_compose('<img src="cid:a" width="100%">');
+----
+<img src="cid:logo@x" alt="Logo">	<img src="cid:a" width="64">	<img src="cid:a">
+
+# A whole-document paste is unwrapped rather than kept: a message body is a
+# fragment. An element that is not on the list loses its tag but keeps its words.
+
+query II
+SELECT qm_html_compose('<html><head><title>t</title></head><body><p>hi</p></body></html>'),
+       qm_html_compose('<center>middle</center>');
+----
+<p>hi</p>	middle
+
+# ---- cid: rewriting -------------------------------------------------------
+# Rewriting is a targeted attribute edit over already-sanitized markup, not a DOM
+# round-trip: re-serializing risks reintroducing what the sanitizer removed.
+
+query II
+SELECT qm_html_rewrite_cid('<img src="cid:logo@ex.org">', '/msg/1/cid/'),
+       qm_html_rewrite_cid('<p>the cid: scheme</p>', '/msg/1/cid/');
+----
+<img src="/msg/1/cid/logo%40ex.org">	<p>the cid: scheme</p>
+
+# ---- plain-text rendering -------------------------------------------------
+# The text/plain half of an alternative. Crude on purpose — the point is that a
+# recipient with no HTML gets something readable, not that it round-trips.
+
+query II
+SELECT replace(qm_html_to_text('<p>One</p><p>Two</p>'), chr(10), '|'),
+       qm_html_to_text('a &amp; b &lt;c&gt; &quot;d&quot;');
+----
+One|Two|	a & b <c> "d"
+
+# Script and style content is dropped rather than becoming visible text.
+
+query I
+SELECT qm_html_to_text('before<script>alert(1)</script>after');
+----
+beforeafter
+
+# ---- display: the deny-list -----------------------------------------------
+# Unchanged behaviour, kept as it was when it lived in web_mail.cpp: preserve as
+# much of the sender's formatting as possible, drop what can execute.
+
+query II
+SELECT qm_html_display('<p>ok</p><script>bad()</script>'),
+       qm_html_display('<img src=x onerror=alert(1)>');
+----
+<p>ok</p>	<img>

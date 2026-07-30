@@ -11,6 +11,8 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 
+#include <functional>
+
 #include "quackmail/auth.hpp"
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/dkim.hpp"
@@ -18,6 +20,7 @@
 #include "quackmail/citadel_msg.hpp"
 #include "quackmail/feed.hpp"
 #include "quackmail/fetch.hpp"
+#include "quackmail/html_sanitize.hpp"
 #include "quackmail/http.hpp"
 #include "quackmail/ical.hpp"
 #include "quackmail/listserv.hpp"
@@ -1238,6 +1241,258 @@ void VcardEmitScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	    });
 }
 
+// ---- Sieve rules ---------------------------------------------------------
+// The rule view over a script. The script text stays the single source of
+// truth — see the note in core/include/quackmail/sieve.hpp — so these are the
+// two halves of deriving rules from it and writing them back.
+
+// qm_sieve_rules(script) -> a compact description of the rules, or NULL when the
+// script says something the rule view cannot show.
+void SieveRulesScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    std::vector<quackmail::sieve::Rule> rules;
+		    std::string why;
+		    if (!quackmail::sieve::Decompose(in.GetString(), rules, why)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    // One line per rule: name|all/any|test,test|action,action[|stop]
+		    std::string out;
+		    for (auto &r : rules) {
+			    if (!out.empty()) {
+				    out += "\n";
+			    }
+			    out += r.name + "|" + (r.all ? "all" : "any") + "|";
+			    for (size_t i = 0; i < r.tests.size(); i++) {
+				    if (i) {
+					    out += ",";
+				    }
+				    if (r.tests[i].negate) {
+					    out += "!";
+				    }
+				    out += r.tests[i].field + " " + r.tests[i].op + " " + r.tests[i].value;
+			    }
+			    out += "|";
+			    for (size_t i = 0; i < r.actions.size(); i++) {
+				    if (i) {
+					    out += ",";
+				    }
+				    switch (r.actions[i].type) {
+				    case quackmail::sieve::Action::FILEINTO:
+					    out += "fileinto " + r.actions[i].folder;
+					    break;
+				    case quackmail::sieve::Action::REDIRECT:
+					    out += "redirect " + r.actions[i].address;
+					    break;
+				    case quackmail::sieve::Action::REJECT:
+					    out += "reject " + r.actions[i].reason;
+					    break;
+				    case quackmail::sieve::Action::DISCARD:
+					    out += "discard";
+					    break;
+				    default:
+					    out += "keep";
+					    break;
+				    }
+			    }
+			    if (r.stop) {
+				    out += "|stop";
+			    }
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_sieve_rules_why(script) -> why the rule view cannot show it, or NULL when it
+// can. The UI shows this sentence instead of a builder.
+void SieveRulesWhyScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    std::vector<quackmail::sieve::Rule> rules;
+		    std::string why;
+		    if (quackmail::sieve::Decompose(in.GetString(), rules, why)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, why);
+	    });
+}
+
+// qm_sieve_recompose(script) -> Decompose then Compose. The round trip has to be
+// semantically stable: whatever this produces must decompose to the same rules.
+void SieveRecomposeScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    std::vector<quackmail::sieve::Rule> rules;
+		    std::string why;
+		    if (!quackmail::sieve::Decompose(in.GetString(), rules, why)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::sieve::Compose(rules));
+	    });
+}
+
+// ---- HTML sanitizing -----------------------------------------------------
+// Two profiles for two jobs: a deny-list for rendering someone else's mail
+// behind a sandboxed frame, and an allow-list for HTML a local user composed,
+// which will be stored and re-served from our origin to other people. See
+// core/include/quackmail/html_sanitize.hpp for why the shapes differ.
+
+void HtmlSanitizeComposeScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::html::SanitizeForCompose(in.GetString()));
+	});
+}
+
+void HtmlSanitizeDisplayScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::html::SanitizeForDisplay(in.GetString()));
+	});
+}
+
+void HtmlToTextScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::html::ToPlainText(in.GetString()));
+	});
+}
+
+void HtmlRewriteCidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t in, string_t prefix) {
+		    return StringVector::AddString(
+		        result, quackmail::html::RewriteCidUrls(in.GetString(), prefix.GetString()));
+	    });
+}
+
+// ---- MIME building -------------------------------------------------------
+// The nesting a set of parts turns into is a decision with several wrong
+// answers, so `qm_mime_shape` reports it directly as a readable tree rather than
+// leaving a test to hunt for boundaries in the bytes.
+
+namespace {
+
+// Build a message from the four kinds of part, then describe what came out.
+std::string BuildShapeOrBytes(const std::string &plain, const std::string &html, int64_t inlines,
+                              int64_t attachments, bool want_shape) {
+	std::vector<quackmail::mime::BuildPart> parts;
+	if (!plain.empty()) {
+		quackmail::mime::BuildPart p;
+		p.content_type = "text/plain";
+		p.content = plain;
+		parts.push_back(p);
+	}
+	if (!html.empty()) {
+		quackmail::mime::BuildPart p;
+		p.content_type = "text/html";
+		p.content = html;
+		parts.push_back(p);
+	}
+	for (int64_t i = 0; i < inlines && i < 8; i++) {
+		quackmail::mime::BuildPart p;
+		p.content_type = "image/png";
+		p.content = "PNG fake";
+		p.content_id = "img" + std::to_string(i) + "@test";
+		parts.push_back(p);
+	}
+	for (int64_t i = 0; i < attachments && i < 8; i++) {
+		quackmail::mime::BuildPart p;
+		p.content_type = "application/pdf";
+		p.content = "%PDF fake";
+		p.filename = "file" + std::to_string(i) + ".pdf";
+		parts.push_back(p);
+	}
+
+	quackmail::mime::HeaderList headers = {{"From", "a@test"}, {"Subject", "shape"}};
+	std::string msg = quackmail::mime::BuildMessage(headers, parts);
+	if (!want_shape) {
+		return msg;
+	}
+
+	// Describe the tree the parser finds, which is the real question: did the
+	// parts end up somewhere a mail client will look for them?
+	std::function<std::string(const quackmail::mime::MimeEntity &)> describe =
+	    [&](const quackmail::mime::MimeEntity &e) -> std::string {
+		std::string mime = e.content_type.Mime();
+		if (!e.IsMultipart()) {
+			return mime;
+		}
+		std::string out = e.content_type.subtype + "(";
+		for (size_t i = 0; i < e.children.size(); i++) {
+			if (i) {
+				out += ",";
+			}
+			out += describe(e.children[i]);
+		}
+		return out + ")";
+	};
+	return describe(quackmail::mime::ParseEntity(msg));
+}
+
+} // namespace
+
+// qm_mime_shape(plain, html, inline_count, attachment_count) -> "mixed(...)"
+void MimeShapeScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	auto &plain = args.data[0];
+	auto &html = args.data[1];
+	auto &inl = args.data[2];
+	auto &att = args.data[3];
+	UnifiedVectorFormat pf, hf, inf, af;
+	plain.ToUnifiedFormat(args.size(), pf);
+	html.ToUnifiedFormat(args.size(), hf);
+	inl.ToUnifiedFormat(args.size(), inf);
+	att.ToUnifiedFormat(args.size(), af);
+	auto pd = UnifiedVectorFormat::GetData<string_t>(pf);
+	auto hd = UnifiedVectorFormat::GetData<string_t>(hf);
+	auto ind = UnifiedVectorFormat::GetData<int64_t>(inf);
+	auto ad = UnifiedVectorFormat::GetData<int64_t>(af);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto out = FlatVector::GetData<string_t>(result);
+	for (idx_t i = 0; i < args.size(); i++) {
+		std::string shape = BuildShapeOrBytes(pd[pf.sel->get_index(i)].GetString(),
+		                                      hd[hf.sel->get_index(i)].GetString(),
+		                                      ind[inf.sel->get_index(i)], ad[af.sel->get_index(i)], true);
+		out[i] = StringVector::AddString(result, shape);
+	}
+}
+
+// qm_mime_build(plain, html, inline_count, attachment_count) -> the raw message.
+void MimeBuildScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	auto &plain = args.data[0];
+	auto &html = args.data[1];
+	auto &inl = args.data[2];
+	auto &att = args.data[3];
+	UnifiedVectorFormat pf, hf, inf, af;
+	plain.ToUnifiedFormat(args.size(), pf);
+	html.ToUnifiedFormat(args.size(), hf);
+	inl.ToUnifiedFormat(args.size(), inf);
+	att.ToUnifiedFormat(args.size(), af);
+	auto pd = UnifiedVectorFormat::GetData<string_t>(pf);
+	auto hd = UnifiedVectorFormat::GetData<string_t>(hf);
+	auto ind = UnifiedVectorFormat::GetData<int64_t>(inf);
+	auto ad = UnifiedVectorFormat::GetData<int64_t>(af);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto out = FlatVector::GetData<string_t>(result);
+	for (idx_t i = 0; i < args.size(); i++) {
+		std::string msg = BuildShapeOrBytes(pd[pf.sel->get_index(i)].GetString(),
+		                                    hd[hf.sel->get_index(i)].GetString(),
+		                                    ind[inf.sel->get_index(i)], ad[af.sel->get_index(i)], false);
+		out[i] = StringVector::AddString(result, msg);
+	}
+}
+
+// qm_mime_encoding(content_type, content) -> "8bit" | "quoted-printable" | "base64"
+void MimeEncodingScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t type, string_t content) {
+		    quackmail::mime::BuildPart p;
+		    p.content_type = type.GetString();
+		    p.content = content.GetString();
+		    return StringVector::AddString(result, quackmail::mime::ChooseEncoding(p));
+	    });
+}
+
 // ---- vNote ---------------------------------------------------------------
 // The format Citadel stores a sticky note in. Same grammar as vCard, different
 // property names — see core/vnote.cpp for why it is not VJOURNAL.
@@ -1651,6 +1906,19 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_vcard_fn", {V}, V, VcardFnScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_euid", {V}, V, VcardEuidScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_emit", {V, I}, V, VcardEmitScalar));
+
+	loader.RegisterFunction(ScalarFunction("qm_sieve_rules", {V}, V, SieveRulesScalar));
+	loader.RegisterFunction(ScalarFunction("qm_sieve_rules_why", {V}, V, SieveRulesWhyScalar));
+	loader.RegisterFunction(ScalarFunction("qm_sieve_recompose", {V}, V, SieveRecomposeScalar));
+
+	loader.RegisterFunction(ScalarFunction("qm_html_compose", {V}, V, HtmlSanitizeComposeScalar));
+	loader.RegisterFunction(ScalarFunction("qm_html_display", {V}, V, HtmlSanitizeDisplayScalar));
+	loader.RegisterFunction(ScalarFunction("qm_html_to_text", {V}, V, HtmlToTextScalar));
+	loader.RegisterFunction(ScalarFunction("qm_html_rewrite_cid", {V, V}, V, HtmlRewriteCidScalar));
+
+	loader.RegisterFunction(ScalarFunction("qm_mime_shape", {V, V, I, I}, V, MimeShapeScalar));
+	loader.RegisterFunction(ScalarFunction("qm_mime_build", {V, V, I, I}, V, MimeBuildScalar));
+	loader.RegisterFunction(ScalarFunction("qm_mime_encoding", {V, V}, V, MimeEncodingScalar));
 
 	loader.RegisterFunction(ScalarFunction("qm_vnote_count", {V}, I, VnoteCountScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vnote_get", {V, V}, V, VnoteGetScalar));

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <map>
 #include <memory>
 
 namespace quackmail {
@@ -1021,6 +1022,379 @@ std::string LoadActiveScript(Connection &con, const std::string &username) {
 std::string Capabilities() {
 	// Only what the evaluator above actually implements.
 	return "fileinto reject envelope body copy subaddress";
+}
+
+// ---------------------------------------------------------------------------
+// The rule view
+// ---------------------------------------------------------------------------
+//
+// Decompose walks the same AST Evaluate runs, so what the UI shows and what the
+// server does cannot drift. Anything the flat Rule shape cannot express is
+// reported rather than approximated: a builder that quietly simplifies a rule is
+// worse than one that admits it cannot show it.
+
+namespace {
+
+// The `# rule: <name>` comment above each `if`, in order of appearance. The lexer
+// discards comments — reasonably, since Sieve has none that are semantic — so
+// names are recovered from the raw text instead.
+std::vector<std::string> RuleNames(const std::string &script) {
+	std::vector<std::string> out;
+	std::string pending;
+	size_t i = 0;
+	while (i <= script.size()) {
+		size_t nl = script.find('\n', i);
+		std::string text = script.substr(i, nl == std::string::npos ? std::string::npos : nl - i);
+		size_t b = text.find_first_not_of(" \t\r");
+		std::string trimmed = (b == std::string::npos) ? std::string() : text.substr(b);
+		while (!trimmed.empty() && (trimmed.back() == '\r' || trimmed.back() == ' ')) {
+			trimmed.pop_back();
+		}
+
+		if (trimmed.rfind("# rule:", 0) == 0) {
+			pending = trimmed.substr(7);
+			size_t nb = pending.find_first_not_of(" \t");
+			pending = (nb == std::string::npos) ? std::string() : pending.substr(nb);
+		} else if (trimmed.rfind("if ", 0) == 0 || trimmed == "if") {
+			// One entry per `if`, named or not, so the nth name lines up with the
+			// nth rule the parser produced.
+			out.push_back(pending);
+			pending.clear();
+		} else if (!trimmed.empty() && trimmed[0] != '#') {
+			// Any other statement between the comment and the `if` means the
+			// comment was not a rule name after all.
+			pending.clear();
+		}
+
+		if (nl == std::string::npos) {
+			break;
+		}
+		i = nl + 1;
+	}
+	return out;
+}
+
+// A single header/size/body test -> RuleTest. False when it is a shape the flat
+// view cannot show.
+bool FlattenTest(const Test &t, bool negate, RuleTest &out, std::string &why) {
+	switch (t.kind) {
+	case Test::HEADER:
+	case Test::ADDRESS: {
+		if (t.names.size() != 1 || t.keys.size() != 1) {
+			why = "a condition tests several headers or values at once";
+			return false;
+		}
+		std::string name = ToLower(t.names[0]);
+		// The four the UI names directly; anything else keeps its header name so
+		// nothing is lost.
+		if (name == "from" || name == "to" || name == "cc" || name == "subject") {
+			out.field = name;
+		} else {
+			out.field = "header:" + t.names[0];
+		}
+		out.op = t.match_type.empty() ? "is" : t.match_type;
+		out.value = t.keys[0];
+		out.negate = negate;
+		return true;
+	}
+	case Test::BODY: {
+		if (t.keys.size() != 1) {
+			why = "a body condition tests several values at once";
+			return false;
+		}
+		out.field = "body";
+		out.op = t.match_type.empty() ? "contains" : t.match_type;
+		out.value = t.keys[0];
+		out.negate = negate;
+		return true;
+	}
+	case Test::SIZE: {
+		out.field = "size";
+		out.op = t.size_relation.empty() ? "over" : t.size_relation;
+		out.value = std::to_string(t.size_limit);
+		out.negate = negate;
+		return true;
+	}
+	case Test::ENVELOPE:
+		why = "a condition tests the SMTP envelope";
+		return false;
+	case Test::EXISTS:
+		why = "a condition tests whether a header exists";
+		return false;
+	case Test::ALWAYS:
+	case Test::NEVER:
+		why = "a rule is unconditional";
+		return false;
+	default:
+		why = "a condition uses a form the rule editor does not model";
+		return false;
+	}
+}
+
+// The top-level test of an `if` -> (all, tests).
+bool FlattenCondition(const Test &t, Rule &rule, std::string &why) {
+	// `not` around one simple test is a negated condition; around anything else
+	// it is not something the flat view can show.
+	if (t.kind == Test::NOT) {
+		if (t.children.size() != 1) {
+			why = "a negated condition wraps more than one test";
+			return false;
+		}
+		RuleTest rt;
+		if (!FlattenTest(*t.children[0], true, rt, why)) {
+			return false;
+		}
+		rule.all = true;
+		rule.tests.push_back(rt);
+		return true;
+	}
+	if (t.kind == Test::ALLOF || t.kind == Test::ANYOF) {
+		rule.all = (t.kind == Test::ALLOF);
+		for (auto &child : t.children) {
+			RuleTest rt;
+			bool negate = false;
+			const Test *inner = child.get();
+			if (inner->kind == Test::NOT) {
+				if (inner->children.size() != 1) {
+					why = "a negated condition wraps more than one test";
+					return false;
+				}
+				negate = true;
+				inner = inner->children[0].get();
+			}
+			if (!FlattenTest(*inner, negate, rt, why)) {
+				return false;
+			}
+			rule.tests.push_back(rt);
+		}
+		return !rule.tests.empty();
+	}
+	RuleTest rt;
+	if (!FlattenTest(t, false, rt, why)) {
+		return false;
+	}
+	rule.all = true;
+	rule.tests.push_back(rt);
+	return true;
+}
+
+std::string QuoteSieve(const std::string &in) {
+	std::string out = "\"";
+	for (char c : in) {
+		if (c == '\r' || c == '\n') {
+			// A literal newline cannot appear in a quoted string, and a rule
+			// value containing one is not something the builder produces.
+			continue;
+		}
+		if (c == '"' || c == '\\') {
+			out += '\\';
+		}
+		out += c;
+	}
+	return out + "\"";
+}
+
+} // namespace
+
+bool Decompose(const std::string &script, std::vector<Rule> &out, std::string &why) {
+	out.clear();
+	why.clear();
+
+	std::vector<CommandPtr> program;
+	std::string err;
+	if (!ParseInternal(script, program, err)) {
+		why = "This script does not parse: " + err;
+		return false;
+	}
+
+	auto names = RuleNames(script);
+	size_t seen_ifs = 0;
+
+	for (auto &cmd : program) {
+		if (!cmd) {
+			continue;
+		}
+		if (cmd->kind == Command::REQUIRE) {
+			// Compose emits its own require line from the actions it writes, so
+			// the original does not need preserving.
+			continue;
+		}
+		if (cmd->kind != Command::IF) {
+			why = "This script has actions outside any rule, which the rule editor cannot show.";
+			return false;
+		}
+
+		// An `else` branch (a second branch, or a first with no test) has no
+		// equivalent in a flat list of independent rules.
+		if (cmd->branches.size() != 1 || !cmd->branches[0].test) {
+			why = "This script uses an `else` branch, which the rule editor cannot show.";
+			return false;
+		}
+
+		Rule rule;
+		if (!FlattenCondition(*cmd->branches[0].test, rule, why)) {
+			why = "This script uses a condition the rule editor cannot show: " + why + ".";
+			return false;
+		}
+
+		for (auto &inner : cmd->branches[0].body) {
+			if (!inner) {
+				continue;
+			}
+			switch (inner->kind) {
+			case Command::IF:
+				why = "This script nests one rule inside another, which the rule editor cannot show.";
+				return false;
+			case Command::STOP:
+				rule.stop = true;
+				break;
+			case Command::KEEP:
+				rule.actions.push_back(Action(Action::KEEP));
+				break;
+			case Command::DISCARD:
+				rule.actions.push_back(Action(Action::DISCARD));
+				break;
+			case Command::FILEINTO: {
+				Action a(Action::FILEINTO);
+				a.folder = inner->argument;
+				a.create = inner->create;
+				rule.actions.push_back(a);
+				break;
+			}
+			case Command::REDIRECT: {
+				Action a(Action::REDIRECT);
+				a.address = inner->argument;
+				rule.actions.push_back(a);
+				break;
+			}
+			case Command::REJECT: {
+				Action a(Action::REJECT);
+				a.reason = inner->argument;
+				rule.actions.push_back(a);
+				break;
+			}
+			default:
+				why = "This script uses an action the rule editor cannot show.";
+				return false;
+			}
+		}
+
+		// Names come from the text in the same order the parser produced the
+		// `if`s, which is what lets a name survive a round trip.
+		if (seen_ifs < names.size()) {
+			rule.name = names[seen_ifs];
+		}
+		seen_ifs++;
+		out.push_back(rule);
+	}
+
+	return true;
+}
+
+std::string Compose(const std::vector<Rule> &rules) {
+	// Require only what is used. A script claiming to need `reject` when it does
+	// not is misleading, and some servers refuse an unused require.
+	bool need_fileinto = false, need_reject = false;
+	for (auto &r : rules) {
+		for (auto &a : r.actions) {
+			if (a.type == Action::FILEINTO) {
+				need_fileinto = true;
+			}
+			if (a.type == Action::REJECT) {
+				need_reject = true;
+			}
+		}
+	}
+
+	std::string out = "# Generated by the QuackCit rule editor.\n";
+	out += "# Editing this text by hand is fine: the rules are read back from it.\n";
+	if (need_fileinto || need_reject) {
+		out += "require [";
+		if (need_fileinto) {
+			out += "\"fileinto\"";
+		}
+		if (need_fileinto && need_reject) {
+			out += ", ";
+		}
+		if (need_reject) {
+			out += "\"reject\"";
+		}
+		out += "];\n";
+	}
+
+	for (auto &r : rules) {
+		if (r.tests.empty() || r.actions.empty()) {
+			continue; // an incomplete rule from a half-filled form
+		}
+		out += "\n";
+		if (!r.name.empty()) {
+			std::string name = r.name;
+			for (auto &c : name) {
+				if (c == '\r' || c == '\n') {
+					c = ' ';
+				}
+			}
+			out += "# rule: " + name + "\n";
+		}
+
+		std::vector<std::string> conditions;
+		for (auto &t : r.tests) {
+			std::string cond;
+			if (t.field == "size") {
+				cond = "size :" + std::string(t.op == "under" ? "under" : "over") + " " + t.value;
+			} else if (t.field == "body") {
+				cond = "body :text :" + t.op + " " + QuoteSieve(t.value);
+			} else {
+				std::string header = t.field;
+				if (header.rfind("header:", 0) == 0) {
+					header = header.substr(7);
+				}
+				cond = "header :" + t.op + " " + QuoteSieve(header) + " " + QuoteSieve(t.value);
+			}
+			if (t.negate) {
+				cond = "not " + cond;
+			}
+			conditions.push_back(cond);
+		}
+
+		std::string test;
+		if (conditions.size() == 1) {
+			test = conditions[0];
+		} else {
+			test = std::string(r.all ? "allof" : "anyof") + " (";
+			for (size_t i = 0; i < conditions.size(); i++) {
+				test += (i ? ", " : "") + conditions[i];
+			}
+			test += ")";
+		}
+		out += "if " + test + " {\n";
+
+		for (auto &a : r.actions) {
+			switch (a.type) {
+			case Action::FILEINTO:
+				out += "    fileinto " + QuoteSieve(a.folder) + ";\n";
+				break;
+			case Action::REDIRECT:
+				out += "    redirect " + QuoteSieve(a.address) + ";\n";
+				break;
+			case Action::REJECT:
+				out += "    reject " + QuoteSieve(a.reason) + ";\n";
+				break;
+			case Action::DISCARD:
+				out += "    discard;\n";
+				break;
+			case Action::KEEP:
+			default:
+				out += "    keep;\n";
+				break;
+			}
+		}
+		if (r.stop) {
+			out += "    stop;\n";
+		}
+		out += "}\n";
+	}
+	return out;
 }
 
 } // namespace sieve
