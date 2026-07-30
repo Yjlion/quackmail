@@ -308,3 +308,47 @@ tr.taskdone td a { color: var(--muted); text-decoration: line-through; }
 .entry h2 { margin-top: 0; }
 .entry h2 a { text-decoration: none; }
 .entry .byline { margin-top: calc(-1 * var(--s2)); font-size: .88em; }
+
+/* ---- the rich-text composer -------------------------------------------- */
+/* All of this only matters once qc-compose.js has run. Without it the form is
+   the plain textarea it has always been, so none of these rules apply. */
+
+.richtools {
+  display: flex; flex-wrap: wrap; gap: var(--s1);
+  margin: var(--s2) 0 0;
+}
+.richtools .btn { padding: .15rem .5rem; font-size: .85em; }
+
+.richbody {
+  min-height: 14rem; max-height: 60vh; overflow-y: auto;
+  padding: var(--s3);
+  border: 1px solid var(--line); border-radius: var(--r1);
+  background: var(--bg); margin: var(--s1) 0 var(--s2);
+}
+.richbody:focus-visible { outline-offset: -2px; }
+/* A pasted or dropped image must not blow the layout out. */
+.richbody img { max-width: 100%; height: auto; }
+.richbody blockquote {
+  margin: var(--s2) 0; padding-left: var(--s3);
+  border-left: 2px solid var(--line); color: var(--muted);
+}
+/* The textarea stays in the DOM as the plain-text half, just out of the way. */
+.richhidden { display: none; }
+/* The "formatted text" checkbox appears only once the editor exists — offering
+   it to someone who will only ever get a textarea would be a lie. */
+.richopt { display: none; }
+.richopt.richavailable { display: inline-flex; }
+
+/* ---- the Sieve rule builder -------------------------------------------- */
+/* Every control is a plain form that posts, so this needs no script — which is
+   also why the cards can be styled independently of any state. */
+
+.rules {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  gap: var(--s3); margin-bottom: var(--s4);
+}
+.rule h3 { margin-top: 0; }
+.rule ul { margin: var(--s1) 0 var(--s2); padding-left: var(--s4); }
+.rule li { font-size: .92em; }
+.rule .actions { margin-bottom: 0; gap: var(--s1); }
+.rule .actions .btn { padding: .2rem .5rem; font-size: .85em; }
