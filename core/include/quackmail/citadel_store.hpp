@@ -365,6 +365,30 @@ bool DeleteMessage(duckdb::Connection &con, int64_t room_num, int64_t msgnum, st
 bool MoveMessage(duckdb::Connection &con, int64_t from_room, int64_t to_room, int64_t msgnum, bool is_copy,
                  std::string &err);
 
+// ---- groupware objects, addressed by euid --------------------------------
+//
+// Citadel identifies a contact, event or task by its euid (the object's own UID
+// from the vCard or iCalendar body) and *replaces* rather than appends when one
+// is saved again. Ordinary messages have no such identity — InsertMessage
+// ignores euid entirely — so this is a separate, deliberate operation rather
+// than something InsertMessage should start doing on its own.
+//
+// It lives here, not in a front-end, so the native ENT0/EUID path, the web UI
+// and any future CalDAV module all agree about what saving an object twice
+// means.
+
+// The msgnum in `room_num` carrying `euid`, or -1 when there is none.
+int64_t FindByEuid(duckdb::Connection &con, int64_t room_num, const std::string &euid);
+
+// Insert `msg` into `room_num`, replacing any message already there with the
+// same euid. Returns the new msgnum, or -1 with `err` set.
+//
+// The old message is unlinked from this room, not deleted globally — the same
+// rule DeleteMessage follows, so a copy pointed into another room survives.
+// Fails when msg.euid is empty: without one there is nothing to replace, and
+// silently appending would duplicate the object on every edit.
+int64_t UpsertByEuid(duckdb::Connection &con, const Message &msg, int64_t room_num, std::string &err);
+
 // ---- per-user string preferences ----------------------------------------
 // The US_* bit field holds the boolean BBS toggles; this holds anything with a
 // value. An unset preference returns `dflt`, which is how "follow the site
