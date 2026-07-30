@@ -26,6 +26,7 @@
 #include "quackmail/rbl.hpp"
 #include "quackmail/sieve.hpp"
 #include "quackmail/spf.hpp"
+#include "quackmail/tz.hpp"
 #include "quackmail/util.hpp"
 
 #include <cstdlib>
@@ -1155,6 +1156,99 @@ void HttpKeepAliveScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	    });
 }
 
+// ---- time zones ----------------------------------------------------------
+// The bundled IANA database, exposed so the offset tables can be asserted from
+// sqllogictest. Every date a calendar renders passes through these, and a
+// half-hour zone or a southern-hemisphere DST rule getting it wrong is the kind
+// of bug that only shows up in someone else's timezone.
+
+void TzVersionScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	ConstantVector::GetData<string_t>(result)[0] =
+	    StringVector::AddString(result, quackmail::tz::Version());
+	(void)args;
+}
+
+// qm_tz_canonical(tzid) -> the modern spelling, or NULL for an unknown zone.
+void TzCanonicalScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    std::string out = quackmail::tz::Canonical(in.GetString());
+		    if (out.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_tz_offset(tzid, epoch) -> seconds east of UTC, NULL for an unknown zone.
+void TzOffsetScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t zone, int64_t utc, ValidityMask &mask, idx_t idx) -> int64_t {
+		    int off = 0;
+		    bool dst = false;
+		    std::string abbrev;
+		    if (!quackmail::tz::OffsetAt(zone.GetString(), utc, off, dst, abbrev)) {
+			    mask.SetInvalid(idx);
+			    return 0;
+		    }
+		    return off;
+	    });
+}
+
+// qm_tz_abbrev(tzid, epoch) -> "EST", "AEDT", "+0530".
+void TzAbbrevScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t zone, int64_t utc, ValidityMask &mask, idx_t idx) {
+		    int off = 0;
+		    bool dst = false;
+		    std::string abbrev;
+		    if (!quackmail::tz::OffsetAt(zone.GetString(), utc, off, dst, abbrev)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, abbrev);
+	    });
+}
+
+// qm_tz_to_utc(tzid, wall) -> the instant, NULL for an unknown zone. An
+// ambiguous wall time resolves to the earlier of its two instants and a
+// nonexistent one shifts past the gap; qm_tz_to_utc_kind reports which
+// happened, because a caller that silently gets one of two answers has no way
+// to tell it was asked an unanswerable question.
+void TzToUtcScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t zone, int64_t wall, ValidityMask &mask, idx_t idx) -> int64_t {
+		    int64_t utc = 0;
+		    bool ambiguous = false, nonexistent = false;
+		    if (!quackmail::tz::ToUtc(zone.GetString(), wall, utc, ambiguous, nonexistent)) {
+			    mask.SetInvalid(idx);
+			    return 0;
+		    }
+		    return utc;
+	    });
+}
+
+// qm_tz_to_utc_kind(tzid, wall) -> 'normal' | 'ambiguous' | 'nonexistent'.
+void TzToUtcKindScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t zone, int64_t wall, ValidityMask &mask, idx_t idx) {
+		    int64_t utc = 0;
+		    bool ambiguous = false, nonexistent = false;
+		    if (!quackmail::tz::ToUtc(zone.GetString(), wall, utc, ambiguous, nonexistent)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    const char *kind = ambiguous ? "ambiguous" : (nonexistent ? "nonexistent" : "normal");
+		    return StringVector::AddString(result, kind);
+	    });
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	// Ensure the shared schema exists as soon as the umbrella loads.
 	Connection con(loader.GetDatabaseInstance());
@@ -1252,6 +1346,16 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_html_escape", {V}, V, HtmlEscapeScalar));
 	loader.RegisterFunction(ScalarFunction("qm_url_path", {V}, V, UrlPathScalar));
 	loader.RegisterFunction(ScalarFunction("qm_http_keepalive", {V, V}, B, HttpKeepAliveScalar));
+
+	// Time zones. BIGINT rather than VARCHAR for the epoch arguments: DuckDB
+	// will not implicitly convert an INTEGER literal to VARCHAR, so a VARCHAR
+	// signature would force every caller to quote its numbers.
+	loader.RegisterFunction(ScalarFunction("qm_tz_version", {}, V, TzVersionScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_canonical", {V}, V, TzCanonicalScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_offset", {V, I}, I, TzOffsetScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_abbrev", {V, I}, V, TzAbbrevScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_to_utc", {V, I}, I, TzToUtcScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_to_utc_kind", {V, I}, V, TzToUtcKindScalar));
 
 	// Per-user send quotas.
 	RegisterPolicyFn(loader, "qm_ratelimit_set", UmbrellaKind::RATELIMIT_SET, {V, I, I, I}, kOkNote, kOkNoteTypes);

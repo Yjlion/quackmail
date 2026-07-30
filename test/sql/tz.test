@@ -1,0 +1,136 @@
+# name: test/sql/tz.test
+# description: the bundled IANA time zone database
+# group: [quackmail]
+#
+# Every date a calendar renders passes through these functions, and getting a
+# half-hour zone or a southern-hemisphere rule wrong is the kind of bug that
+# only ever shows up in someone else's timezone. The expected values here were
+# taken from the IANA database itself, not from this implementation.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# ---- the database is there and identified ---------------------------------
+
+query I
+SELECT qm_tz_version() ~ '^20\d\d[a-z]$';
+----
+true
+
+# ---- offsets ---------------------------------------------------------------
+# Northern hemisphere, both sides of the year.
+
+query IIII
+SELECT qm_tz_offset('America/New_York', 1768478400),
+       qm_tz_abbrev('America/New_York', 1768478400),
+       qm_tz_offset('America/New_York', 1784116800),
+       qm_tz_abbrev('America/New_York', 1784116800);
+----
+-18000	EST	-14400	EDT
+
+# The spring-forward instant exactly: one minute before, and at the change.
+# A binary search that used the wrong comparison would be off by one here.
+
+query IIII
+SELECT qm_tz_offset('America/New_York', 1772953140),
+       qm_tz_abbrev('America/New_York', 1772953140),
+       qm_tz_offset('America/New_York', 1772953200),
+       qm_tz_abbrev('America/New_York', 1772953200);
+----
+-18000	EST	-14400	EDT
+
+query IIII
+SELECT qm_tz_offset('Europe/London', 1768478400),
+       qm_tz_abbrev('Europe/London', 1768478400),
+       qm_tz_offset('Europe/London', 1784116800),
+       qm_tz_abbrev('Europe/London', 1784116800);
+----
+0	GMT	3600	BST
+
+# Zones that break the "offsets are whole hours and DST is one hour" assumption:
+# a permanent half-hour offset, a quarter-hour offset, and a 30-minute DST
+# shift in the southern hemisphere.
+
+query IIII
+SELECT qm_tz_offset('Asia/Kolkata', 1784116800),
+       qm_tz_offset('Pacific/Chatham', 1784116800),
+       qm_tz_offset('Australia/Lord_Howe', 1768478400),
+       qm_tz_offset('Australia/Lord_Howe', 1784116800);
+----
+19800	45900	39600	37800
+
+# 2050, which is past every stored transition: the answer comes from the zone's
+# POSIX rule. Without that this would be frozen at the last recorded offset and
+# wrong for half of every year.
+
+query II
+SELECT qm_tz_offset('America/New_York', 2541499200),
+       qm_tz_abbrev('America/New_York', 2541499200);
+----
+-14400	EDT
+
+# ---- names -----------------------------------------------------------------
+
+query III
+SELECT qm_tz_canonical('US/Eastern'),
+       qm_tz_canonical('Asia/Calcutta'),
+       qm_tz_canonical('America/New_York');
+----
+America/New_York	Asia/Kolkata	America/New_York
+
+# An unknown zone is NULL rather than a guess, everywhere.
+
+query III
+SELECT qm_tz_canonical('Mars/Olympus'),
+       qm_tz_offset('Mars/Olympus', 0),
+       qm_tz_to_utc('Mars/Olympus', 0);
+----
+NULL	NULL	NULL
+
+# ---- wall clock to UTC -----------------------------------------------------
+# The ordinary case, in three zones with different offsets. 2026-07-01 12:00
+# local is 1782907200 as a naive value.
+
+query III
+SELECT qm_tz_to_utc('America/New_York', 1782907200),
+       qm_tz_to_utc('Asia/Kolkata', 1782907200),
+       qm_tz_to_utc('Pacific/Chatham', 1782907200);
+----
+1782921600	1782887400	1782861300
+
+# The two wall times that are not a simple inverse, and the flag that says so.
+#
+# 2026-11-01 01:30 in New York happens twice, once on EDT and once on EST.
+# RFC 5545 wants the first, which is 05:30Z (EDT) rather than 06:30Z.
+
+query II
+SELECT qm_tz_to_utc('America/New_York', 1793496600),
+       qm_tz_to_utc_kind('America/New_York', 1793496600);
+----
+1793511000	ambiguous
+
+query II
+SELECT qm_tz_to_utc('Europe/London', 1792891800),
+       qm_tz_to_utc_kind('Europe/London', 1792891800);
+----
+1792888200	ambiguous
+
+# 2026-03-08 02:30 in New York never happens: the clock goes straight from
+# 02:00 to 03:00. The result shifts past the gap rather than failing, which is
+# what a calendar client does with an event scheduled into one.
+
+query II
+SELECT qm_tz_to_utc('America/New_York', 1772937000),
+       qm_tz_to_utc_kind('America/New_York', 1772937000);
+----
+1772955000	nonexistent
+
+# A wall time nowhere near a transition is reported as ordinary, so the flag
+# above means something.
+
+query I
+SELECT qm_tz_to_utc_kind('America/New_York', 1782907200);
+----
+normal
