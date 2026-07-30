@@ -64,13 +64,28 @@ constexpr int64_t kAideRoom = 1;
 constexpr int64_t kAideAxLevel = 6;
 
 // Citadel default_view codes (VIEW_*): what kind of content a room holds.
+//
+// These numbers go on the wire in GETR/SETR, where a real Citadel client reads
+// them, so they are not ours to choose. Transcribed from the ROOM_VIEWS enum in
+// libcitadel/lib/libcitadel.h on the parity oracle — verify there, not against
+// documentation, before adding to this list.
+//
+// Not every code has a renderer here. An unimplemented view falls back to the
+// ordinary message list, which is always a truthful way to show a room: the
+// objects really are messages.
 enum RoomView {
-	VIEW_BBS = 0,       // ordinary message board
-	VIEW_MAILBOX = 1,   // mail folder
+	VIEW_BBS = 0,     // ordinary message board
+	VIEW_MAILBOX = 1, // mail folder
 	VIEW_ADDRESSBOOK = 2,
 	VIEW_CALENDAR = 3,
 	VIEW_TASKS = 4,
 	VIEW_NOTES = 5,
+	VIEW_WIKI = 6,
+	VIEW_CALBRIEF = 7, // the calendar, listed rather than gridded
+	VIEW_JOURNAL = 8,
+	VIEW_DRAFTS = 9,
+	VIEW_BLOG = 10,
+	VIEW_QUEUE = 11, // Citadel's own SMTP spool view, not a user view
 };
 
 struct Room {

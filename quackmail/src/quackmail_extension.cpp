@@ -28,6 +28,7 @@
 #include "quackmail/spf.hpp"
 #include "quackmail/tz.hpp"
 #include "quackmail/util.hpp"
+#include "quackmail/vcard.hpp"
 
 #include <cstdlib>
 #include <ctime>
@@ -1156,6 +1157,84 @@ void HttpKeepAliveScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	    });
 }
 
+// ---- vCard ---------------------------------------------------------------
+// Contacts are stored as a text/vcard part of an ordinary message, so the
+// parser is what stands between a phone's address book and this one. Exposed as
+// scalars so the escaping, folding and round-trip rules are assertable from
+// sqllogictest with no room and no session in the way.
+
+// qm_vcard_count(text) -> how many cards parsed; 0 when the input is not vCard.
+void VcardCountScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, int64_t>(args.data[0], result, args.size(), [&](string_t in) {
+		std::vector<quackmail::vcard::Card> cards;
+		quackmail::vcard::Parse(in.GetString(), cards);
+		return (int64_t)cards.size();
+	});
+}
+
+// qm_vcard_get(text, property) -> the property's value, NULL when absent.
+// Structured properties come back with their components joined by ';'.
+void VcardGetScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, string_t prop, ValidityMask &mask, idx_t idx) {
+		    quackmail::vcard::Card card;
+		    if (!quackmail::vcard::ParseOne(text.GetString(), card)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    const quackmail::vcard::Property *p = card.Find(prop.GetString());
+		    if (!p) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, p->Value());
+	    });
+}
+
+// qm_vcard_fn(text) -> the display name, however it has to be derived.
+void VcardFnScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    quackmail::vcard::Card card;
+		    if (!quackmail::vcard::ParseOne(in.GetString(), card)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, card.Fn());
+	    });
+}
+
+// qm_vcard_euid(text) -> the euid the card would be stored under.
+void VcardEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    quackmail::vcard::Card card;
+		    if (!quackmail::vcard::ParseOne(in.GetString(), card)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::vcard::EuidFor(card));
+	    });
+}
+
+// qm_vcard_emit(text, version) -> parse and re-serialize. This is the function
+// that makes the round-trip testable: emit(parse(x)) has to preserve every
+// property, including ones this code does not model.
+void VcardEmitScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, int64_t version, ValidityMask &mask, idx_t idx) {
+		    quackmail::vcard::Card card;
+		    if (!quackmail::vcard::ParseOne(text.GetString(), card)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(
+		        result, quackmail::vcard::Emit(card, version ? (int)version : card.version));
+	    });
+}
+
 // ---- time zones ----------------------------------------------------------
 // The bundled IANA database, exposed so the offset tables can be asserted from
 // sqllogictest. Every date a calendar renders passes through these, and a
@@ -1346,6 +1425,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_html_escape", {V}, V, HtmlEscapeScalar));
 	loader.RegisterFunction(ScalarFunction("qm_url_path", {V}, V, UrlPathScalar));
 	loader.RegisterFunction(ScalarFunction("qm_http_keepalive", {V, V}, B, HttpKeepAliveScalar));
+
+	loader.RegisterFunction(ScalarFunction("qm_vcard_count", {V}, I, VcardCountScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vcard_get", {V, V}, V, VcardGetScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vcard_fn", {V}, V, VcardFnScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vcard_euid", {V}, V, VcardEuidScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vcard_emit", {V, I}, V, VcardEmitScalar));
 
 	// Time zones. BIGINT rather than VARCHAR for the epoch arguments: DuckDB
 	// will not implicitly convert an INTEGER literal to VARCHAR, so a VARCHAR
