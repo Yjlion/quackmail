@@ -135,7 +135,10 @@ true	true
 # multi-byte character — Ω is two bytes, so a naive 75-byte cut would split one.
 
 query II
-SELECT max(octet_length(line)) <= 75,          -- nothing over the limit
+-- octet_length takes a BLOB, and the cast is the point: folding is defined in
+-- octets, not characters, so measuring characters would pass a sheet that
+-- overflows the limit on every non-ASCII line.
+SELECT max(octet_length(line::BLOB)) <= 75,     -- nothing over the limit
        count(*) FILTER (WHERE starts_with(line, ' ')) > 0   -- it really did fold
 FROM (
   SELECT unnest(str_split(qm_vcard_emit(
