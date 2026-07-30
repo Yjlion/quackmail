@@ -1065,7 +1065,17 @@ std::vector<Occurrence> Expand(const Item &item, int64_t from, int64_t to) {
 				return;
 			}
 		}
-		if (start_instant + (duration > 0 ? duration : 0) <= from || start_instant >= to) {
+		// Does the occurrence intersect [from, to)?
+		//
+		// An event with a duration spans [start, start+duration) and overlaps
+		// when it has not already ended. One *without* a duration is a single
+		// instant, and has to be compared as one: "start + 0 <= from" would
+		// reject an event starting exactly at the window's first second, which
+		// is precisely the occurrence a day view is asking for.
+		if (start_instant >= to) {
+			return;
+		}
+		if (duration > 0 ? start_instant + duration <= from : start_instant < from) {
 			return;
 		}
 		Occurrence o;

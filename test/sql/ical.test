@@ -114,12 +114,34 @@ SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n
 ----
 1	1
 
-# The window is honoured: nothing outside [from, to).
+# ---- the window boundary ---------------------------------------------------
+# [from, to) is half-open, and the two shapes of occurrence have to be compared
+# differently. An event with a duration overlaps while it has not yet ended; one
+# without is a single instant. Treating an instant as a zero-length span makes
+# "ends at or before `from`" reject an event starting on the window's very first
+# second — which is exactly the occurrence a day view is asking for.
+#
+# 1773565200 is 2026-03-15T09:00Z, so these walk the edges either side of it.
 
-query I
-SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=DAILY;COUNT=10\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 1773565200, 1773738000);
+query IIII
+SELECT qm_ical_expand_count(ev, 1773565200, 1773738000),  -- starts on `from`
+       qm_ical_expand_count(ev, 1773565201, 1773738000),  -- one second after
+       qm_ical_expand_count(ev, 1773478800, 1773565200),  -- `to` lands on it
+       qm_ical_expand_count(ev, 1773478800, 1773565201)   -- one second past it
+FROM (SELECT E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=DAILY;COUNT=10\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n' AS ev);
 ----
-2
+2	1	0	1
+
+# The same edges for an event that lasts an hour: it is still in the window
+# while it is running, and gone once it has finished.
+
+query III
+SELECT qm_ical_expand_count(ev, 1773567000, 1773738000),  -- window opens mid-event
+       qm_ical_expand_count(ev, 1773568800, 1773738000),  -- opens as it ends
+       qm_ical_expand_count(ev, 1773568799, 1773738000)   -- one second before that
+FROM (SELECT E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nDTEND:20260315T100000Z\r\nRRULE:FREQ=DAILY;COUNT=10\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n' AS ev);
+----
+2	1	2
 
 # ---- recurrence across a DST change ---------------------------------------
 # The assertion this file exists for. A weekly 09:00 meeting in New York from
