@@ -1,5 +1,6 @@
 #include "quackmail/ical.hpp"
 
+#include "quackmail/contentline.hpp"
 #include "quackmail/tz.hpp"
 #include "quackmail/util.hpp"
 
@@ -113,137 +114,9 @@ void BreakWall(int64_t wall, int64_t &y, int &mo, int &d, int &h, int &mi, int &
 	s = (int)(rem % 60);
 }
 
-// ---- unfolding and escapes ----------------------------------------------
-
-std::vector<std::string> Unfold(const std::string &text) {
-	std::vector<std::string> lines;
-	std::string cur;
-	bool have = false;
-	for (size_t i = 0; i <= text.size(); i++) {
-		if (i == text.size() || text[i] == '\n') {
-			std::string line = cur;
-			if (!line.empty() && line.back() == '\r') {
-				line.pop_back();
-			}
-			if (!line.empty() && (line[0] == ' ' || line[0] == '\t') && have) {
-				lines.back() += line.substr(1);
-			} else {
-				lines.push_back(line);
-				have = true;
-			}
-			cur.clear();
-			if (i == text.size()) {
-				break;
-			}
-		} else {
-			cur += text[i];
-		}
-	}
-	return lines;
-}
-
-std::string Unescape(const std::string &in) {
-	std::string out;
-	for (size_t i = 0; i < in.size(); i++) {
-		if (in[i] == '\\' && i + 1 < in.size()) {
-			char n = in[i + 1];
-			switch (n) {
-			case 'n':
-			case 'N':
-				out += '\n';
-				break;
-			case ',':
-				out += ',';
-				break;
-			case ';':
-				out += ';';
-				break;
-			case '\\':
-				out += '\\';
-				break;
-			default:
-				out += '\\';
-				out += n;
-				break;
-			}
-			i++;
-			continue;
-		}
-		out += in[i];
-	}
-	return out;
-}
-
-std::string Escape(const std::string &in) {
-	std::string out;
-	for (char c : in) {
-		switch (c) {
-		case '\\':
-			out += "\\\\";
-			break;
-		case ';':
-			out += "\\;";
-			break;
-		case ',':
-			out += "\\,";
-			break;
-		case '\n':
-			out += "\\n";
-			break;
-		case '\r':
-			break;
-		default:
-			out += c;
-		}
-	}
-	return out;
-}
-
-std::vector<std::string> SplitUnescaped(const std::string &in, char sep) {
-	std::vector<std::string> out;
-	std::string cur;
-	for (size_t i = 0; i < in.size(); i++) {
-		if (in[i] == '\\' && i + 1 < in.size()) {
-			cur += in[i];
-			cur += in[i + 1];
-			i++;
-			continue;
-		}
-		if (in[i] == sep) {
-			out.push_back(cur);
-			cur.clear();
-			continue;
-		}
-		cur += in[i];
-	}
-	out.push_back(cur);
-	return out;
-}
-
-void AppendFolded(std::string &out, const std::string &line) {
-	const size_t kLimit = 75;
-	size_t i = 0;
-	bool first = true;
-	while (i < line.size()) {
-		size_t budget = first ? kLimit : kLimit - 1;
-		size_t take = std::min(budget, line.size() - i);
-		if (i + take < line.size()) {
-			while (take > 1 && ((unsigned char)line[i + take] & 0xC0) == 0x80) {
-				take--;
-			}
-		}
-		if (!first) {
-			out += " ";
-		}
-		out.append(line, i, take);
-		out += "\r\n";
-		i += take;
-		first = false;
-	}
-	if (line.empty()) {
-		out += "\r\n";
-	}
-}
+// The line grammar — unfolding, escapes, folding — lives in
+// core/src/contentline.cpp, shared with vCard and vNote.
+namespace cl = contentline;
 
 // ---- inline VTIMEZONE ----------------------------------------------------
 
@@ -459,7 +332,7 @@ std::string FormatDateTime(const DateTime &dt) {
 
 bool Parse(const std::string &text, Component &out) {
 	out = Component();
-	auto lines = Unfold(text);
+	auto lines = cl::Unfold(text);
 
 	// A stack of open components, so nested VALARM / VTIMEZONE sub-components
 	// land in the right place.
@@ -547,7 +420,7 @@ bool Parse(const std::string &text, Component &out) {
 		}
 		// RRULE and the like keep their raw value: the semicolons in
 		// "FREQ=WEEKLY;BYDAY=TU" are structure, not escaped text.
-		prop.value = (prop.name == "RRULE" || prop.name == "EXRULE") ? value : Unescape(value);
+		prop.value = (prop.name == "RRULE" || prop.name == "EXRULE") ? value : cl::Unescape(value);
 		stack.back().props.push_back(prop);
 	}
 
@@ -589,7 +462,7 @@ bool ParseItems(const std::string &text, std::vector<Item> &out) {
 				it.attendees.push_back(p.value);
 			} else if (p.name == "EXDATE") {
 				// EXDATE may carry several instants on one line.
-				for (auto &one : SplitUnescaped(p.value, ',')) {
+				for (auto &one : cl::SplitRaw(p.value, ',')) {
 					DateTime d = ParseDateTime(one, p.params, &root);
 					if (d.valid) {
 						it.exdates.push_back(d.epoch);
@@ -680,7 +553,7 @@ bool ParseItems(const std::string &text, std::vector<Item> &out) {
 namespace {
 
 void EmitComponent(std::string &out, const Component &c) {
-	AppendFolded(out, "BEGIN:" + c.name);
+	cl::AppendFolded(out, "BEGIN:" + c.name);
 	for (auto &p : c.props) {
 		std::string line = p.name;
 		for (auto &kv : p.params) {
@@ -692,13 +565,13 @@ void EmitComponent(std::string &out, const Component &c) {
 			}
 		}
 		// RRULE's semicolons are structure; a text value's are content.
-		line += ":" + ((p.name == "RRULE" || p.name == "EXRULE") ? p.value : Escape(p.value));
-		AppendFolded(out, line);
+		line += ":" + ((p.name == "RRULE" || p.name == "EXRULE") ? p.value : cl::Escape(p.value));
+		cl::AppendFolded(out, line);
 	}
 	for (auto &child : c.children) {
 		EmitComponent(out, child);
 	}
-	AppendFolded(out, "END:" + c.name);
+	cl::AppendFolded(out, "END:" + c.name);
 }
 
 } // namespace
@@ -802,29 +675,29 @@ std::string EmitVtimezone(const std::string &tzid, int from_year, int to_year) {
 	};
 
 	std::string out;
-	AppendFolded(out, "BEGIN:VTIMEZONE");
-	AppendFolded(out, "TZID:" + tzid);
+	cl::AppendFolded(out, "BEGIN:VTIMEZONE");
+	cl::AppendFolded(out, "TZID:" + tzid);
 	if (changes.empty()) {
 		// A zone with no transitions in range: one block stating the offset.
-		AppendFolded(out, first_dst ? "BEGIN:DAYLIGHT" : "BEGIN:STANDARD");
-		AppendFolded(out, "DTSTART:" + stamp(MakeWall(from_year, 1, 1, 0, 0, 0)));
-		AppendFolded(out, "TZOFFSETFROM:" + offset_str(first_offset));
-		AppendFolded(out, "TZOFFSETTO:" + offset_str(first_offset));
-		AppendFolded(out, "TZNAME:" + first_abbrev);
-		AppendFolded(out, first_dst ? "END:DAYLIGHT" : "END:STANDARD");
+		cl::AppendFolded(out, first_dst ? "BEGIN:DAYLIGHT" : "BEGIN:STANDARD");
+		cl::AppendFolded(out, "DTSTART:" + stamp(MakeWall(from_year, 1, 1, 0, 0, 0)));
+		cl::AppendFolded(out, "TZOFFSETFROM:" + offset_str(first_offset));
+		cl::AppendFolded(out, "TZOFFSETTO:" + offset_str(first_offset));
+		cl::AppendFolded(out, "TZNAME:" + first_abbrev);
+		cl::AppendFolded(out, first_dst ? "END:DAYLIGHT" : "END:STANDARD");
 	}
 	for (auto &ch : changes) {
-		AppendFolded(out, ch.to_dst ? "BEGIN:DAYLIGHT" : "BEGIN:STANDARD");
+		cl::AppendFolded(out, ch.to_dst ? "BEGIN:DAYLIGHT" : "BEGIN:STANDARD");
 		// DTSTART inside a VTIMEZONE is local to the offset being left.
-		AppendFolded(out, "DTSTART:" + stamp(ch.utc + ch.from_offset));
-		AppendFolded(out, "TZOFFSETFROM:" + offset_str(ch.from_offset));
-		AppendFolded(out, "TZOFFSETTO:" + offset_str(ch.to_offset));
+		cl::AppendFolded(out, "DTSTART:" + stamp(ch.utc + ch.from_offset));
+		cl::AppendFolded(out, "TZOFFSETFROM:" + offset_str(ch.from_offset));
+		cl::AppendFolded(out, "TZOFFSETTO:" + offset_str(ch.to_offset));
 		if (!ch.abbrev.empty()) {
-			AppendFolded(out, "TZNAME:" + ch.abbrev);
+			cl::AppendFolded(out, "TZNAME:" + ch.abbrev);
 		}
-		AppendFolded(out, ch.to_dst ? "END:DAYLIGHT" : "END:STANDARD");
+		cl::AppendFolded(out, ch.to_dst ? "END:DAYLIGHT" : "END:STANDARD");
 	}
-	AppendFolded(out, "END:VTIMEZONE");
+	cl::AppendFolded(out, "END:VTIMEZONE");
 	return out;
 }
 
@@ -887,11 +760,19 @@ void FoldItemInto(Component &c, const Item &item) {
 	} else {
 		c.Set("RRULE", item.rrule);
 	}
+	// Zero means "not set", so the property is *removed* rather than left alone.
+	// Leaving it was a real bug: reopening a completed task set
+	// percent_complete = 0 but the stored PERCENT-COMPLETE:100 survived, so the
+	// task read as done again the moment it was reloaded.
 	if (item.priority > 0) {
 		c.Set("PRIORITY", std::to_string(item.priority));
+	} else {
+		c.Remove("PRIORITY");
 	}
 	if (item.percent_complete > 0) {
 		c.Set("PERCENT-COMPLETE", std::to_string(item.percent_complete));
+	} else {
+		c.Remove("PERCENT-COMPLETE");
 	}
 	// A changed object has to say so, or a client that already has a copy will
 	// keep showing the old one.
@@ -959,9 +840,9 @@ std::string EmitItem(const Item &item, const std::string &prodid) {
 	root.children.push_back(body);
 
 	std::string out;
-	AppendFolded(out, "BEGIN:VCALENDAR");
+	cl::AppendFolded(out, "BEGIN:VCALENDAR");
 	for (auto &p : root.props) {
-		AppendFolded(out, p.name + ":" + Escape(p.value));
+		cl::AppendFolded(out, p.name + ":" + cl::Escape(p.value));
 	}
 	for (auto &z : zones) {
 		int64_t y = 1970;
@@ -972,7 +853,7 @@ std::string EmitItem(const Item &item, const std::string &prodid) {
 		out += EmitVtimezone(z, (int)y - 1, (int)y + 2);
 	}
 	EmitComponent(out, body);
-	AppendFolded(out, "END:VCALENDAR");
+	cl::AppendFolded(out, "END:VCALENDAR");
 	return out;
 }
 
@@ -996,7 +877,7 @@ Rule ParseRule(const std::string &rrule) {
 		return r;
 	}
 	bool unknown_part = false;
-	for (auto &part : SplitUnescaped(rrule, ';')) {
+	for (auto &part : cl::SplitRaw(rrule, ';')) {
 		size_t eq = part.find('=');
 		if (eq == std::string::npos) {
 			continue;
@@ -1017,7 +898,7 @@ Rule ParseRule(const std::string &rrule) {
 			}
 		} else if (k == "BYDAY") {
 			static const char *kNames[] = {"SU", "MO", "TU", "WE", "TH", "FR", "SA"};
-			for (auto &one : SplitUnescaped(v, ',')) {
+			for (auto &one : cl::SplitRaw(v, ',')) {
 				std::string d = Upper(Trim(one));
 				// An ordinal prefix ("2TU", "-1FR") is a form this does not
 				// expand; note it and let the caller degrade.

@@ -231,8 +231,20 @@ void SieveActivate(Ctx &ctx, const std::string &user, const std::string &name);
 std::string WebSessionTable(Ctx &ctx, const std::vector<quackmail::web::SessionRow> &rows,
                             const std::string &action, bool show_user);
 
+// The time zone this user's times should be rendered in: their `web_tz`
+// preference, else the site's `qm_default_tz`, else UTC. Never empty and always
+// a zone the bundled database knows.
+std::string EffectiveTz(Ctx &ctx);
+
 // Human-readable helpers used across pages.
-std::string FormatTime(int64_t epoch_seconds);
+//
+// Times render in the *viewer's* zone, which is why this needs the Ctx. It used
+// to call localtime_r and so showed every timestamp in whatever zone the server
+// process happened to be in — invisible to an operator whose server and desk are
+// in the same place, and wrong for everyone else.
+std::string FormatTime(Ctx &ctx, int64_t epoch_seconds);
+// The same, in an explicit zone. Pass "" for UTC.
+std::string FormatTimeIn(int64_t epoch_seconds, const std::string &tzid);
 std::string FormatBytes(int64_t bytes);
 // The subject/author of a message, RFC 2047-decoded. Decode first, escape
 // second: the other order lets "=?utf-8?B?PHNjcmlwdD4=?=" turn back into a tag

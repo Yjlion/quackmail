@@ -2,6 +2,7 @@
 #include "web_assets.hpp"
 
 #include "quackmail/mime.hpp"
+#include "quackmail/tz.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -612,18 +613,48 @@ bool LoadMessageIn(Ctx &ctx, const Room &room, int64_t msgnum, Message &out) {
 	return quackmail::citadel::LoadMessage(ctx.con, msgnum, out);
 }
 
-std::string FormatTime(int64_t epoch_seconds) {
+std::string EffectiveTz(Ctx &ctx) {
+	std::string want;
+	if (ctx.Authed()) {
+		want = quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_tz");
+	}
+	if (want.empty()) {
+		want = ConfigStr(ctx.con, "qm_default_tz", "UTC");
+	}
+	// A pref naming a zone the bundled database has never heard of — a stale
+	// name, a typo set by hand — falls back rather than rendering nothing.
+	if (want.empty() || !quackmail::tz::IsKnown(want)) {
+		return "UTC";
+	}
+	return want;
+}
+
+std::string FormatTimeIn(int64_t epoch_seconds, const std::string &tzid) {
 	if (epoch_seconds <= 0) {
 		return "—";
 	}
-	std::time_t t = (std::time_t)epoch_seconds;
-	struct tm tm {};
-	localtime_r(&t, &tm);
-	char buf[40];
-	if (std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &tm) == 0) {
-		return "—";
+	// Break the wall clock down here rather than through localtime_r, which
+	// would answer in the server's zone regardless of what was asked for.
+	int64_t wall = tzid.empty() ? epoch_seconds : quackmail::tz::FromUtc(tzid, epoch_seconds);
+	int64_t days = wall / 86400;
+	int64_t rem = wall % 86400;
+	if (rem < 0) {
+		rem += 86400;
+		days -= 1;
 	}
+	// Days-since-epoch to a civil date, via gmtime_r on a value already shifted
+	// into the target zone — so the "UTC" it reports is the local wall clock.
+	std::time_t t = (std::time_t)(days * 86400);
+	struct tm tm {};
+	gmtime_r(&t, &tm);
+	char buf[48];
+	std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1,
+	              tm.tm_mday, (int)(rem / 3600), (int)((rem % 3600) / 60));
 	return buf;
+}
+
+std::string FormatTime(Ctx &ctx, int64_t epoch_seconds) {
+	return FormatTimeIn(epoch_seconds, EffectiveTz(ctx));
 }
 
 std::string FormatBytes(int64_t bytes) {

@@ -241,7 +241,7 @@ void GetBbsRoom(Ctx &ctx) {
 		body += std::string("<tr") + (unread ? " class=\"unread\"" : "") + ">";
 		body += "<td>" + Link(RoomHref(room, "/msg/" + std::to_string(nums[i])), subject) + "</td>";
 		body += Cell(DecodeHeader(msg.author));
-		body += Cell(FormatTime(msg.msgtime));
+		body += Cell(FormatTime(ctx, msg.msgtime));
 		body += "</tr>";
 	}
 	body += "</table></div>";
@@ -532,7 +532,7 @@ std::string RenderMessage(Ctx &ctx, const Room &room, const Message &msg) {
 	row("Subject", DecodeHeader(msg.subject));
 	row("From", DecodeHeader(msg.author));
 	row("To", DecodeHeader(msg.recipient));
-	row("Date", FormatTime(msg.msgtime));
+	row("Date", FormatTime(ctx, msg.msgtime));
 	out += "</dl></div>";
 
 	// format_type 4 is RFC822/MIME; anything else is native Citadel text.

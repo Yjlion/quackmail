@@ -137,7 +137,7 @@ void GetUsers(Ctx &ctx) {
 		        Hidden("enabled", u.enabled ? "0" : "1") +
 		        Button(u.enabled ? "Yes — disable" : "No — enable", "sec") + FormEnd() + "</td>";
 		body += "<td class=\"num\">" + T(std::to_string(u.times_called)) + "</td>";
-		body += Cell(FormatTime(u.last_call));
+		body += Cell(FormatTime(ctx, u.last_call));
 		body += "<td>" + Link("/admin/sieve?user=" + http::PercentEncode(u.username), "Filters") + "</td>";
 		body += "</tr>";
 	}
