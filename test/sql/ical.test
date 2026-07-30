@@ -160,10 +160,10 @@ SELECT qm_ical_expand_starts(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\
 query II
 SELECT list_distinct(list_transform(
          str_split(qm_ical_expand_starts(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:d@x\r\nDTSTART;TZID=America/New_York:20261020T090000\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800), ','),
-         s -> (qm_tz_offset('America/New_York', CAST(s AS BIGINT)) + CAST(s AS BIGINT)) % 86400 / 3600)),
+         s -> (qm_tz_offset('America/New_York', CAST(s AS BIGINT)) + CAST(s AS BIGINT)) % 86400 // 3600)),
        list_distinct(list_transform(
          str_split(qm_ical_expand_starts(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:d@x\r\nDTSTART;TZID=America/New_York:20261020T090000\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800), ','),
-         s -> CAST(s AS BIGINT) % 86400 / 3600));
+         s -> CAST(s AS BIGINT) % 86400 // 3600));
 ----
 [9]	[13, 14]
 
