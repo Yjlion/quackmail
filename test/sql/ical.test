@@ -1,0 +1,196 @@
+# name: test/sql/ical.test
+# description: iCalendar parsing, recurrence expansion and the edit path
+# group: [quackmail]
+#
+# Two things here are worth more than the rest put together:
+#
+#   * a recurring event keeps its *local* hour across a DST change, rather than
+#     drifting an hour, which is the bug every UTC-only calendar has;
+#   * editing an event preserves the parts we do not model — the alarm someone
+#     set on their phone has to still be there afterwards.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# ---- parsing ---------------------------------------------------------------
+
+query IIII
+SELECT qm_ical_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nSUMMARY:One\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_ical_get(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nSUMMARY:One\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 'VEVENT', 'SUMMARY'),
+       qm_ical_euid(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nSUMMARY:One\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_ical_start(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nSUMMARY:One\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+1	One	a@x	1773565200
+
+# All three item kinds, and VTIMEZONE is not one of them.
+
+query I
+SELECT qm_ical_count(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\n' ||
+  E'BEGIN:VTIMEZONE\r\nTZID:UTC\r\nEND:VTIMEZONE\r\n' ||
+  E'BEGIN:VEVENT\r\nUID:1@x\r\nDTSTART:20260315T090000Z\r\nEND:VEVENT\r\n' ||
+  E'BEGIN:VTODO\r\nUID:2@x\r\nDUE:20260316T090000Z\r\nEND:VTODO\r\n' ||
+  E'BEGIN:VJOURNAL\r\nUID:3@x\r\nDTSTART:20260317T090000Z\r\nEND:VJOURNAL\r\n' ||
+  E'END:VCALENDAR\r\n');
+----
+3
+
+# Not a calendar at all: no items, no guesses.
+
+query II
+SELECT qm_ical_count('just text'), qm_ical_start('just text');
+----
+0	NULL
+
+# A TZID resolves through the bundled zone database. 2026-03-15 09:00 in New
+# York is 13:00Z, because daylight saving started a week earlier.
+
+query I
+SELECT qm_ical_start(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:z@x\r\nDTSTART;TZID=America/New_York:20260315T090000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+1773579600
+
+# Escapes resolve, and RRULE keeps its semicolons — those are structure, not
+# escaped text, so unescaping them would destroy the rule.
+
+query II
+SELECT qm_ical_get(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:e@x\r\nDTSTART:20260315T090000Z\r\nLOCATION:Room 3\\; upstairs\\, rear\r\nRRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=5\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 'VEVENT', 'LOCATION'),
+       qm_ical_get(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:e@x\r\nDTSTART:20260315T090000Z\r\nLOCATION:Room 3\\; upstairs\\, rear\r\nRRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=5\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 'VEVENT', 'RRULE');
+----
+Room 3; upstairs, rear	FREQ=WEEKLY;BYDAY=TU;COUNT=5
+
+# ---- recurrence ------------------------------------------------------------
+# The forms that are supported, by count.
+
+query IIIIII
+SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=DAILY;COUNT=4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800),
+       qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=DAILY;INTERVAL=3;COUNT=3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800),
+       qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=DAILY;UNTIL=20260318T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800),
+       qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260316T090000Z\r\nRRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=6\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800),
+       qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260115T090000Z\r\nRRULE:FREQ=MONTHLY;COUNT=4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800),
+       qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=YEARLY;COUNT=3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800);
+----
+4	3	4	6	4	3
+
+# An event with no rule at all occurs once.
+
+query I
+SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800);
+----
+1
+
+# EXDATE removes an instance the rule would otherwise produce.
+
+query I
+SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=DAILY;COUNT=4\r\nEXDATE:20260316T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800);
+----
+3
+
+# A monthly rule on the 31st skips the months that have no 31st, rather than
+# clamping to the 30th. RFC 5545 §3.3.10 is explicit: an invalid date is not
+# generated. So Jan, Mar, May, Jul — not Feb.
+
+query I
+SELECT qm_ical_expand_starts(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260131T090000Z\r\nRRULE:FREQ=MONTHLY;COUNT=4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800);
+----
+1769850000,1774947600,1780218000,1785488400
+
+# An unbounded rule is capped rather than allowed to run: this expansion happens
+# on a request thread, and a calendar with no COUNT and no UNTIL is normal.
+
+query I
+SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800);
+----
+750
+
+# A rule using a form this does not expand still puts the event on the calendar
+# once. Vanishing would be worse than being incomplete.
+
+query II
+SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=MONTHLY;BYSETPOS=-1;BYDAY=FR\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800),
+       qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=MONTHLY;BYDAY=2TU\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800);
+----
+1	1
+
+# The window is honoured: nothing outside [from, to).
+
+query I
+SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:r@x\r\nDTSTART:20260315T090000Z\r\nRRULE:FREQ=DAILY;COUNT=10\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 1773565200, 1773738000);
+----
+2
+
+# ---- recurrence across a DST change ---------------------------------------
+# The assertion this file exists for. A weekly 09:00 meeting in New York from
+# 2026-10-20: the first two occurrences are 13:00Z (EDT), and after the clocks
+# go back on 2026-11-01 they are 14:00Z (EST) — because 09:00 *local* is what
+# was meant. A UTC-only implementation would keep 13:00Z and show 08:00 local.
+
+query I
+SELECT qm_ical_expand_starts(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:d@x\r\nDTSTART;TZID=America/New_York:20261020T090000\r\nDTEND;TZID=America/New_York:20261020T100000\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800);
+----
+1792501200,1793106000,1793714400,1794319200
+
+# Stated the other way round, so the intent is legible: every occurrence is at
+# 09:00 New York time, and the UTC hour is what changes.
+
+query II
+SELECT list_distinct(list_transform(
+         str_split(qm_ical_expand_starts(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:d@x\r\nDTSTART;TZID=America/New_York:20261020T090000\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800), ','),
+         s -> (qm_tz_offset('America/New_York', CAST(s AS BIGINT)) + CAST(s AS BIGINT)) % 86400 / 3600)),
+       list_distinct(list_transform(
+         str_split(qm_ical_expand_starts(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:d@x\r\nDTSTART;TZID=America/New_York:20261020T090000\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800), ','),
+         s -> CAST(s AS BIGINT) % 86400 / 3600));
+----
+[9]	[13, 14]
+
+# ---- DTEND, DURATION and all-day ------------------------------------------
+
+query II
+SELECT qm_ical_expand_count(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u@x\r\nDTSTART:20260315T090000Z\r\nDURATION:PT90M\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800),
+       qm_ical_expand_starts(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u@x\r\nDTSTART;VALUE=DATE:20260315\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n', 0, 4102444800);
+----
+1	1773532800,1773619200,1773705600
+
+# ---- the edit path ---------------------------------------------------------
+# Changing the summary must not disturb anything else. The VALARM, the X-
+# property, the parameters on ORGANIZER and ATTENDEE, and DTSTAMP all survive;
+# SEQUENCE goes up, because a changed object has to say it changed.
+
+query IIIIII
+SELECT edited LIKE '%SUMMARY:Renamed%',
+       edited LIKE '%BEGIN:VALARM%',
+       edited LIKE '%TRIGGER:-PT15M%',
+       edited LIKE '%X-PHONE-WROTE-THIS:keep me%',
+       edited LIKE '%ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.com%',
+       edited LIKE '%SEQUENCE:3%'
+FROM (SELECT qm_ical_set_summary(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m@x\r\nDTSTAMP:20260301T120000Z\r\n' ||
+  E'DTSTART:20260315T090000Z\r\nSUMMARY:Original\r\nSEQUENCE:2\r\n' ||
+  E'ORGANIZER;CN=Ada:mailto:ada@example.com\r\n' ||
+  E'ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.com\r\n' ||
+  E'X-PHONE-WROTE-THIS:keep me\r\n' ||
+  E'BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n' ||
+  E'END:VEVENT\r\nEND:VCALENDAR\r\n', 'Renamed') AS edited);
+----
+true	true	true	true	true	true
+
+# ---- VTIMEZONE -------------------------------------------------------------
+# A TZID with no VTIMEZONE beside it leaves Outlook and Thunderbird guessing, so
+# one is generated from the bundled database. The transition instants have to be
+# exact: a client that recomputes them from what we wrote must agree with us.
+
+query III
+SELECT vtz LIKE '%TZID:America/New_York%',
+       vtz LIKE '%DTSTART:20260308T020000%',   -- clocks forward, 02:00 exactly
+       vtz LIKE '%DTSTART:20261101T020000%'    -- clocks back
+FROM (SELECT qm_ical_vtimezone('America/New_York', 2026, 2026) AS vtz);
+----
+true	true	true
+
+query II
+SELECT qm_ical_vtimezone('America/New_York', 2026, 2026) LIKE '%TZOFFSETTO:-0400%',
+       qm_ical_vtimezone('Mars/Olympus', 2026, 2026);
+----
+true	NULL

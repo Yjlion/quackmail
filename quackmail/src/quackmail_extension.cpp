@@ -4,6 +4,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/vector_operations/binary_executor.hpp"
+#include "duckdb/common/vector_operations/ternary_executor.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -18,6 +19,7 @@
 #include "quackmail/feed.hpp"
 #include "quackmail/fetch.hpp"
 #include "quackmail/http.hpp"
+#include "quackmail/ical.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
@@ -1235,6 +1237,153 @@ void VcardEmitScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	    });
 }
 
+// ---- iCalendar -----------------------------------------------------------
+// Events, tasks and journal entries, stored as a text/calendar part of an
+// ordinary message. Exposed as scalars so recurrence expansion — the part with
+// the most ways to be subtly wrong — is assertable without a calendar room.
+
+void IcalCountScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, int64_t>(args.data[0], result, args.size(), [&](string_t in) {
+		std::vector<quackmail::ical::Item> items;
+		quackmail::ical::ParseItems(in.GetString(), items);
+		return (int64_t)items.size();
+	});
+}
+
+// qm_ical_get(text, component, property) -> a property of the first component
+// of that type. "VEVENT", "SUMMARY".
+void IcalGetScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, string_t, string_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t text, string_t comp, string_t prop, ValidityMask &mask, idx_t idx) {
+		    quackmail::ical::Component root;
+		    if (!quackmail::ical::Parse(text.GetString(), root)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    const quackmail::ical::Component *c = root.Child(comp.GetString());
+		    if (!c) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    const quackmail::ical::Property *p = c->Find(prop.GetString());
+		    if (!p) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, p->value);
+	    });
+}
+
+// qm_ical_start(text) -> the first item's start instant, NULL when it has none.
+void IcalStartScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, int64_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) -> int64_t {
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::ParseItems(in.GetString(), items) || items.empty() ||
+		        !items[0].start.valid) {
+			    mask.SetInvalid(idx);
+			    return 0;
+		    }
+		    return items[0].start.epoch;
+	    });
+}
+
+void IcalEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::ParseItems(in.GetString(), items) || items.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::ical::EuidFor(items[0]));
+	    });
+}
+
+// qm_ical_expand_count(text, from, to) -> how many occurrences fall in the
+// window. The cheap way to assert a recurrence rule.
+void IcalExpandCountScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t, int64_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t text, int64_t from, int64_t to, ValidityMask &mask, idx_t idx) -> int64_t {
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::ParseItems(text.GetString(), items) || items.empty()) {
+			    mask.SetInvalid(idx);
+			    return 0;
+		    }
+		    return (int64_t)quackmail::ical::Expand(items[0], from, to).size();
+	    });
+}
+
+// qm_ical_expand_starts(text, from, to) -> the occurrence instants, comma
+// separated. Counting is not enough for the assertion that matters: a weekly
+// meeting has to keep its *local* hour across a DST change, and only the
+// instants show that.
+void IcalExpandStartsScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t text, int64_t from, int64_t to, ValidityMask &mask, idx_t idx) {
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::ParseItems(text.GetString(), items) || items.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    std::string out;
+		    for (auto &o : quackmail::ical::Expand(items[0], from, to)) {
+			    if (!out.empty()) {
+				    out += ",";
+			    }
+			    out += std::to_string(o.start);
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_ical_set_summary(text, summary) -> the calendar with the first item's
+// SUMMARY changed, everything else untouched.
+//
+// A small operation that happens to exercise the whole reason there are two
+// representations: alarms, X- properties and attendee parameters have to come
+// back out, because losing the reminder someone set on their phone is the worst
+// thing a calendar store can do.
+void IcalSetSummaryScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, string_t summary, ValidityMask &mask, idx_t idx) {
+		    quackmail::ical::Component root;
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::Parse(text.GetString(), root) ||
+		        !quackmail::ical::ParseItems(text.GetString(), items) || items.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    quackmail::ical::Item it = items[0];
+		    it.summary = summary.GetString();
+		    it.sequence++;
+		    if (!quackmail::ical::ApplyItem(root, it)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::ical::Emit(root));
+	    });
+}
+
+// qm_ical_vtimezone(tzid, from_year, to_year) -> a VTIMEZONE from the bundled
+// database.
+void IcalVtimezoneScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t tzid, int64_t y0, int64_t y1, ValidityMask &mask, idx_t idx) {
+		    std::string out = quackmail::ical::EmitVtimezone(tzid.GetString(), (int)y0, (int)y1);
+		    if (out.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
 // ---- time zones ----------------------------------------------------------
 // The bundled IANA database, exposed so the offset tables can be asserted from
 // sqllogictest. Every date a calendar renders passes through these, and a
@@ -1431,6 +1580,15 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_vcard_fn", {V}, V, VcardFnScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_euid", {V}, V, VcardEuidScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_emit", {V, I}, V, VcardEmitScalar));
+
+	loader.RegisterFunction(ScalarFunction("qm_ical_count", {V}, I, IcalCountScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_get", {V, V, V}, V, IcalGetScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_start", {V}, I, IcalStartScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_euid", {V}, V, IcalEuidScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_expand_count", {V, I, I}, I, IcalExpandCountScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_expand_starts", {V, I, I}, V, IcalExpandStartsScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_set_summary", {V, V}, V, IcalSetSummaryScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_vtimezone", {V, I, I}, V, IcalVtimezoneScalar));
 
 	// Time zones. BIGINT rather than VARCHAR for the epoch arguments: DuckDB
 	// will not implicitly convert an INTEGER literal to VARCHAR, so a VARCHAR
