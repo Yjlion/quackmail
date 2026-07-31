@@ -52,7 +52,7 @@ Saving an object again replaces it: `citadel::UpsertByEuid` inserts and then
 unlinks the previous one. It is a separate call rather than something
 `InsertMessage` learned to do, because ordinary messages have no identity and
 must keep appending. It lives in core so the native `ENT0`/`EUID` path, the web
-UI and any future CalDAV module cannot disagree about what a second save means.
+UI and the CalDAV module cannot disagree about what a second save means.
 An empty euid is **refused** rather than treated as an insert — without one there
 is nothing to replace, so accepting it would turn every later save into a
 duplicate.
@@ -161,6 +161,66 @@ Notes are `text/vnote` rather than iCalendar `VJOURNAL`, which would have needed
 no new code at all. The reason is parity: WebCit and the Citadel clients read
 vNote, and cross-protocol readability is the entire point of storing groupware as
 ordinary messages.
+
+### CalDAV rides the web listeners; a resource name is an encoded euid
+
+DAV is not an extension of its own. A calendar collection *is* a room whose
+`default_view` is `VIEW_CALENDAR`, and an event *is* the message in it — so
+`/dav/` is a second projection of what `http/` already renders, sharing its two
+listeners, its `ServerController`s and its per-connection `Connection`. Nothing
+was added to `quackcit_services`, `extension_config.cmake` or the release
+packaging loop, because no new service exists.
+
+**The resource-name encoding is the subtle part.** `http::NormalizePath`
+percent-decodes *before* it splits a path into segments, so percent-encoding a
+name is useless here: `%2F` decodes back to a `/` and turns one segment into
+two, and `%2E%2E` decodes to `..`, which the normalizer rejects outright.
+`dav::NameForEuid` therefore emits only unreserved bytes — `[A-Za-z0-9._-]` —
+escaping everything else as `~HH`. `~` is itself unreserved, so decoding a name
+is a no-op and the round trip is exact; an ordinary UID stays readable
+(`abc@example.com` → `abc~40example.com`). A *leading* `.` is escaped even
+though `.` is otherwise safe, or an euid of `..` would encode to itself.
+
+**Only removals are recorded.** `citadel_room_tombstones` exists because
+`DeleteMessage` unlinked a pointer row and left nothing behind, and
+`citadel_rooms.highest_msg` only ever grows through `greatest()` — so no token
+derived from the store could tell a client an event had been cancelled.
+Additions need no such help: msgnum comes from a monotone sequence, so "newer
+than N" is a range scan, and the insert path every inbound SMTP delivery takes
+is untouched. A replaced object appears in `RoomChangesSince` twice, once as its
+new msgnum and once as the tombstone for the one it displaced, which is why
+callers resolve the euid through `FindByEuid` rather than trusting `deleted`:
+still resolves means changed, no longer resolves means removed.
+
+**A DAV client authenticates with Basic and gets no session row.** `Role::Dav`
+is a fourth role rather than a field on `Route`, because a default member
+initializer would make `Route` a non-aggregate and break every one of the ~80
+`push_back({...})` calls. It answers 401 with a challenge instead of redirecting
+to `/login`, skips CSRF — a program that has never seen an HTML form cannot
+produce a token, and Basic credentials are not ambient authority the way a
+cookie is — and runs through the same `LoginAllowed` throttle, or the DAV
+endpoint would be an unthrottled password oracle beside a throttled login page.
+
+**The resource name must equal the object's UID**, and a PUT that disagrees gets
+409 `no-uid-conflict`. This is stricter than RFC 4791 allows, and it is
+deliberate: the store keys an object by its own UID, there is no name→UID map to
+make a differently-named resource findable afterwards, and storing under the
+body's UID while the client remembers another href would 404 on its very next
+GET. Every client that ships names the resource after the UID.
+
+**A PUT stores the client's bytes verbatim.** Never re-emitted through
+`ical::Emit`, which would silently drop every property the flat `Item` does not
+model. `test_caldav.py` PUTs an `X-CUSTOM-VENDOR-FIELD` and a `VALARM` and
+asserts both survive byte-for-byte.
+
+**Watch for silently-failing DDL.** `EnsureCitadelSchema` does not check
+`con.Query`'s result, so a `CREATE TABLE` that will not parse fails in total
+silence and every later read of that table just returns nothing. The tombstone
+table was first written with a column called `at`, which DuckDB parses as a
+keyword (`AT TIME ZONE`, and the time-travel `FROM ... AT` clause); the only
+symptom was a CalDAV client that never noticed a deletion.
+`test/sql/citadel_store.test` now asserts the full table list and that table's
+column names, so the next one is caught by a test rather than by a protocol.
 
 ### Blog and journal rooms are not groupware
 
