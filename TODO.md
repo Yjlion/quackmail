@@ -5,29 +5,40 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-- [ ] **JMAP Core + Mail** (RFC 8620 + RFC 8621), the second half of the
-      groupware-clients work CalDAV/CardDAV started. Blocked on nothing; the
-      seams it needs are already in place.
-  - [ ] `core/json.{hpp,cpp}` — there is no JSON anywhere in `core/` today. A
-        value variant with `Parse`/`Serialize`, strict about UTF-8 and about
-        depth and size, because the input is attacker-reachable. Register
-        `qm_json_*` scalars so `test/sql/` can assert the codec with no socket,
-        the way `qm_dav_name` is asserted now.
-  - [ ] `/.well-known/jmap` → the Session resource; `/jmap/api` for the method
-        array with back-references; `/jmap/download/...` for blobs, over the
-        attachment path `web_mail.cpp` already has.
-  - [ ] `Mailbox`, `Email`, `Thread`, `Identity`, `EmailSubmission`, mapped the
-        way IMAP already maps them (mailbox = room, id = msgnum, keywords =
-        `citadel_msg_flags`). `Email/changes` reuses `RoomChangeToken` and
-        `RoomChangesSince` from the DAV work — that is what makes it
-        implementable at all.
-  - [ ] Unlike IMAP's `APPEND`, ask `citadel::CanPost`. IMAP not doing so is a
-        gap worth not copying.
-  - The JMAP Calendars and Contacts bindings are deliberately out of scope:
-    they are drafts, and no shipping client speaks them. CalDAV/CardDAV is what
-    a phone actually connects with.
+Nothing. CalDAV, CardDAV and JMAP all landed; see the backlog for what was
+deliberately left out of them.
 
 ## Shipped
+
+- [x] **JMAP Core + Mail** (RFC 8620 + RFC 8621) at `/jmap/`, on the same two
+      listeners, over the same rooms and messages IMAP serves.
+  - [x] `core/json.{hpp,cpp}` — written rather than vendored, because the
+        extension build has no package manager and DuckDB's bundled yyjson is
+        not exposed to extensions. What it *refuses* is the contract: bounded
+        depth and size, a number grammar walked rather than handed to `strtod`,
+        no literal control characters in strings, no unpaired surrogates, no
+        trailing content. `qm_json_*` scalars make all of that assertable from
+        `test/sql/json.test` with no socket.
+  - [x] `core/submission.{hpp,cpp}` — stamp, DKIM-sign, split local from
+        remote, deliver and queue. Extracted from `smtp_out` so the SMTP
+        submission listener and `EmailSubmission/set` are one implementation:
+        they differ only in how the message arrived.
+  - [x] `Mailbox/get|query|changes`, `Email/get|query|changes|set`,
+        `Thread/get`, `Identity/get`, `EmailSubmission/set|get`, `Core/echo`,
+        the Session resource and blob download.
+  - [x] `Email/changes` reuses `RoomChangeToken`/`RoomChangesSince` from the DAV
+        work — without the tombstones there would be no way to report a deleted
+        message, and `/changes` would not be implementable at all.
+  - [x] Unlike IMAP's `APPEND`, `Email/set` asks `citadel::CanPost`, and
+        `EmailSubmission/set` charges the same `policy::CheckRate` quota the
+        submission listener charges. A second door onto one mail path that
+        skipped either would make the rule advisory.
+  - [x] Deliberately absent: the upload endpoint (`maxSizeUpload` is 0, which is
+        how a client is told not to try rather than left to find a 404),
+        `Mailbox/changes` (nothing journals room creation, so
+        `cannotCalculateChanges` is the honest answer), and the JMAP Calendars
+        and Contacts bindings — drafts nothing ships against, where CalDAV and
+        CardDAV are what a phone actually connects with.
 
 - [x] **CalDAV and CardDAV** over the groupware rooms, on the existing HTTP and
       HTTPS listeners — not an extension of its own, because it is a second
@@ -491,6 +502,12 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 - XMPP, not implemented (Citadel does not have them either): MUC, offline
   storage, stored rosters/subscriptions, s2s.
 - IMAP depth: `IDLE`, `CONDSTORE`/`QRESYNC`, server-side sort/thread.
+- JMAP depth: the upload endpoint (and with it `Email/set` creates carrying new
+  attachments), `Email/import`, `SearchSnippet/get`, push over EventSource, and
+  `Email/query` sorts other than newest-first. `Thread/get` scans the account
+  rather than an index, because a thread id is a function of the References
+  header rather than a stored column — fine at BBS scale, wrong at mailbox
+  scale.
 - IMAP still serves `msg.raw` directly for native (format 0) messages; it should
   use `citadel::RenderRfc822` like POP3 and NNTP now do.
 - Citadel breadth: `CONF`/config verbs, `EXPI` message expiry, address books /
