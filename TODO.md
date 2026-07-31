@@ -58,6 +58,11 @@ deliberately left out of them.
         and turns one segment into two. Names are encoded to unreserved bytes
         only, with `~HH` for the rest and a leading `.` always escaped so no
         name can be `.` or `..`.
+  - [x] `citadel_dav_names`, because a resource name is the client's to choose
+        and is not the object's UID. Required to match at first, which rejected
+        vdirsyncer outright — it PUTs to a random UUID of its own. Found by
+        pointing real clients at it (`caldav` 3.2.1 and vdirsyncer 0.20), which
+        is the only kind of test that could have.
   - [x] `citadel_room_tombstones` plus `RoomChangeToken`/`RoomChangesSince`.
         Additions were already discoverable by msgnum, so the insert path every
         inbound message takes is untouched; removals left nothing behind at all,
