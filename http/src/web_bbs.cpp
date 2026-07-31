@@ -22,6 +22,17 @@ int64_t CapNum(const Ctx &ctx, size_t i) {
 	return s.empty() ? -1 : (int64_t)std::strtoll(s.c_str(), nullptr, 10);
 }
 
+// Shell options for any page that belongs to a room. Carrying default_view onto
+// the <body> is what will let a room render as something other than a message
+// list without every handler having to know about layout.
+PageOpts RoomPage(const Room &room) {
+	PageOpts opts;
+	opts.active = "bbs";
+	opts.view = (int)room.default_view;
+	opts.wide = true;
+	return opts;
+}
+
 // The one-line badge after a room name: unread count, and why it is unusual.
 std::string RoomBadges(const Room &room, const RoomStats &stats) {
 	std::string out;
@@ -99,7 +110,10 @@ void GetBbsIndex(Ctx &ctx) {
 		body += "<p class=\"muted\">Hidden from the lists above until you open one again.</p>";
 		body += RoomListHtml(ctx, zapped);
 	}
-	Render(ctx, "Rooms", body);
+	PageOpts opts;
+	opts.active = "bbs";
+	opts.wide = true;
+	Render(ctx, "Rooms", body, opts);
 }
 
 void GetBbsFloor(Ctx &ctx) {
@@ -109,7 +123,10 @@ void GetBbsFloor(Ctx &ctx) {
 		return;
 	}
 	auto rooms = quackmail::citadel::ListRooms(ctx.con, ctx.username, floor.floor_num, "all");
-	Render(ctx, floor.name, RoomListHtml(ctx, rooms));
+	PageOpts opts;
+	opts.active = "bbs";
+	opts.wide = true;
+	Render(ctx, floor.name, RoomListHtml(ctx, rooms), opts);
 }
 
 // ---- one room ------------------------------------------------------------
@@ -194,7 +211,7 @@ void GetBbsRoom(Ctx &ctx) {
 
 	if (nums.empty()) {
 		body += "<p class=\"muted\">Nothing to show.</p>";
-		Render(ctx, room.display_name, body);
+		Render(ctx, room.display_name, body, RoomPage(room));
 		return;
 	}
 
@@ -218,7 +235,7 @@ void GetBbsRoom(Ctx &ctx) {
 	body += "</table></div>";
 	body += PagerHtml(room, filter, page, per, total_pages);
 
-	Render(ctx, room.display_name, body);
+	Render(ctx, room.display_name, body, RoomPage(room));
 }
 
 void GetBbsMessage(Ctx &ctx) {
@@ -269,7 +286,7 @@ void GetBbsMessage(Ctx &ctx) {
 	}
 
 	std::string subject = DecodeHeader(msg.subject);
-	Render(ctx, subject.empty() ? std::string("(no subject)") : subject, body);
+	Render(ctx, subject.empty() ? std::string("(no subject)") : subject, body, RoomPage(room));
 }
 
 void GetBbsCompose(Ctx &ctx) {
@@ -319,7 +336,7 @@ void GetBbsCompose(Ctx &ctx) {
 	body += "<label class=\"field\"><span>Message</span>" + TextArea("body", quoted, 16) + "</label>";
 	body += "<p>" + Button("Post") + " " + Link(RoomHref(room), "Cancel") + "</p>";
 	body += FormEnd();
-	Render(ctx, "Post to " + room.display_name, body);
+	Render(ctx, "Post to " + room.display_name, body, RoomPage(room));
 }
 
 void PostBbsPost(Ctx &ctx) {
@@ -465,7 +482,9 @@ void GetWho(Ctx &ctx) {
 	body += "<p class=\"muted\">Instant messages reach Citadel, telnet and XMPP clients alike — they all "
 	        "read the same queue.</p>";
 
-	Render(ctx, "Who is online", body);
+	PageOpts opts;
+	opts.active = "who";
+	Render(ctx, "Who is online", body, opts);
 }
 
 void PostPage(Ctx &ctx) {

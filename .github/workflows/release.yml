@@ -96,6 +96,10 @@ jobs:
           DUCKDB_VERSION: ${{ steps.vers.outputs.duckdb_version }}
         run: |
           set -euo pipefail
+          # The web assets are generated into a committed source file. If it has
+          # drifted from http/assets/, the extension serves a stylesheet URL that
+          # 404s — fail here rather than shipping that.
+          python3 tools/gen_assets.py --check
           bundle="quackmail-${REL}-linux_amd64"
           out="dist/${bundle}"
           mkdir -p "${out}"

@@ -116,6 +116,38 @@ def raw_send(payload, expect_close=True, timeout=10):
         s.close()
 
 
+def raw_session(timeout=10):
+    """A socket the caller drives request by request, for keep-alive checks."""
+    return socket.create_connection((HOST, PORT), timeout=timeout)
+
+
+def read_response(sock):
+    """Read exactly one response off `sock`, honouring Content-Length.
+
+    Cannot use recv-until-EOF: the whole point of a persistent connection is
+    that EOF does not arrive between responses, so the framing has to be
+    parsed or the read blocks forever.
+    """
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        b = sock.recv(4096)
+        if not b:
+            return buf.decode("utf-8", "replace"), None
+        buf += b
+    head, rest = buf.split(b"\r\n\r\n", 1)
+    text = head.decode("utf-8", "replace")
+    length = 0
+    for line in text.split("\r\n")[1:]:
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":", 1)[1].strip())
+    while len(rest) < length:
+        b = sock.recv(4096)
+        if not b:
+            break
+        rest += b
+    return text, rest.decode("utf-8", "replace")
+
+
 def deliver(con, user, subject, raw, fmt=4):
     """File a message directly into a user's Mail room."""
     con.execute(
@@ -538,6 +570,153 @@ def main():
         assert head.rstrip().endswith("\r\n") or "\r\n\r\n" in head
         assert "<form" not in head, "HEAD returned a body"
 
+        # ---- persistent connections ----------------------------------------
+        # A page is several requests now, so the connection is reused. Each
+        # assertion below is a way that reuse can go wrong.
+        s = raw_session()
+        try:
+            s.sendall(b"GET /login HTTP/1.1\r\nHost: x\r\n\r\n")
+            head1, body1 = read_response(s)
+            assert head1.startswith("HTTP/1.1 200"), head1.split("\r\n")[0]
+            assert "keep-alive" in head1.lower(), "the first response did not offer keep-alive"
+            assert "<form" in (body1 or ""), "the first response had no body"
+
+            # The second request on the same socket must be answered, which is
+            # the whole feature.
+            s.sendall(b"GET /robots.txt HTTP/1.1\r\nHost: x\r\n\r\n")
+            head2, body2 = read_response(s)
+            assert head2.startswith("HTTP/1.1 200"), "a reused connection was not served"
+            assert "Disallow" in (body2 or ""), "the second response had no body"
+        finally:
+            s.close()
+
+        # An explicit `Connection: close` is honoured, and the socket really
+        # does end rather than merely saying so.
+        s = raw_session()
+        try:
+            s.sendall(b"GET /login HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            head, _ = read_response(s)
+            assert "close" in head.lower(), "Connection: close was not honoured"
+            assert s.recv(4096) == b"", "the server kept a connection it said it would close"
+        finally:
+            s.close()
+
+        # HTTP/1.0 never gets a persistent connection.
+        s = raw_session()
+        try:
+            s.sendall(b"GET /login HTTP/1.0\r\nHost: x\r\n\r\n")
+            head, _ = read_response(s)
+            assert "keep-alive" not in head.lower(), "HTTP/1.0 was offered keep-alive"
+        finally:
+            s.close()
+
+        # An idle connection is dropped rather than held. The idle deadline is
+        # 5s; allow generous slack for a loaded test box, but far below the 15s
+        # first-request deadline so a pass here means the *idle* path ran.
+        s = raw_session(timeout=20)
+        try:
+            s.sendall(b"GET /robots.txt HTTP/1.1\r\nHost: x\r\n\r\n")
+            read_response(s)
+            started = time.time()
+            assert s.recv(4096) == b"", "an idle keep-alive connection was not dropped"
+            elapsed = time.time() - started
+            assert elapsed < 13, f"an idle connection was held for {elapsed:.1f}s"
+        finally:
+            s.close()
+
+        # The most important assertion in this block. An oversized
+        # Content-Length is refused *without* the body being read, so those
+        # bytes are still on the wire; the connection must therefore close.
+        # Answering and then reusing it would let the unread body be parsed as
+        # the next request — request smuggling, self-inflicted.
+        s = raw_session()
+        try:
+            s.sendall(
+                b"POST /login HTTP/1.1\r\nHost: x\r\n"
+                b"Content-Length: 99999999\r\n\r\n"
+                b"GET /admin/ HTTP/1.1\r\nHost: x\r\n\r\n"
+            )
+            head, _ = read_response(s)
+            assert head.startswith("HTTP/1.1 413"), f"an oversized body was not refused: {head[:40]}"
+            assert "close" in head.lower(), "a 413 offered to keep the connection"
+            # Nothing more may be served: no second status line, then EOF.
+            rest = b""
+            while True:
+                b = s.recv(4096)
+                if not b:
+                    break
+                rest += b
+            assert b"HTTP/1.1" not in rest, "the smuggled request was answered"
+        finally:
+            s.close()
+
+        # ---- static assets --------------------------------------------------
+        # Find the stylesheet the way a browser does, from the page itself. A
+        # stale generated web_assets.cpp shows up here as a 404.
+        _, _, login_page = request(opener(), BASE + "/login")
+        m = re.search(r'href="(/static/qc\.[0-9a-f]+\.css)"', login_page)
+        assert m, "the login page did not link a hashed stylesheet"
+        css_url = m.group(1)
+
+        # Reachable with no session at all: the login page needs it.
+        status, headers, css = request(opener(), BASE + css_url)
+        assert status == 200, f"{css_url} returned {status}"
+        assert headers["Content-Type"] == "text/css; charset=utf-8"
+        assert "immutable" in headers["Cache-Control"], headers["Cache-Control"]
+        assert "no-store" not in headers["Cache-Control"], "an asset was marked no-store"
+        assert headers["ETag"], "an asset was served with no ETag"
+        assert "--accent" in css, "the stylesheet did not contain its own rules"
+        etag = headers["ETag"]
+
+        # The conditional GET.
+        status, headers, body = request(opener(), BASE + css_url, headers={"If-None-Match": etag})
+        assert status == 304, f"If-None-Match returned {status}"
+        assert body == "", "a 304 carried a body"
+
+        # A hash that is not ours — a stale bookmark from before a redeploy.
+        status, _, _ = request(opener(), BASE + "/static/qc.deadbeef.css")
+        assert status == 404, f"an unknown asset hash returned {status}"
+
+        # Traversal out of /static discloses nothing.
+        out = raw_send(b"GET /static/%2e%2e%2f%2e%2e%2fetc%2fpasswd HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert "400" in out or "404" in out, "a traversal under /static was not refused"
+        assert "root:" not in out
+
+        # ---- CSP with assets ------------------------------------------------
+        # 'self' is needed for /static and coexists with the nonce.
+        _, headers, _ = request(opener(), BASE + "/login")
+        csp = headers["Content-Security-Policy"]
+        assert "script-src 'self' 'nonce-" in csp, csp
+        assert "style-src 'self' 'nonce-" in csp, csp
+        assert "'unsafe-inline'" not in csp, csp
+
+        # But a *message body* frame must not gain 'self': it renders markup
+        # written by whoever sent the mail, and 'self' would let it pull our
+        # scripts. This is the one CSP in the module that must stay closed.
+        deliver(
+            con,
+            "webuser",
+            "html csp check",
+            "MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n"
+            "Subject: html csp check\r\n\r\n<p>hello</p>\r\n",
+        )
+        mailbox = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'Mail' "
+            "AND mailbox_owner = (SELECT usernum FROM citadel_users WHERE username = 'webuser')"
+        ).fetchone()[0]
+        msgnum = con.execute(
+            "SELECT max(msgnum) FROM citadel_room_msgs WHERE room_num = ?", [mailbox]
+        ).fetchone()[0]
+        # A fresh session: the logout check above revoked the one `op` held.
+        frame_op, _ = sign_in(BASE, "webuser", "secret")
+        status, headers, _ = request(frame_op, f"{BASE}/bbs/room/{mailbox}/msg/{msgnum}/html")
+        assert status == 200, f"the HTML part returned {status}"
+        frame_csp = headers["Content-Security-Policy"]
+        assert "script-src" not in frame_csp or "'self'" not in frame_csp.split("script-src")[1].split(";")[0], (
+            f"the message frame's CSP allows scripts from our origin: {frame_csp}"
+        )
+        assert "default-src 'none'" in frame_csp, frame_csp
+
         # ---- slow loris ----------------------------------------------------
         # Open a socket, send nothing, and confirm the server drops it rather
         # than pinning a thread forever. This is the direct regression test for
@@ -580,7 +759,10 @@ def main():
         if tls_up:
             con.execute("CALL qm_https_stop()")
 
-    print("PASS: quackmail_http (auth, CSRF, IDOR, XSS, admin gating, framing, timeouts)")
+    print(
+        "PASS: quackmail_http (auth, CSRF, IDOR, XSS, admin gating, framing, "
+        "keep-alive, static assets, timeouts)"
+    )
 
 
 if __name__ == "__main__":

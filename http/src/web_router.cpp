@@ -16,6 +16,9 @@ const std::vector<Route> &Routes() {
 	// the table is read-only afterwards, so the connection threads can share it.
 	static const std::vector<Route> table = [] {
 		std::vector<Route> r;
+		// First: it is the most requested path on the site by a wide margin,
+		// and matching is a linear scan.
+		RegisterStaticRoutes(r);
 		RegisterAuthRoutes(r);
 		RegisterMailRoutes(r);
 		RegisterBbsRoutes(r);
@@ -222,9 +225,15 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 
 	// Housekeeping, roughly once in fifty requests. Cheaper than a background
 	// thread, and the same posture as policy::PruneSendLog.
-	std::string coin = quackmail::util::RandomHex(1);
-	if (!coin.empty() && coin[0] == 'a') {
-		quackmail::web::PruneSessions(con);
+	//
+	// Gated on there being a session, because a page is now several requests:
+	// without this, every asset fetch would roll the dice too and a browser
+	// loading one page would trigger housekeeping several times over.
+	if (ctx.Authed()) {
+		std::string coin = quackmail::util::RandomHex(1);
+		if (!coin.empty() && coin[0] == 'a') {
+			quackmail::web::PruneSessions(con);
+		}
 	}
 
 	const auto &routes = Routes();

@@ -278,15 +278,19 @@ int StatusForReadResult(ReadResult r) {
 	}
 }
 
-ReadResult ReadRequest(net::ClientStream &stream, const Limits &limits, Request &out) {
+ReadResult ReadRequest(net::ClientStream &stream, const Limits &limits, Request &out,
+                       bool first_request) {
 	out = Request();
 	out.peer_ip = stream.PeerIp();
 	out.tls = stream.IsTls();
 
 	// A socket timeout bounds each individual read; the wall clock below bounds
 	// the request as a whole, so a peer dribbling one byte per timeout period
-	// still cannot hold this thread.
-	stream.SetTimeouts(limits.header_deadline_ms, limits.header_deadline_ms);
+	// still cannot hold this thread. A reused connection gets the shorter idle
+	// budget: the peer has already shown it can talk, so silence now means it
+	// has finished, not that it is slow.
+	int deadline = first_request ? limits.header_deadline_ms : limits.idle_deadline_ms;
+	stream.SetTimeouts(deadline, limits.header_deadline_ms);
 	auto start = std::chrono::steady_clock::now();
 
 	std::string line;
@@ -295,6 +299,12 @@ ReadResult ReadRequest(net::ClientStream &stream, const Limits &limits, Request 
 		return ReadResult::UriTooLong;
 	}
 	if (st == LineStatus::Eof) {
+		// Nothing at all on a reused connection is the ordinary end of a
+		// keep-alive socket. Reporting it as Eof rather than a timeout keeps
+		// the caller from writing a 408 nobody is listening for.
+		if (!first_request) {
+			return ReadResult::Eof;
+		}
 		return line.empty() ? ReadResult::Eof : ReadResult::BadRequest;
 	}
 	// Tolerate leading empty lines, which RFC 7230 allows before a request line.
@@ -443,7 +453,34 @@ ReadResult ReadRequest(net::ClientStream &stream, const Limits &limits, Request 
 	return ReadResult::Ok;
 }
 
-bool WriteResponse(net::ClientStream &stream, const Response &resp, bool head_only) {
+bool ShouldKeepAlive(const Request &req) {
+	// HTTP/1.0 defaults to close, and its keep-alive extension is a mess of
+	// proxy-hop edge cases for no gain here; every browser speaks 1.1.
+	if (req.version != "HTTP/1.1") {
+		return false;
+	}
+	// `Connection` is a comma-separated list of tokens. Header() has already
+	// joined any duplicate fields with ", ", so one scan covers all of them.
+	std::string field = util::Lower(req.Header("Connection"));
+	size_t pos = 0;
+	while (pos <= field.size()) {
+		size_t comma = field.find(',', pos);
+		std::string token = field.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+		// Trim; a bare "close" anywhere in the list ends the connection.
+		size_t b = token.find_first_not_of(" \t");
+		size_t e = token.find_last_not_of(" \t");
+		if (b != std::string::npos && token.substr(b, e - b + 1) == "close") {
+			return false;
+		}
+		if (comma == std::string::npos) {
+			break;
+		}
+		pos = comma + 1;
+	}
+	return true;
+}
+
+bool WriteResponse(net::ClientStream &stream, const Response &resp, bool head_only, bool keep_alive) {
 	std::string head = "HTTP/1.1 " + std::to_string(resp.status) + " " + StatusText(resp.status) + "\r\n";
 	bool have_type = false;
 	for (auto &h : resp.headers) {
@@ -465,8 +502,15 @@ bool WriteResponse(net::ClientStream &stream, const Response &resp, bool head_on
 		head += "Content-Type: text/plain; charset=utf-8\r\n";
 	}
 	head += "Date: " + HttpDate() + "\r\n";
-	head += "Content-Length: " + std::to_string(resp.body.size()) + "\r\n";
-	head += "Connection: close\r\n\r\n";
+	// 204 and 304 carry no body and must not carry Content-Length either: a
+	// client that sees one on a 304 may wait for bytes that never come, which
+	// on a persistent connection stalls the whole socket rather than just the
+	// one response. 304 is the conditional-GET answer /static serves.
+	if (resp.status != 204 && resp.status != 304) {
+		head += "Content-Length: " + std::to_string(resp.body.size()) + "\r\n";
+	}
+	head += keep_alive ? "Connection: keep-alive\r\nKeep-Alive: timeout=5\r\n" : "Connection: close\r\n";
+	head += "\r\n";
 	if (!stream.Write(head)) {
 		return false;
 	}

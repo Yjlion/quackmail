@@ -1136,6 +1136,25 @@ void UrlPathScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	    });
 }
 
+// qm_http_keepalive(version, connection_header) -> may the connection be reused?
+//
+// Whether a socket is held open or dropped is a security-relevant decision — it
+// is what stops an unconsumed request body from being read as the next request
+// — and it is a pure function of two strings. Asserting the truth table here
+// costs nothing; proving the same thing over real sockets costs a fixture per
+// case.
+void HttpKeepAliveScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, bool>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t version, string_t connection) {
+		    quackmail::http::Request req;
+		    req.version = version.GetString();
+		    if (!connection.GetString().empty()) {
+			    req.headers.emplace_back("Connection", connection.GetString());
+		    }
+		    return quackmail::http::ShouldKeepAlive(req);
+	    });
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	// Ensure the shared schema exists as soon as the umbrella loads.
 	Connection con(loader.GetDatabaseInstance());
@@ -1232,6 +1251,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_url_decode", {V, B}, V, UrlDecodeScalar));
 	loader.RegisterFunction(ScalarFunction("qm_html_escape", {V}, V, HtmlEscapeScalar));
 	loader.RegisterFunction(ScalarFunction("qm_url_path", {V}, V, UrlPathScalar));
+	loader.RegisterFunction(ScalarFunction("qm_http_keepalive", {V, V}, B, HttpKeepAliveScalar));
 
 	// Per-user send quotas.
 	RegisterPolicyFn(loader, "qm_ratelimit_set", UmbrellaKind::RATELIMIT_SET, {V, I, I, I}, kOkNote, kOkNoteTypes);

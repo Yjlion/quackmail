@@ -100,7 +100,9 @@ void GetPrefs(Ctx &ctx) {
 	body += "<li>" + Link("/prefs/sessions", "Signed-in browsers") + "</li>";
 	body += "</ul>";
 
-	Render(ctx, "Preferences", body);
+	PageOpts opts;
+	opts.active = "prefs";
+	Render(ctx, "Preferences", body, opts);
 }
 
 void PostPassword(Ctx &ctx) {
@@ -292,7 +294,9 @@ void ActivateScript(Ctx &ctx, const std::string &user, const std::string &name) 
 }
 
 void GetSieve(Ctx &ctx) {
-	Render(ctx, "Mail filters", SieveBody(ctx, ctx.username, "/prefs/sieve"));
+	PageOpts opts;
+	opts.active = "sieve";
+	Render(ctx, "Mail filters", SieveBody(ctx, ctx.username, "/prefs/sieve"), opts);
 }
 
 void PostSieveSave(Ctx &ctx) {
@@ -344,7 +348,9 @@ std::string SessionTable(Ctx &ctx, const std::vector<quackmail::web::SessionRow>
 
 void GetSessions(Ctx &ctx) {
 	auto rows = quackmail::web::ListSessions(ctx.con, ctx.username);
-	Render(ctx, "Signed-in browsers", SessionTable(ctx, rows, "/prefs/sessions/revoke", false));
+	PageOpts opts;
+	opts.active = "sessions";
+	Render(ctx, "Signed-in browsers", SessionTable(ctx, rows, "/prefs/sessions/revoke", false), opts);
 }
 
 void PostRevokeSession(Ctx &ctx) {

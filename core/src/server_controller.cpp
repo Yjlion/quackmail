@@ -99,6 +99,17 @@ void ServerController::AcceptLoop() {
 			}
 			continue;
 		}
+		// Over the cap: drop it without answering. This class is
+		// protocol-agnostic and has no way to say "503" in a language the peer
+		// speaks, and nothing in this tree may write to stderr, so a closed
+		// socket is the whole message. A browser retries; a flood does not get
+		// a thread.
+		int cap = max_conns_.load();
+		if (cap > 0 && active_conns_.load() >= cap) {
+			::close(cfd);
+			continue;
+		}
+
 		conn_count_.fetch_add(1);
 		active_conns_.fetch_add(1);
 
@@ -159,6 +170,12 @@ int ServerController::Port() {
 }
 uint64_t ServerController::Connections() {
 	return conn_count_.load();
+}
+void ServerController::SetMaxConnections(int n) {
+	max_conns_.store(n < 0 ? 0 : n);
+}
+int ServerController::MaxConnections() {
+	return max_conns_.load();
 }
 bool ServerController::ImplicitTls() {
 	return tls_config_.implicit;

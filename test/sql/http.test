@@ -98,3 +98,46 @@ query I
 SELECT qm_url_decode('%2e%2e%2f', false);
 ----
 ../
+
+# ---- connection reuse ------------------------------------------------------
+# Whether a connection is held open decides whether an unconsumed request body
+# can be read as the next request line, so the truth table is worth pinning.
+
+# HTTP/1.1 defaults to persistent; HTTP/1.0 never is, whatever it asks for.
+query IIII
+SELECT qm_http_keepalive('HTTP/1.1', ''),
+       qm_http_keepalive('HTTP/1.0', ''),
+       qm_http_keepalive('HTTP/1.0', 'keep-alive'),
+       qm_http_keepalive('HTTP/0.9', '');
+----
+true	false	false	false
+
+# `close` ends it, in any case and anywhere in the token list — a value like
+# "keep-alive, close" is legal and means close.
+query I
+SELECT count(*) FROM (VALUES
+    ('close'),
+    ('Close'),
+    ('CLOSE'),
+    ('keep-alive, close'),
+    ('close, keep-alive'),
+    ('  close  '),
+    ('te, close')
+) AS t(c)
+WHERE qm_http_keepalive('HTTP/1.1', c);
+----
+0
+
+# Everything else leaves the connection open. `closed` is deliberately in this
+# list: a prefix match rather than a token match would get it wrong.
+query I
+SELECT count(*) FROM (VALUES
+    ('keep-alive'),
+    ('Keep-Alive'),
+    ('te'),
+    ('closed'),
+    ('not-close')
+) AS t(c)
+WHERE NOT qm_http_keepalive('HTTP/1.1', c);
+----
+0

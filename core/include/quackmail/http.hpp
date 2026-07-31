@@ -18,8 +18,9 @@ namespace http {
 // through SQL scalar functions with no socket in the loop.
 //
 // Deliberately not supported: chunked transfer encoding (browsers never chunk a
-// form post; accepting it only opens the request-smuggling class) and
-// persistent connections (see WriteResponse).
+// form post; accepting it only opens the request-smuggling class). Persistent
+// connections *are* supported, but only under the limits below — see
+// WriteResponse and ShouldKeepAlive.
 
 using Headers = std::vector<std::pair<std::string, std::string>>;
 
@@ -72,6 +73,15 @@ struct Limits {
 	int header_deadline_ms = 15000;
 	int body_deadline_ms = 60000;
 
+	// Persistent-connection bounds. A page is several requests once assets are
+	// served separately, so keep-alive earns its keep — but with one thread per
+	// connection, an idle socket costs a thread, and these are what stop that
+	// from being a denial of service. The connection cap that goes with them
+	// lives in ServerController::SetMaxConnections.
+	size_t max_requests_per_conn = 100;
+	int idle_deadline_ms = 5000;   // wait for the *next* request line
+	int conn_lifetime_ms = 60000;  // hard ceiling on one connection
+
 	Limits();
 };
 
@@ -92,13 +102,35 @@ int StatusForReadResult(ReadResult r);
 
 // Read one request. Applies socket timeouts and an overall wall-clock deadline,
 // answers `Expect: 100-continue`, and reads exactly Content-Length bytes.
-ReadResult ReadRequest(net::ClientStream &stream, const Limits &limits, Request &out);
+//
+// `first_request` distinguishes the first request on a connection from a
+// subsequent one. The first gets `header_deadline_ms` — a browser that has
+// opened a socket owes us a request promptly, which is the slow-loris defence.
+// A later one gets the shorter `idle_deadline_ms` and reports silence as `Eof`
+// rather than `Timeout`: a keep-alive socket the peer has finished with is a
+// normal ending, not an error, and answering 408 into it is a wasted write.
+ReadResult ReadRequest(net::ClientStream &stream, const Limits &limits, Request &out,
+                       bool first_request = true);
 
-// Write a response and its body. Always emits `Connection: close`: with one
-// thread per connection and no connection cap, an idle keep-alive socket costs
-// a thread, and a page here is exactly one request because every asset is
-// inlined. `head_only` suppresses the body but keeps Content-Length honest.
-bool WriteResponse(net::ClientStream &stream, const Response &resp, bool head_only);
+// Whether the connection may carry another request after this one. False for
+// HTTP/1.0 (persistence there needs an explicit token and the ambiguity is not
+// worth it) and for any `Connection:` field carrying the `close` token. Pure,
+// so the truth table is testable without a socket.
+bool ShouldKeepAlive(const Request &req);
+
+// Write a response and its body. `head_only` suppresses the body but keeps
+// Content-Length honest.
+//
+// Framing is always Content-Length, never chunked — that is what makes a
+// persistent connection unambiguous, and it is the same reasoning that makes
+// ReadRequest answer 411 to an inbound `Transfer-Encoding` rather than parse
+// it. `keep_alive` decides only whether we *offer* to stay open; the caller
+// owns the decision, because it is the one that knows whether the request was
+// read cleanly enough for the next one to start at a known offset.
+bool WriteResponse(net::ClientStream &stream, const Response &resp, bool head_only, bool keep_alive);
+inline bool WriteResponse(net::ClientStream &stream, const Response &resp, bool head_only) {
+	return WriteResponse(stream, resp, head_only, false);
+}
 
 // ---- codecs -------------------------------------------------------------
 

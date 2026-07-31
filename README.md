@@ -340,9 +340,26 @@ clients see each other in the who-list and can page one another.
   keys, send quotas), the inbound audit log, the outbound queue, any user's
   Sieve scripts, and the signed-in browsers.
 
-Everything is **server-rendered HTML** with one inlined stylesheet: no build
-step, no external assets, no JavaScript framework, and exactly one request per
-page (so every response closes its connection).
+Everything is **server-rendered HTML** — no framework, no build step, and no
+CDN. There is a stylesheet and a small script at `/static`, both compiled into
+the extension and served from memory: `tools/gen_assets.py` turns the files in
+`http/assets/` into a committed C++ source file, so the build fetches and
+generates nothing and there is no data directory to install. Their URLs carry a
+content hash (`/static/qc.9f3a1c2b.css`), which is what lets them be cached
+`immutable` for a year — a changed file is a changed URL, so there is never a
+stale copy and never a cache to bust.
+
+The palette, the reset and the layout skeleton stay **inlined in every page**,
+so a page renders legibly on the first packet and stays legible if `/static` is
+unreachable behind a proxy. The per-user colour theme has to be inline anyway:
+it is a `:root` override, and a cacheable file cannot vary per user.
+
+**Every page works with JavaScript disabled**, including the collapsing mobile
+navigation (a hidden checkbox and a sibling selector). The script only adds a
+confirmation step to the forms that ask for one.
+
+Connections are persistent, since a page is now several requests — see
+[Security posture](#security-posture) for the limits that bound them.
 
 ### Security posture
 
@@ -391,9 +408,20 @@ being reachable at all.
   `default-src 'none'`, with remote images blocked until the reader asks for
   them. Attachments are always `application/octet-stream` with
   `Content-Disposition: attachment` and `nosniff`, never the sender's type.
-- Every page carries a CSP with a per-response nonce (no `'unsafe-inline'` in
-  `script-src`), `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy:
-  no-referrer` and `Cache-Control: private, no-store`.
+- Every page carries a CSP with a per-response nonce **and** `'self'` (no
+  `'unsafe-inline'` anywhere), `nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer` and `Cache-Control: private, no-store`.
+  `'self'` is what lets `/static` be used; the frame a **message body** is
+  rendered into deliberately does not get it, since that markup came from
+  whoever sent the mail.
+- **Connections are persistent, and bounded.** Up to 100 requests per
+  connection, a 5-second idle deadline between them, a 60-second ceiling on the
+  connection, and at most `qm_http_max_connections` (default 256) open at once.
+  The *first* request on a connection still gets the full 15-second header
+  deadline, which is the slow-loris defence. Any malformed or oversized request
+  closes the connection rather than answering and continuing: a 413 or 411 is
+  sent without reading the body the client announced, so those bytes are still
+  on the wire and reusing the socket would parse them as the next request.
 - Rooms and messages are addressed by number and re-checked on every request:
   a room is resolved through the visibility rules, and a message number is
   verified to be pointed into that room before it is loaded.

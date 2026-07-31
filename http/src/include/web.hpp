@@ -72,6 +72,7 @@ struct Route {
 };
 
 // Each source file contributes its routes; web_router.cpp assembles them.
+void RegisterStaticRoutes(std::vector<Route> &out);
 void RegisterAuthRoutes(std::vector<Route> &out);
 void RegisterBbsRoutes(std::vector<Route> &out);
 void RegisterMailRoutes(std::vector<Route> &out);
@@ -130,8 +131,29 @@ std::string FormStart(const Ctx &ctx, const std::string &action, const std::stri
 std::string FormEnd();
 std::string Button(const std::string &label, const std::string &css_class = "");
 
+// How the shell should present a page. Everything is optional; the default is
+// what every page rendered before this struct existed.
+struct PageOpts {
+	// Sidebar item to mark with aria-current, e.g. "mail", "bbs", "prefs".
+	std::string active;
+	// A RoomView code, surfaced as a body class so a view can be styled without
+	// its handler having to emit layout. -1 for pages that are not a room.
+	int view = -1;
+	// Drop the 62rem measure. Message lists and calendars want the width; prose
+	// and forms do not.
+	bool wide = false;
+	// A per-page action strip rendered by the shell, above `body`.
+	std::string toolbar;
+
+	PageOpts();
+};
+
 // Render a complete page: security headers, the shell, nav, flash, and `body`.
+// The short form is the whole-page default and is what most handlers want; the
+// PageOpts form is for pages that need to say more about themselves.
 void Render(Ctx &ctx, const std::string &title, const std::string &body, int status = 200);
+void Render(Ctx &ctx, const std::string &title, const std::string &body, const PageOpts &opts,
+            int status = 200);
 // Apply the standard security headers to a response that is not a full page
 // (a redirect, an attachment, an error). `csp` overrides the default policy.
 void SecurityHeaders(Ctx &ctx, const std::string &csp = "");
