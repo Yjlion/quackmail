@@ -877,8 +877,14 @@ const char *StatusText(int status) {
 		return "Continue";
 	case 200:
 		return "OK";
+	case 201:
+		return "Created";
 	case 204:
 		return "No Content";
+	// WebDAV. A multistatus body carries its own per-resource statuses, so this
+	// is the only one of these a DAV response line normally shows.
+	case 207:
+		return "Multi-Status";
 	case 301:
 		return "Moved Permanently";
 	case 302:
@@ -899,12 +905,20 @@ const char *StatusText(int status) {
 		return "Method Not Allowed";
 	case 408:
 		return "Request Timeout";
+	case 409:
+		return "Conflict";
 	case 411:
 		return "Length Required";
+	case 412:
+		return "Precondition Failed";
 	case 413:
 		return "Payload Too Large";
 	case 414:
 		return "URI Too Long";
+	case 415:
+		return "Unsupported Media Type";
+	case 422:
+		return "Unprocessable Entity";
 	case 429:
 		return "Too Many Requests";
 	case 431:
@@ -915,6 +929,8 @@ const char *StatusText(int status) {
 		return "Not Implemented";
 	case 503:
 		return "Service Unavailable";
+	case 507:
+		return "Insufficient Storage";
 	default:
 		return "Unknown";
 	}

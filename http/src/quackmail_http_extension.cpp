@@ -41,6 +41,25 @@ void WriteEarlyError(net::ClientStream &stream, int status, bool head_only) {
 	http::WriteResponse(stream, resp, head_only);
 }
 
+// Methods this server will route at all. The three the web pages use, plus the
+// WebDAV verbs the /dav/ subtree answers — the router still 405s any of the
+// latter aimed anywhere else, so widening this list does not widen the site.
+//
+// Note what is absent: LOCK and UNLOCK. We advertise `DAV: 1` and never level 2,
+// so no client is entitled to them, and a lock table is a great deal of state to
+// keep for a guarantee CalDAV already gets from ETags.
+bool MethodSupported(const std::string &method) {
+	static const char *const kMethods[] = {"GET",      "HEAD",   "POST",     "OPTIONS", "PROPFIND",
+	                                       "PROPPATCH", "REPORT", "PUT",     "DELETE",  "MKCOL",
+	                                       "MKCALENDAR", "COPY",  "MOVE"};
+	for (const char *m : kMethods) {
+		if (method == m) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // Serve requests until the peer stops asking or one of the limits says stop.
 //
 // The schema check and the DuckDB connection are per *connection*, not per
@@ -90,7 +109,7 @@ void HandleHttp(DatabaseInstance &db, net::ClientStream &stream) {
 			WriteEarlyError(stream, http::StatusForReadResult(result), head_only);
 			return;
 		}
-		if (req.method != "GET" && req.method != "HEAD" && req.method != "POST") {
+		if (!MethodSupported(req.method)) {
 			WriteEarlyError(stream, 405, head_only);
 			return;
 		}

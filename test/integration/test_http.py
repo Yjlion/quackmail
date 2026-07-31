@@ -571,6 +571,26 @@ def main():
         assert "400" in out or "404" in out, "a traversal path was not refused"
         assert "root:" not in out
 
+        # ---- the DAV verbs reach only /dav/ ---------------------------------
+        # The connection loop's method allowlist had to widen for CalDAV. That
+        # widening must not have opened the pages: every one of these verbs is
+        # now read and routed, and every one of them has to be refused here.
+        for verb in (b"PROPFIND", b"PUT", b"DELETE", b"REPORT", b"MKCOL", b"PROPPATCH"):
+            out = raw_send(verb + b" /login HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+            assert "405" in out, f"{verb.decode()} /login was not refused: {out[:80]}"
+
+        # And a verb outside the allowlist is still refused before routing, so
+        # the list is a list rather than a formality.
+        out = raw_send(b"TRACE /login HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert "405" in out, "TRACE was not refused"
+
+        # An unauthenticated DAV request is answered with a challenge, not with
+        # the redirect to /login a browser gets — a client has nothing to do
+        # with an HTML form.
+        out = raw_send(b"PROPFIND /dav/ HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+        assert "401" in out, f"an anonymous PROPFIND /dav/ was not challenged: {out[:120]}"
+        assert "WWW-Authenticate: Basic" in out, f"no Basic challenge: {out[:200]}"
+
         # HEAD gets the headers and no body.
         head = raw_send(b"HEAD /login HTTP/1.1\r\nHost: x\r\n\r\n")
         assert head.startswith("HTTP/1.1 200"), "HEAD /login failed"

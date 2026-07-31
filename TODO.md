@@ -5,10 +5,68 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-Nothing. The four-PR web overhaul is complete; see the backlog below for what
-was deliberately left out of it.
+- [ ] **JMAP Core + Mail** (RFC 8620 + RFC 8621), the second half of the
+      groupware-clients work CalDAV/CardDAV started. Blocked on nothing; the
+      seams it needs are already in place.
+  - [ ] `core/json.{hpp,cpp}` — there is no JSON anywhere in `core/` today. A
+        value variant with `Parse`/`Serialize`, strict about UTF-8 and about
+        depth and size, because the input is attacker-reachable. Register
+        `qm_json_*` scalars so `test/sql/` can assert the codec with no socket,
+        the way `qm_dav_name` is asserted now.
+  - [ ] `/.well-known/jmap` → the Session resource; `/jmap/api` for the method
+        array with back-references; `/jmap/download/...` for blobs, over the
+        attachment path `web_mail.cpp` already has.
+  - [ ] `Mailbox`, `Email`, `Thread`, `Identity`, `EmailSubmission`, mapped the
+        way IMAP already maps them (mailbox = room, id = msgnum, keywords =
+        `citadel_msg_flags`). `Email/changes` reuses `RoomChangeToken` and
+        `RoomChangesSince` from the DAV work — that is what makes it
+        implementable at all.
+  - [ ] Unlike IMAP's `APPEND`, ask `citadel::CanPost`. IMAP not doing so is a
+        gap worth not copying.
+  - The JMAP Calendars and Contacts bindings are deliberately out of scope:
+    they are drafts, and no shipping client speaks them. CalDAV/CardDAV is what
+    a phone actually connects with.
 
 ## Shipped
+
+- [x] **CalDAV and CardDAV** over the groupware rooms, on the existing HTTP and
+      HTTPS listeners — not an extension of its own, because it is a second
+      projection of the rooms the web UI already renders rather than a new
+      service. `/dav/`, with `.well-known` discovery, principal and home sets,
+      `PROPFIND`, `PROPPATCH`, `GET`/`PUT`/`DELETE`, `calendar-query`,
+      `calendar-multiget`, `addressbook-query`, `addressbook-multiget` and
+      `sync-collection`.
+  - [x] `core/davxml.{hpp,cpp}` — an XML document reader over the existing
+        `xmlstream` tokenizer (resolving prefixes to namespace URIs, so matching
+        never depends on a prefix a client chose) and an element writer. The
+        first XML *writer* in the tree; XMPP concatenates strings.
+  - [x] The resource-name encoding, which is the one real subtlety.
+        `http::NormalizePath` percent-decodes *before* it splits a path into
+        segments, so percent-encoding cannot help: `%2F` decodes back to a `/`
+        and turns one segment into two. Names are encoded to unreserved bytes
+        only, with `~HH` for the rest and a leading `.` always escaped so no
+        name can be `.` or `..`.
+  - [x] `citadel_dav_names`, because a resource name is the client's to choose
+        and is not the object's UID. Required to match at first, which rejected
+        vdirsyncer outright — it PUTs to a random UUID of its own. Found by
+        pointing real clients at it (`caldav` 3.2.1 and vdirsyncer 0.20), which
+        is the only kind of test that could have.
+  - [x] `citadel_room_tombstones` plus `RoomChangeToken`/`RoomChangesSince`.
+        Additions were already discoverable by msgnum, so the insert path every
+        inbound message takes is untouched; removals left nothing behind at all,
+        which is why a deletion was invisible to any token derived from the
+        store.
+  - [x] `Role::Dav`: Basic against the same credential IMAP takes, through the
+        same `LoginAllowed` throttle the login form uses; 401 with a challenge
+        rather than a redirect to `/login`; no CSRF, which a client that has
+        never seen an HTML form cannot satisfy and does not need to.
+  - [x] Deliberately absent: `LOCK`/`UNLOCK` (we advertise `DAV: 1` only —
+        CalDAV's consistency story is ETags and `If-Match`, which is
+        implemented), `MKCALENDAR`/`MKCOL` (creating a calendar means creating a
+        room, which has a floor and an access level to decide), and the Notes
+        rooms (vNote is not a DAV resource type, and rewriting them as
+        `VJOURNAL` would lose the WebCit parity that is the reason they are
+        vNote).
 
 - [x] **Per-room management and self-serve rooms** (phase 4 of the web overhaul)
   - [x] `citadel::CanAdminister` on the RFC 4314 `a` right, which

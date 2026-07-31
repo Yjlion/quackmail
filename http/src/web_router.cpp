@@ -1,10 +1,12 @@
 #include "web.hpp"
 #include "web_views.hpp"
 
+#include "quackmail/auth.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/util.hpp"
 #include "quackmail/wildmat.hpp"
 
+#include <cstdlib>
 #include <utility>
 
 namespace duckdb {
@@ -31,6 +33,9 @@ const std::vector<Route> &Routes() {
 		RegisterAdminPolicyRoutes(r);
 		RegisterAdminOpsRoutes(r);
 		RegisterAdminListRoutes(r);
+		// Last: /dav/ collides with no page above it, and a DAV client is a rare
+		// visitor next to a browser loading a page's assets.
+		RegisterDavRoutes(r);
 		return r;
 	}();
 	return table;
@@ -146,6 +151,73 @@ std::string SubmittedCsrf(const http::Request &req) {
 	return std::string();
 }
 
+// Authenticate a DAV client from its `Authorization: Basic` header.
+//
+// The same credential IMAP and POP3 take, checked the same way, with the same
+// per-address failure gate the login form uses — a DAV endpoint that skipped it
+// would be a password oracle sitting beside a rate-limited login page. No
+// session row is created: a DAV request is self-contained, and minting a
+// browser session per PROPFIND would fill the table for nothing.
+//
+// Cleartext needs no separate guard here. The qm_web_force_https check above
+// runs first and redirects the whole request, so Basic over an unencrypted
+// socket only happens in the supported reverse-proxy mode or where an operator
+// has deliberately turned that gate off.
+bool BasicAuth(Ctx &ctx) {
+	std::string header = ctx.req.Header("Authorization");
+	if (quackmail::util::Lower(header).rfind("basic ", 0) != 0) {
+		return false;
+	}
+	std::string decoded;
+	if (!quackmail::util::Base64Decode(header.substr(6), decoded)) {
+		return false;
+	}
+	size_t colon = decoded.find(':');
+	if (colon == std::string::npos) {
+		return false;
+	}
+	std::string user = decoded.substr(0, colon);
+	std::string pass = decoded.substr(colon + 1);
+	if (user.empty()) {
+		return false;
+	}
+
+	int64_t retry_after = 0;
+	if (!quackmail::web::LoginAllowed(ctx.con, ctx.req.peer_ip, retry_after)) {
+		return false;
+	}
+	if (!quackmail::auth::Verify(ctx.con, user, pass)) {
+		quackmail::web::RecordLoginFailure(ctx.con, ctx.req.peer_ip, user);
+		return false;
+	}
+	quackmail::web::ClearLoginFailures(ctx.con, ctx.req.peer_ip);
+
+	// A client may be the first thing this account has ever used, and the
+	// collections it is about to ask for are these rooms.
+	quackmail::citadel::EnsureUserRooms(ctx.con, user);
+	ctx.username = user;
+	ctx.axlevel = quackmail::citadel::GetAxLevel(ctx.con, user);
+	return true;
+}
+
+// Ask for credentials. Deliberately bodiless: the peer is a program, and an
+// HTML error page would only be something for it to fail to parse.
+void NeedsAuth(Ctx &ctx) {
+	std::string realm = ConfigStr(ctx.con, "c_humannode", "QuackCit");
+	// A realm is a quoted-string, so a configured value containing a quote or a
+	// backslash would break the header rather than merely look odd.
+	std::string safe;
+	for (char c : realm) {
+		if (c != '"' && c != '\\' && (unsigned char)c >= 0x20) {
+			safe += c;
+		}
+	}
+	ctx.resp.status = 401;
+	ctx.resp.SetHeader("WWW-Authenticate", "Basic realm=\"" + safe + "\", charset=\"UTF-8\"");
+	ctx.resp.SetHeader("Cache-Control", "no-store");
+	ctx.resp.SetHeader("X-Content-Type-Options", "nosniff");
+}
+
 // The admin console can set config, mint credentials and mint DKIM keys — it is
 // root-equivalent, and quackcit.conf already says as much about the admin
 // socket, which at least is mode 0600 on a Unix path. So it is off until an
@@ -237,6 +309,14 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 		std::string coin = quackmail::util::RandomHex(1);
 		if (!coin.empty() && coin[0] == 'a') {
 			quackmail::web::PruneSessions(con);
+			// Sync tombstones age out on the same schedule. A client whose token
+			// predates the cutoff is answered with a full re-listing, which is
+			// what an expired sync-token is defined to mean.
+			int64_t days = (int64_t)std::strtoll(ConfigStr(con, "qm_dav_tombstone_days", "30").c_str(),
+			                                     nullptr, 10);
+			if (days > 0) {
+				quackmail::citadel::PruneTombstones(con, days * 86400);
+			}
 		}
 	}
 
@@ -248,13 +328,22 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 			continue;
 		}
 		path_matched = true;
-		bool method_ok = req.method == route.method || (req.method == "HEAD" && std::string(route.method) == "GET");
+		bool wildcard = std::string(route.method) == "*";
+		bool method_ok = wildcard || req.method == route.method ||
+		                 (req.method == "HEAD" && std::string(route.method) == "GET");
 		if (!method_ok) {
 			continue;
 		}
 		ctx.captures = captures;
 
-		if (route.role != Role::Anon && !ctx.Authed()) {
+		if (route.role == Role::Dav) {
+			// A cookie session is honoured too, so the same URLs can be poked at
+			// from a signed-in browser. Anything else has to present Basic.
+			if (!ctx.Authed() && !BasicAuth(ctx)) {
+				NeedsAuth(ctx);
+				return;
+			}
+		} else if (route.role != Role::Anon && !ctx.Authed()) {
 			// Bounce through the login page, remembering where they were going.
 			SecurityHeaders(ctx);
 			resp.Redirect("/login?next=" + http::PercentEncode(req.path), 303);
@@ -273,7 +362,7 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 				return;
 			}
 		}
-		if (req.method == "POST") {
+		if (req.method == "POST" && route.role != Role::Dav) {
 			if (!OriginAcceptable(ctx)) {
 				Forbidden(ctx, "This form was submitted from another site.");
 				return;

@@ -15,6 +15,7 @@
 
 #include "quackmail/auth.hpp"
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/davxml.hpp"
 #include "quackmail/dkim.hpp"
 #include "quackmail/dmarc.hpp"
 #include "quackmail/citadel_msg.hpp"
@@ -1165,6 +1166,22 @@ void UrlEncodeScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	});
 }
 
+// The DAV resource-name encoding. Exposed for the same reason the two above
+// are: it is the function standing between an euid containing '/' or ".." and a
+// path the router would either split in half or reject outright, and a
+// round-trip bug in it silently makes an object unreachable.
+void DavNameScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::dav::NameForEuid(in.GetString()));
+	});
+}
+
+void DavEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::dav::EuidForName(in.GetString()));
+	});
+}
+
 void UrlDecodeScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	BinaryExecutor::Execute<string_t, bool, string_t>(
 	    args.data[0], args.data[1], result, args.size(), [&](string_t in, bool plus_as_space) {
@@ -1957,6 +1974,8 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_html_escape", {V}, V, HtmlEscapeScalar));
 	loader.RegisterFunction(ScalarFunction("qm_url_path", {V}, V, UrlPathScalar));
 	loader.RegisterFunction(ScalarFunction("qm_http_keepalive", {V, V}, B, HttpKeepAliveScalar));
+	loader.RegisterFunction(ScalarFunction("qm_dav_name", {V}, V, DavNameScalar));
+	loader.RegisterFunction(ScalarFunction("qm_dav_euid", {V}, V, DavEuidScalar));
 
 	loader.RegisterFunction(ScalarFunction("qm_vcard_count", {V}, I, VcardCountScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_get", {V, V}, V, VcardGetScalar));

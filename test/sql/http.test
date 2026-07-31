@@ -141,3 +141,76 @@ SELECT count(*) FROM (VALUES
 WHERE NOT qm_http_keepalive('HTTP/1.1', c);
 ----
 0
+
+# ---- DAV resource names ----------------------------------------------------
+# A DAV resource name has to survive http::NormalizePath, which percent-decodes
+# *before* it splits a path into segments. So percent-encoding cannot be used
+# here: %2F would be decoded back into a '/' and turn one segment into two.
+# qm_dav_name emits unreserved bytes only, escaping everything else as ~HH.
+
+# The ordinary case stays readable, which is the whole reason for not just
+# base64-ing the euid: '@' is the only byte a normal UID has to escape.
+query II
+SELECT qm_dav_name('abc-123@example.com'), qm_dav_euid('abc-123~40example.com');
+----
+abc-123~40example.com	abc-123@example.com
+
+# The bytes that would otherwise break routing. '/' would split the segment and
+# '%' would be decoded a second time. A '.' is safe in the middle of a name —
+# that is what keeps "example.com" readable — but a *leading* one is escaped,
+# because otherwise ".." would encode to itself and NormalizePath rejects it.
+query IIII
+SELECT qm_dav_name('a/b'), qm_dav_name('..'), qm_dav_name('a%2Fb'), qm_dav_name('a~b');
+----
+a~2Fb	~2E.	a~252Fb	a~7Eb
+
+# '~' is itself unreserved, so an encoded name passes through percent-decoding
+# untouched: decoding a name is a no-op, which is what makes the round trip
+# exact rather than merely usually correct.
+query I
+SELECT qm_url_decode(qm_dav_name('a/b..c%d~e'), false);
+----
+a~2Fb..c~25d~7Ee
+
+# Round-trip over everything a real UID has ever contained, plus the shapes
+# that would break a naive encoder.
+query I
+SELECT count(*) FROM (VALUES
+    ('abc-123@example.com'),
+    ('040000008200E00074C5B7101A82E00800000000'),
+    ('../../etc/passwd'),
+    ('a/b/c'),
+    ('.'),
+    ('..'),
+    ('%00%0d%0a'),
+    ('with space'),
+    ('café ☕'),
+    ('~'),
+    ('~41'),
+    ('')
+) AS t(s)
+WHERE qm_dav_euid(qm_dav_name(s)) <> s;
+----
+0
+
+# A name is never something the router will refuse. Nothing survives encoding
+# except [A-Za-z0-9._-] and '~', so no name can be "." or ".." or contain a
+# slash, whatever the euid was.
+query I
+SELECT count(*) FROM (VALUES
+    ('../../etc/passwd'),
+    ('a/b'),
+    ('.'),
+    ('..')
+) AS t(s)
+WHERE qm_dav_name(s) IN ('.', '..') OR qm_dav_name(s) LIKE '%/%';
+----
+0
+
+# A malformed escape is passed through literally rather than dropped — the same
+# rule qm_url_decode follows, and for the same reason: decoding must never
+# silently lose bytes.
+query III
+SELECT qm_dav_euid('a~zz'), qm_dav_euid('a~4'), qm_dav_euid('a~');
+----
+a~zz	a~4	a~

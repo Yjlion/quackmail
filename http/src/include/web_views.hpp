@@ -82,5 +82,13 @@ std::string WrapObject(Ctx &ctx, const std::string &content_type, const std::str
 bool SaveObject(Ctx &ctx, const quackmail::citadel::Room &room, const std::string &euid,
                 const std::string &subject, const std::string &content_type, const std::string &body);
 
+// The same, rendering nothing: returns the new msgnum, or -1 with `status` set
+// to the HTTP status the failure deserves and `err` to a human reason. This is
+// what SaveObject is built on, and what the DAV layer calls — a PUT needs the
+// message number for its ETag and a status code rather than a styled page.
+int64_t SaveObjectRaw(Ctx &ctx, const quackmail::citadel::Room &room, const std::string &euid,
+                      const std::string &subject, const std::string &content_type,
+                      const std::string &body, int &status, std::string &err);
+
 } // namespace qmweb
 } // namespace duckdb
