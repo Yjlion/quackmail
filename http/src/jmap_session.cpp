@@ -285,8 +285,11 @@ void PostApi(Ctx &ctx) {
 		js::Value entry = js::Value::MakeArray();
 		JmapMethod fn = Lookup(name);
 		if (!fn || call.type != js::Value::Array || call.Size() < 3) {
+			// The wrapper MethodError builds is an envelope detail; what goes on
+			// the wire is the error object inside it.
+			js::Value wrapped = MethodError("unknownMethod");
 			entry.Push(js::Value::MakeString("error"));
-			entry.Push(MethodError("unknownMethod"));
+			entry.Push(wrapped["__error"]);
 			entry.Push(js::Value::MakeString(call_id));
 			jc.responses.Push(entry);
 			continue;
@@ -297,12 +300,7 @@ void PostApi(Ctx &ctx) {
 		// the error case is tagged so the envelope can name it "error".
 		bool is_error = result.Has("__error");
 		entry.Push(js::Value::MakeString(is_error ? "error" : name));
-		if (is_error) {
-			js::Value e = result["__error"];
-			entry.Push(e);
-		} else {
-			entry.Push(result);
-		}
+		entry.Push(is_error ? result["__error"] : result);
 		entry.Push(js::Value::MakeString(call_id));
 		jc.responses.Push(entry);
 	}
