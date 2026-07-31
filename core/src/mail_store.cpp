@@ -97,6 +97,26 @@ void EnsureSchema(Connection &con) {
 	// Browser sessions for the HTTP front-end. Created here rather than in the
 	// http module so the admin CLI can list and revoke them without it loaded.
 	web::EnsureSchema(con);
+
+	// JMAP upload blobs: bytes a client has sent but not yet attached to
+	// anything. JMAP defines a blob as temporary until some object references
+	// it, so this is a staging area rather than a store — PruneBlobs drops what
+	// nothing has claimed.
+	//
+	// Column names avoid `size` and `data`, which read as reserved enough to be
+	// worth not finding out about the way citadel_room_tombstones found out
+	// about `at`: EnsureSchema does not check con.Query's result, so a statement
+	// that will not parse fails in total silence.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS quackmail_jmap_blobs (
+			blob_id      VARCHAR PRIMARY KEY,
+			username     VARCHAR,
+			content_type VARCHAR DEFAULT '',
+			size_bytes   BIGINT DEFAULT 0,
+			payload      BLOB,
+			created_at   BIGINT DEFAULT 0
+		)
+	)");
 }
 
 void EnqueueOutbound(Connection &con, const std::string &from_addr, const std::string &rcpt,

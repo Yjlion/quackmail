@@ -124,6 +124,23 @@ void RegisterSubmissionMethods(std::vector<JmapEntry> &out);
 // The blob-download route, contributed by jmap_submission.cpp because that is
 // where the blob resolver lives.
 void RegisterJmapDownloadRoute(std::vector<Route> &out);
+void RegisterJmapUploadRoute(std::vector<Route> &out);
+
+// ---- upload blobs --------------------------------------------------------
+//
+// Bytes a client has sent but not yet attached to anything. JMAP calls a blob
+// temporary until some object references it, so quackmail_jmap_blobs is a
+// staging area rather than a store: Email/set copies what it needs into the
+// message, and PruneBlobs drops whatever nothing claimed.
+//
+// They have their own id namespace, marked by a leading 'U', because every
+// other blob id names bytes already in the message store and an uploaded one
+// has no message yet.
+bool IsUploadBlobId(const std::string &blob_id);
+std::string StoreBlob(Ctx &ctx, const std::string &content_type, const std::string &body);
+// Scoped to the uploader: a random id is not an access rule.
+bool LoadBlob(Ctx &ctx, const std::string &blob_id, std::string &body, std::string &content_type);
+void PruneBlobs(Connection &con, int64_t older_than_seconds);
 
 // Shared argument reading, so every method treats a missing accountId the same
 // way. False when the account is not this user's, with `err` set to the

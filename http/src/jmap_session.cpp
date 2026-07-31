@@ -17,8 +17,10 @@ const char *const kSubmissionCapability = "urn:ietf:params:jmap:submission";
 
 // How much of one request we will do. RFC 8620 requires these to be advertised
 // in the Session object rather than discovered by hitting them.
-constexpr int64_t kMaxSizeUpload = 0; // no upload endpoint; see below
-constexpr int64_t kMaxConcurrentUpload = 0;
+// The same ceiling http::Limits already enforces, advertised so a client can
+// refuse an oversized attachment itself rather than discovering it as a 413.
+constexpr int64_t kMaxSizeUpload = 10 * 1024 * 1024;
+constexpr int64_t kMaxConcurrentUpload = 4;
 constexpr int64_t kMaxSizeRequest = 10 * 1024 * 1024;
 constexpr int64_t kMaxConcurrentRequests = 4;
 constexpr int64_t kMaxCallsInRequest = 64;
@@ -128,10 +130,10 @@ void GetSession(Ctx &ctx) {
 	session.Set("username", account);
 	session.Set("apiUrl", "/jmap/api");
 	session.Set("downloadUrl", "/jmap/download/{accountId}/{blobId}/{name}?accept={type}");
-	// No upload endpoint yet: Email/set can compose from text and attach nothing
-	// new. maxSizeUpload is 0 above, which is how a client is told not to try
-	// rather than left to discover a 404.
-	session.Set("uploadUrl", "");
+	session.Set("uploadUrl", "/jmap/upload/{accountId}");
+	// No push. A client polls Email/changes instead, which is what the state
+	// strings are for; saying so is how it is told not to open a stream that
+	// would never carry anything.
 	session.Set("eventSourceUrl", "");
 	session.Set("state", state);
 
@@ -425,6 +427,7 @@ void RegisterJmapRoutes(std::vector<Route> &out) {
 	out.push_back({"GET", "/jmap/session", Role::Api, GetSession});
 	out.push_back({"*", "/jmap/api", Role::Api, PostApi});
 	RegisterJmapDownloadRoute(out);
+	RegisterJmapUploadRoute(out);
 }
 
 } // namespace qmweb

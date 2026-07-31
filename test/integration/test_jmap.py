@@ -125,9 +125,12 @@ def main():
         assert USER in s["accounts"], f"accounts does not name this user: {list(s['accounts'])}"
         assert s["primaryAccounts"][MAIL] == USER
         assert s["apiUrl"] == "/jmap/api"
-        # maxSizeUpload is 0 because there is no upload endpoint. Saying so is
-        # how a client is told not to try, rather than left to find a 404.
-        assert s["capabilities"][CORE]["maxSizeUpload"] == 0
+        assert s["capabilities"][CORE]["maxSizeUpload"] > 0, \
+            "maxSizeUpload is 0, so a client will never try to attach anything"
+        assert s["uploadUrl"] == "/jmap/upload/{accountId}", s["uploadUrl"]
+        # There is no push, and saying so stops a client opening a stream that
+        # would never carry anything.
+        assert s["eventSourceUrl"] == ""
 
         # ---- the request envelope ------------------------------------------
         r = j.call([["Core/echo", {"hello": "world", "n": 3}, "c0"]])
@@ -458,6 +461,67 @@ def main():
         assert status == 404, f"another account's blob was downloadable ({status})"
         status, _, _ = j.raw("GET", f"/jmap/download/{OTHER}/{blob}/x.eml")
         assert status == 404, f"the account id in the path was not checked ({status})"
+
+        # ---- upload, and attachments -------------------------------------------------
+        # The one JMAP endpoint that is not a method call. Without it a client
+        # can compose text and nothing else, which is the first thing a real one
+        # notices.
+        blob_bytes = b"\x89PNG\r\n\x1a\n" + b"not really a png, but bytes are bytes"
+        status, _, body = j.raw("POST", f"/jmap/upload/{USER}", blob_bytes,
+                                {"Content-Type": "image/png"})
+        assert status == 201, f"upload returned {status}: {body[:200]}"
+        up = json.loads(body)
+        assert up["accountId"] == USER and up["size"] == len(blob_bytes), up
+        blob_id = up["blobId"]
+
+        # Another account cannot upload into this one's namespace, and the
+        # account id in the path is checked rather than decorative.
+        status, _, _ = other.raw("POST", f"/jmap/upload/{USER}", b"x",
+                                 {"Content-Type": "text/plain"})
+        assert status == 404, f"upload accepted another account's path ({status})"
+
+        # A random blob id is not an access rule: the row is scoped to whoever
+        # uploaded it.
+        status, _, _ = other.raw("GET", f"/jmap/download/{OTHER}/{blob_id}/x.png")
+        assert status == 404, "another account downloaded this account's blob"
+
+        res = j.one("Email/set", {"accountId": USER, "create": {"att": {
+            "mailboxIds": {drafts: True},
+            "to": [{"email": f"{OTHER}@jmap.example.com"}],
+            "subject": "With an attachment",
+            "bodyValues": {"b": {"value": "see attached"}},
+            "textBody": [{"partId": "b", "type": "text/plain"}],
+            "attachments": [{"blobId": blob_id, "type": "image/png", "name": "logo.png"}],
+        }}})
+        assert not res["notCreated"], f"the attachment was refused: {res['notCreated']}"
+        att_id = res["created"]["att"]["id"]
+
+        res = j.one("Email/get", {"accountId": USER, "ids": [att_id],
+                                  "properties": ["hasAttachment", "attachments"]})
+        e = res["list"][0]
+        assert e["hasAttachment"] is True, e
+        assert len(e["attachments"]) == 1, e["attachments"]
+        assert e["attachments"][0]["name"] == "logo.png", e["attachments"][0]
+        assert e["attachments"][0]["type"].startswith("image/png"), e["attachments"][0]
+
+        # The bytes are *copied* into the message, not referenced. A blob is
+        # temporary by JMAP's own definition, so a message that pointed at one
+        # would lose its attachment the moment the staging row aged out.
+        part_blob = e["attachments"][0]["blobId"]
+        status, headers, got = j.raw("GET", f"/jmap/download/{USER}/{part_blob}/logo.png")
+        assert status == 200, f"the attachment part did not download ({status})"
+        assert got == blob_bytes, "the attachment did not survive the round trip byte for byte"
+        assert headers.get("Content-Type") == "application/octet-stream", \
+            "a blob was served with a sender-supplied type"
+
+        # A blobId that is not this account's is blobNotFound, which is what
+        # tells a client to re-upload rather than retry the same id forever.
+        res = j.one("Email/set", {"accountId": USER, "create": {"bad": {
+            "mailboxIds": {drafts: True},
+            "subject": "Bad blob",
+            "attachments": [{"blobId": "Udeadbeefdeadbeefdeadbeefdeadbeef", "type": "text/plain"}],
+        }}})
+        assert res["notCreated"]["bad"]["type"] == "blobNotFound", res["notCreated"]
 
         # ---- rate limiting ---------------------------------------------------------
         # The same quota the SMTP submission listener charges. A second door

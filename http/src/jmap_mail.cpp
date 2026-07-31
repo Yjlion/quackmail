@@ -1140,6 +1140,41 @@ js::Value EmailSet(JmapCtx &jc, const js::Value &args) {
 		};
 		push_body("textBody", "text/plain");
 		push_body("htmlBody", "text/html");
+
+		// Attachments, by the blobId the client got from /jmap/upload. The
+		// bytes are copied into the message here rather than referenced: a blob
+		// is temporary by JMAP's own definition, and a message that pointed at
+		// one would lose its attachment the moment the staging row aged out.
+		bool blob_missing = false;
+		const js::Value &atts = spec["attachments"];
+		for (size_t i = 0; i < atts.Size(); i++) {
+			const js::Value &a = atts.At(i);
+			std::string blob_id = a["blobId"].AsString();
+			std::string content, stored_type;
+			if (blob_id.empty() || !LoadBlob(ctx, blob_id, content, stored_type)) {
+				blob_missing = true;
+				break;
+			}
+			mime::BuildPart p;
+			// The client's declared type wins over the one the upload recorded,
+			// which is what JMAP says and what lets it correct a bad guess made
+			// at upload time.
+			p.content_type = a["type"].AsString().empty() ? stored_type : a["type"].AsString();
+			p.content = content;
+			p.filename = a["name"].AsString();
+			p.content_id = a["cid"].AsString();
+			p.disposition = a["disposition"].AsString().empty()
+			                    ? std::string(p.content_id.empty() ? "attachment" : "inline")
+			                    : a["disposition"].AsString();
+			parts.push_back(p);
+		}
+		if (blob_missing) {
+			// blobNotFound is the defined answer, and naming it is what tells a
+			// client to re-upload rather than retry the same id forever.
+			not_created.Set(m.first, SetError("blobNotFound", "attachments name a blob that is not yours"));
+			continue;
+		}
+
 		if (parts.empty()) {
 			mime::BuildPart p;
 			p.content_type = "text/plain";

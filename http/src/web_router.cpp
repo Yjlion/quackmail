@@ -1,3 +1,4 @@
+#include "jmap.hpp"
 #include "web.hpp"
 #include "web_views.hpp"
 
@@ -318,6 +319,14 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 			                                     nullptr, 10);
 			if (days > 0) {
 				quackmail::citadel::PruneTombstones(con, days * 86400);
+			}
+			// And JMAP upload blobs, which are staging rather than storage:
+			// Email/set copies the bytes it needs into the message, so anything
+			// still sitting here was uploaded and never referenced.
+			int64_t hours = (int64_t)std::strtoll(ConfigStr(con, "qm_jmap_blob_hours", "24").c_str(),
+			                                      nullptr, 10);
+			if (hours > 0) {
+				PruneBlobs(con, hours * 3600);
 			}
 		}
 	}

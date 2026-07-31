@@ -51,6 +51,7 @@ set(EXTENSION_SOURCES
     src/jmap_session.cpp
     src/jmap_mail.cpp
     src/jmap_submission.cpp
+    src/jmap_blob.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

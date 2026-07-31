@@ -26,6 +26,16 @@ namespace mime = quackmail::mime;
 // a bare message number from a URL is a direct IDOR otherwise.
 bool ResolveBlob(Ctx &ctx, const std::string &blob_id, std::string &body, std::string &type,
                  std::string &filename) {
+	// An uploaded blob first: it has no message behind it, so none of the
+	// message-store lookups below would find it.
+	if (IsUploadBlobId(blob_id)) {
+		if (!LoadBlob(ctx, blob_id, body, type)) {
+			return false;
+		}
+		filename.clear();
+		return true;
+	}
+
 	std::string num_part = blob_id;
 	std::string section;
 	size_t dot = blob_id.find('.');
