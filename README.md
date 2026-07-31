@@ -61,7 +61,7 @@ extension.
 | `quackmail_nntp` | `qm_nntp_start/_stop/_status`, `qm_nntps_*` | ✅ NNTP reader **and poster** (119/563; dev 1119/1563) — rooms are newsgroups |
 | `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
 | `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
-| `quackmail_http` | `qm_http_start/_stop/_status`, `qm_https_*` | ✅ webmail, the BBS, groupware (contacts, calendar, tasks, notes, blog) and the admin console (80/443; dev 8080/8443) — server-rendered, no JavaScript framework — plus **CalDAV and CardDAV** at `/dav/`, so a phone syncs the same rooms |
+| `quackmail_http` | `qm_http_start/_stop/_status`, `qm_https_*` | ✅ webmail, the BBS, groupware (contacts, calendar, tasks, notes, blog) and the admin console (80/443; dev 8080/8443) — server-rendered, no JavaScript framework — plus **CalDAV and CardDAV** at `/dav/` and **JMAP** (RFC 8620 + 8621) at `/jmap/`, so a phone syncs the same rooms |
 | `quackmail_spool` | `qm_listserv_start/_stop/_status`, `qm_listserv_run`, `qm_fetch_*` | ✅ periodic background work — the only module with no listener. Distributes mailing lists (fan-out, digests, moderation) and pulls messages in from remote POP3/IMAP mailboxes and RSS/Atom feeds |
 
 `*_start(host, port)` also accepts named params: `tls_cert`, `tls_key`,

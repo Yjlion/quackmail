@@ -232,6 +232,67 @@ symptom was a CalDAV client that never noticed a deletion.
 `test/sql/citadel_store.test` now asserts the full table list and that table's
 column names, so the next one is caught by a test rather than by a protocol.
 
+### JMAP is the IMAP projection in JSON, and shares its store rules
+
+A Mailbox *is* a room and an Email *is* a message — the same mapping IMAP makes,
+including exposing public BBS rooms as mailboxes, because hiding them here would
+make the two front-ends disagree about what an account contains. What JMAP does
+*not* share is IMAP's one gap: `Email/set` asks `citadel::CanPost` where
+`APPEND` does not.
+
+**Keywords are translated, never stored twice.** The store keeps IMAP's spelling
+(`\Seen`) because IMAP wrote them first; `$seen` is produced on the way out. Two
+stored vocabularies would drift, and a message read in one client would still be
+unread in the other.
+
+**Additions before removals.** Moving a draft to Sent is one patch naming both
+mailboxes. Applied in the order the client wrote them, the removal unlinks the
+only pointer first — after which there is no source room to copy from, the add
+fails silently, and the message belongs to no mailbox at all. `ApplyEmailPatch`
+orders the two passes, and `EmailSubmission`'s `onSuccessUpdateEmail` goes
+through it rather than growing a second copy of the rule.
+
+**One back-reference resolver.** `#ids` and `#emailId` are both JSON pointers
+into an earlier call's result. `EmailSubmission`'s points at
+`/created/<creationId>/id`, which a substring guess gets wrong in a way that
+looks exactly like the message not existing — so both go through
+`ResolveReference`.
+
+**`core/submission.cpp` is why there is one send path.** Stamp, DKIM-sign, split
+local from remote, deliver and queue: `EmailSubmission/set` and the SMTP
+submission listener differ only in how the message arrived, and the rate limit
+belongs to the caller because each protocol counts and refuses differently.
+
+**An uploaded blob is staging, not storage.** `quackmail_jmap_blobs` holds bytes
+a client has sent but not yet attached to anything, in its own id namespace
+marked by a leading `U` — every other blob id names bytes already in the message
+store, and an uploaded one has no message yet. `Email/set` *copies* the bytes
+into the message rather than referencing the row, because JMAP calls a blob
+temporary until an object references it: a message that pointed at one would
+lose its attachment the moment the staging row aged out. The row is scoped to
+the uploader, because a random id is not an access rule.
+
+**What is advertised is what is implemented.** `Mailbox/changes` returns
+`cannotCalculateChanges` because nothing journals room creation, and
+`eventSourceUrl` is empty because there is no push. Both are how a client is
+told the truth rather than left to quietly miss a new folder or open a stream
+that would never carry anything.
+
+### JSON is ours, and what it refuses is the contract
+
+`core/json.cpp` is written rather than vendored: the extension build has no
+package manager, and DuckDB's bundled yyjson is not exposed to extensions. It is
+small because a JMAP request is a few nested objects.
+
+The input is a request body, so the refusals matter more than the acceptances —
+bounded depth and node count, a number grammar walked by hand rather than handed
+to `strtod` (which takes `+1`, `.5`, `01` and `0x10`), no literal control
+character inside a string (a raw newline would reach anything that later treated
+the value as a header), no unpaired surrogate re-encoded as CESU-8, strict UTF-8
+including overlongs, and trailing content as an error because two concatenated
+documents are not one document. `qm_json_valid` / `qm_json_error` /
+`qm_json_normalize` / `qm_json_get` make all of it assertable from `test/sql/`.
+
 ### Blog and journal rooms are not groupware
 
 They hold ordinary messages. What makes the view different is that it shows whole

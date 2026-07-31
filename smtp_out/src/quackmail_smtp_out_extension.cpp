@@ -19,6 +19,7 @@
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
 #include "quackmail/smtp_client.hpp"
+#include "quackmail/submission.hpp"
 #include "quackmail/util.hpp"
 #include "quackmail/worker.hpp"
 
@@ -76,40 +77,10 @@ std::string DomainOf(const std::string &addr) {
 	return at == std::string::npos ? "" : LowerStr(addr.substr(at + 1));
 }
 
-// Sign a submitted message with the key for its author domain, if we hold one.
-// The From: header domain is what receivers align against for DMARC, so it is
-// preferred over the envelope sender. Returns the message unchanged when no key
-// is configured — an unsigned message is still deliverable.
-std::string SignOutbound(Connection &con, const std::string &mail_from, const std::string &body) {
-	auto parsed = mime::Parse(body);
-	std::string domain;
-	if (!parsed.from.empty()) {
-		auto addrs = mime::ParseAddressList(parsed.from);
-		for (const auto &a : addrs) {
-			if (!a.addr.empty()) {
-				domain = DomainOf(a.addr);
-				break;
-			}
-		}
-	}
-	if (domain.empty()) {
-		domain = DomainOf(mail_from);
-	}
-	if (domain.empty()) {
-		return body;
-	}
-
-	policy::DkimKey key;
-	if (!policy::DkimKeyFor(con, domain, key) || key.private_key.empty()) {
-		return body;
-	}
-	std::string signed_body, err;
-	if (!dkim::Sign(body, key.domain.empty() ? domain : key.domain, key.selector, key.private_key,
-	                key.headers, signed_body, err)) {
-		return body; // signing failure must not block the mail
-	}
-	return signed_body;
-}
+// Signing a submitted message used to live here. It moved to
+// core/submission.cpp when JMAP's EmailSubmission/set needed the same thing —
+// along with the stamp, the local/remote split and the queueing, which are the
+// rest of what "send this user's mail" means and were worth exactly one copy.
 
 // Authenticated submission (RFC 6409): require SASL AUTH (only after TLS), then
 // accept mail for any destination — deliver local recipients into their rooms
@@ -240,30 +211,14 @@ void HandleSubmission(DatabaseInstance &db, net::ClientStream &stream, ServerCon
 				return;
 			}
 
-			// Stamp the submission, then sign. Signing last means the
-			// DKIM-Signature sits at the very top, and both the locally
-			// delivered copy and every queued copy carry the same signature.
-			std::string received = "Received: from " + (helo.empty() ? std::string("unknown") : helo) +
-			                       " (submission, authenticated as " + auth_user + ")\r\n\tby " +
-			                       citadel::GetConfig(con, "c_fqdn", "quackmail.test") +
-			                       " (QuackCit) with " + (tls_active ? "ESMTPSA" : "ESMTPA") + ";\r\n\t" +
-			                       util::RfcDate() + "\r\n";
-			body = SignOutbound(con, mail_from, received + body);
-
-			// Local recipients are delivered directly; remote ones are queued.
-			std::vector<std::string> local_rcpts;
-			for (auto &r : rcpts) {
-				if (citadel::IsLocalUser(con, r)) {
-					local_rcpts.push_back(r);
-				} else {
-					store::EnqueueOutbound(con, mail_from, r, body);
-				}
-			}
-			std::string err;
-			bool ok = true;
-			if (!local_rcpts.empty()) {
-				ok = deliver::LocalDeliver(con, mail_from, local_rcpts, body, err);
-			}
+			// Stamp, sign, split local from remote, deliver and queue. All of
+			// that lives in core::submission so this and JMAP's
+			// EmailSubmission/set are one implementation: the two differ only
+			// in how the message arrived.
+			std::string received =
+			    submission::ReceivedHeader(con, helo, auth_user, tls_active);
+			submission::Result sent;
+			bool ok = submission::Send(con, mail_from, rcpts, received, body, sent);
 			if (ok) {
 				// Charge the quota only for a message we actually accepted.
 				for (auto &r : rcpts) {
