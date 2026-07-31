@@ -349,10 +349,21 @@ namespace {
 
 // What OPTIONS advertises, and what a 405 lists.
 //
-// Level 1 only: no LOCK, no UNLOCK. CalDAV's own consistency story is ETags and
-// If-Match, which we do implement, and a lock table would be a great deal of
-// cross-session state for a guarantee nothing here needs.
-const char *const kDavHeader = "1, 3, access-control, calendar-access, addressbook-access, extended-mkcol";
+// The compliance classes are exactly the ones we implement, and no more: a
+// class we claim but do not honour is one a client keeps trying to use.
+//
+//   1  RFC 4918 core. **Not 2** — that promises LOCK and UNLOCK, and CalDAV's
+//      consistency story is ETags and If-Match, which is implemented. The real
+//      Citadel's webcit-ng does claim "1, 2" here; we do not, deliberately.
+//   3  RFC 4918 rather than its 2518 predecessor, as webcit-ng also says.
+//   calendar-access  RFC 4791 §5.1.
+//   addressbook      RFC 6352 §6.1. Note the name: it is not
+//                    "addressbook-access", however symmetrical that would be.
+//                    webcit-ng/server/room_propfind.c agrees.
+//
+// Absent on purpose: access-control (RFC 3744 — we serve its properties but
+// implement no ACL method) and extended-mkcol (we have no MKCOL at all).
+const char *const kDavHeader = "1, 3, calendar-access, addressbook";
 const char *const kAllowHeader = "OPTIONS, PROPFIND, PROPPATCH, REPORT, GET, HEAD, PUT, DELETE";
 
 void DavOptions(Ctx &ctx) {

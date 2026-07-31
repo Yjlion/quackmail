@@ -202,7 +202,10 @@ def main():
         status, headers, _ = d.go("OPTIONS", "/dav/")
         assert status == 204, f"OPTIONS returned {status}"
         dav_header = headers.get("DAV", "")
-        for token in ("calendar-access", "addressbook-access"):
+        # RFC 4791 §5.1 and RFC 6352 §6.1. The CardDAV class is "addressbook",
+        # not the symmetrical-looking "addressbook-access" — webcit-ng's
+        # room_propfind.c is the parity evidence.
+        for token in ("calendar-access", "addressbook"):
             assert token in dav_header, f"OPTIONS does not advertise {token}: {dav_header}"
         # Level 2 would promise LOCK, which we deliberately do not implement.
         assert not re.search(r"\b2\b", dav_header), \
