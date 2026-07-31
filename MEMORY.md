@@ -201,12 +201,22 @@ produce a token, and Basic credentials are not ambient authority the way a
 cookie is — and runs through the same `LoginAllowed` throttle, or the DAV
 endpoint would be an unthrottled password oracle beside a throttled login page.
 
-**The resource name must equal the object's UID**, and a PUT that disagrees gets
-409 `no-uid-conflict`. This is stricter than RFC 4791 allows, and it is
-deliberate: the store keys an object by its own UID, there is no name→UID map to
-make a differently-named resource findable afterwards, and storing under the
-body's UID while the client remembers another href would 404 on its very next
-GET. Every client that ships names the resource after the UID.
+**A resource name is the client's to choose, and is not the object's UID.**
+This was got wrong first, on the belief that every shipping client names a
+resource after the UID — vdirsyncer does not, it PUTs to a random UUID of its
+own, and the rule rejected it outright. A live probe found that; the repo's own
+tests could not, because they asserted what the server had decided to do.
+
+The store still keys an object by its UID (the native `ENT0` path and the web
+UI depend on it), so the two are **bound** rather than equated:
+`citadel_dav_names` records the name where it differs from the default, and the
+default is `dav::NameForEuid(euid)` plus the collection's extension — which is
+what an object created through the web UI or the native protocol is served as,
+with no row needed. `409 no-uid-conflict` now means what RFC 4791 says: this UID
+already lives in this collection under a *different* URI.
+
+The general lesson: a protocol module's own tests assert what you decided, so
+they cannot tell you the decision was wrong. Point a real client at it.
 
 **A PUT stores the client's bytes verbatim.** Never re-emitted through
 `ical::Emit`, which would silently drop every property the flat `Item` does not
