@@ -565,7 +565,8 @@ def main():
         con.close()
 
     print("PASS: JMAP Core + Mail (session, envelope, back-references, Mailbox, Email, "
-          "Thread, Identity, EmailSubmission, blobs, authorization, IMAP parity)")
+          "Thread, Identity, EmailSubmission, upload/attachments, blobs, "
+          "authorization, IMAP parity)")
 
 
 if __name__ == "__main__":

@@ -300,3 +300,20 @@ query III
 SELECT feed, status, error FROM qm_fetch_run(feed => 'nosuchfeed');
 ----
 nosuchfeed	error	no feed called 'nosuchfeed'
+
+# The JMAP upload staging table.
+#
+# Asserted by column list rather than just by name, for the same reason
+# citadel_room_tombstones is: EnsureSchema does not check con.Query's result, so
+# a CREATE TABLE that will not parse fails in total silence and every later read
+# returns nothing. `size` and `data` are avoided here on purpose.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 'quackmail_jmap_blobs';
+----
+1
+
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index)
+FROM duckdb_columns() WHERE table_name = 'quackmail_jmap_blobs';
+----
+blob_id,username,content_type,size_bytes,payload,created_at
