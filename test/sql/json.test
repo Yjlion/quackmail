@@ -1,0 +1,204 @@
+# name: test/sql/json.test
+# description: The JSON codec JMAP is built on — what it accepts, and above all what it refuses
+# group: [quackmail]
+
+require quackmail
+
+# ---- the shapes ------------------------------------------------------------
+
+query I
+SELECT qm_json_normalize('{"a":1,"b":[true,false,null],"c":{"d":"e"}}');
+----
+{"a":1,"b":[true,false,null],"c":{"d":"e"}}
+
+# Member order is preserved rather than sorted. JMAP does not require it, but a
+# reproducible response is what makes one assertable from a test.
+query I
+SELECT qm_json_normalize('{"z":1,"a":2,"m":3}');
+----
+{"z":1,"a":2,"m":3}
+
+# Whitespace between tokens is insignificant and comes back gone.
+query I
+SELECT qm_json_normalize('  {  "a"  :  [ 1 , 2 ]  }  ');
+----
+{"a":[1,2]}
+
+query II
+SELECT qm_json_normalize('[]'), qm_json_normalize('{}');
+----
+[]	{}
+
+# ---- numbers ---------------------------------------------------------------
+
+# An integer stays an integer. JMAP ids are strings but its sizes and counts are
+# numbers a client may compare exactly, so 3 must not come back as 3.0.
+query III
+SELECT qm_json_normalize('3'), qm_json_normalize('-0'), qm_json_normalize('[1,2,3]');
+----
+3	0	[1,2,3]
+
+# A fraction or an exponent is not an integer and keeps its shape.
+query I
+SELECT qm_json_valid('1.5') AND qm_json_valid('1e10') AND qm_json_valid('-2.5E-3');
+----
+true
+
+# The grammar is walked rather than handed to strtod, which would accept every
+# one of these. Leading '+', a bare fraction, a leading zero, hex, and the
+# not-a-number spellings are all invalid JSON.
+query I
+SELECT count(*) FROM (VALUES
+    ('+1'), ('.5'), ('1.'), ('01'), ('0x10'), ('1e'), ('1e+'), ('--1'),
+    ('NaN'), ('Infinity'), ('-Infinity')
+) AS t(s)
+WHERE qm_json_valid(s);
+----
+0
+
+# ---- strings and escaping --------------------------------------------------
+
+query II
+SELECT qm_json_get('{"s":"a\"b"}', 's'), qm_json_get('{"s":"tab\there"}', 's');
+----
+a"b	tab	here
+
+# A surrogate pair becomes one code point; a lone half is refused. Encoding an
+# unpaired surrogate as UTF-8 anyway is the CESU-8 that makes two systems
+# disagree about whether two strings are equal.
+query I
+SELECT qm_json_get('{"s":"😀"}', 's');
+----
+😀
+
+query I
+SELECT count(*) FROM (VALUES
+    ('{"s":"\uD83D"}'),
+    ('{"s":"\uDE00"}'),
+    ('{"s":"\uD83Dx"}'),
+    ('{"s":"\u00"}'),
+    ('{"s":"\uZZZZ"}'),
+    ('{"s":"\x"}')
+) AS t(s)
+WHERE qm_json_valid(s);
+----
+0
+
+# A literal control character inside a string is invalid JSON. Accepting one
+# would let a raw newline through into anything that later treated the value as
+# a header or a log line.
+query I
+SELECT qm_json_valid('{"s":"a' || chr(10) || 'b"}');
+----
+false
+
+# It has to be escaped on the way out too, or a round trip would produce
+# something the parser just rejected.
+query I
+SELECT qm_json_normalize('{"s":"a\nb"}');
+----
+{"s":"a\nb"}
+
+# Valid UTF-8 goes out as itself rather than as \u escapes: smaller, and what
+# every other JMAP implementation emits.
+query I
+SELECT qm_json_normalize('{"s":"café ☕"}');
+----
+{"s":"café ☕"}
+
+# ---- UTF-8 is validated on the way in --------------------------------------
+#
+# The surrogate cases above are the half of json::ValidUtf8 that a SQL literal
+# can reach: a VARCHAR here is itself UTF-8, so the raw C0 80 and F5 90 80 80
+# sequences the validator also rejects cannot be written as one. Those arrive
+# only over a socket, and test_jmap.py posts them as bytes.
+
+# ---- refusals --------------------------------------------------------------
+
+# Trailing content. Two concatenated documents are not one document, and
+# accepting the first would let a request smuggle a second past anything that
+# logged only what it parsed.
+query II
+SELECT qm_json_valid('{"a":1} {"b":2}'), qm_json_error('{"a":1}{"b":2}');
+----
+false	trailing content after the top-level value
+
+# The rest of the malformed set. Every one of these is reachable from a request
+# body, so each is a value the server must decline rather than guess at.
+query I
+SELECT count(*) FROM (VALUES
+    (''),
+    ('   '),
+    ('{'),
+    ('}'),
+    ('['),
+    ('{"a"}'),
+    ('{"a":}'),
+    ('{a:1}'),
+    ('{''a'':1}'),
+    ('{"a":1,}'),
+    ('[1,]'),
+    ('[1 2]'),
+    ('{"a":1 "b":2}'),
+    ('"unterminated'),
+    ('tru'),
+    ('None'),
+    ('undefined')
+) AS t(s)
+WHERE qm_json_valid(s);
+----
+0
+
+# Depth is bounded, because the input arrives from the network and a parser that
+# recurses on it is a stack overflow with extra steps. 64 is the limit; 300 is
+# well past it and must be refused rather than crash the server.
+query I
+SELECT qm_json_valid(repeat('[', 300) || repeat(']', 300));
+----
+false
+
+query I
+SELECT qm_json_valid(repeat('[', 60) || repeat(']', 60));
+----
+true
+
+# ---- path access -----------------------------------------------------------
+
+query III
+SELECT qm_json_get('{"a":{"b":{"c":"deep"}}}', 'a.b.c'),
+       qm_json_get('{"a":[10,20,30]}', 'a.1'),
+       qm_json_get('{"a":{"b":1}}', 'a');
+----
+deep	20	{"b":1}
+
+# A path that goes nowhere is empty rather than an error: every reader in the
+# codec has a default, because a JMAP client sending the wrong shape is an
+# ordinary Tuesday and must never be a crash.
+query III
+SELECT qm_json_get('{"a":1}', 'nope'), qm_json_get('{"a":1}', 'a.b.c'),
+       qm_json_get('[1,2]', '9');
+----
+(empty)	(empty)	(empty)
+
+# A duplicate member reads as the first. That is the only interpretation that
+# cannot be steered by appending a second copy of a field a validator has
+# already looked at.
+query I
+SELECT qm_json_get('{"a":"first","a":"second"}', 'a');
+----
+first
+
+# ---- round trips -----------------------------------------------------------
+
+query I
+SELECT count(*) FROM (VALUES
+    ('{"methodCalls":[["Core/echo",{"hello":true},"c0"]]}'),
+    ('{"using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"]}'),
+    ('[[["nested"]]]'),
+    ('{"empty":{},"also":[],"nul":null}'),
+    ('{"n":[0,-1,1000000,1.25]}'),
+    ('{"unicode":"日本語 — ✂ — \"quoted\""}')
+) AS t(s)
+WHERE qm_json_normalize(qm_json_normalize(s)) <> qm_json_normalize(s);
+----
+0

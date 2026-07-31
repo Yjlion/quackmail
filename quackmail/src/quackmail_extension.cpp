@@ -24,6 +24,7 @@
 #include "quackmail/html_sanitize.hpp"
 #include "quackmail/http.hpp"
 #include "quackmail/ical.hpp"
+#include "quackmail/json.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
@@ -1182,6 +1183,81 @@ void DavEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	});
 }
 
+// The JSON codec JMAP is built on. A request body is attacker-supplied, so what
+// the parser *refuses* is as much of a contract as what it accepts — and all of
+// it is assertable from sqllogictest with no socket in the loop.
+//
+// qm_json_valid(text) -> does it parse at all?
+void JsonValidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, bool>(args.data[0], result, args.size(), [&](string_t in) {
+		quackmail::json::Value v;
+		return quackmail::json::Parse(in.GetString(), v);
+	});
+}
+
+// qm_json_error(text) -> why it did not parse, "" when it did.
+void JsonErrorScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		quackmail::json::Value v;
+		std::string err;
+		quackmail::json::Parse(in.GetString(), v, err);
+		return StringVector::AddString(result, err);
+	});
+}
+
+// qm_json_normalize(text) -> parse and re-serialize. A round trip through the
+// whole codec in one expression, which is what makes escaping, number
+// formatting and member order testable as a table of cases.
+void JsonNormalizeScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		quackmail::json::Value v;
+		if (!quackmail::json::Parse(in.GetString(), v)) {
+			return StringVector::AddString(result, "");
+		}
+		return StringVector::AddString(result, quackmail::json::Serialize(v));
+	});
+}
+
+// qm_json_get(text, path) -> the value at a dotted path, serialized. A string
+// comes back bare rather than quoted, because comparing it to a SQL literal is
+// the whole point.
+void JsonGetScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t in, string_t path) {
+		    quackmail::json::Value root;
+		    if (!quackmail::json::Parse(in.GetString(), root)) {
+			    return StringVector::AddString(result, "");
+		    }
+		    const quackmail::json::Value *cur = &root;
+		    std::string p = path.GetString();
+		    size_t pos = 0;
+		    while (pos <= p.size() && cur) {
+			    size_t dot = p.find('.', pos);
+			    std::string seg = p.substr(pos, dot == std::string::npos ? std::string::npos : dot - pos);
+			    if (!seg.empty()) {
+				    if (!seg.empty() && seg.find_first_not_of("0123456789") == std::string::npos &&
+				        cur->type == quackmail::json::Value::Array) {
+					    size_t idx = (size_t)std::strtoull(seg.c_str(), nullptr, 10);
+					    cur = idx < cur->Size() ? &cur->At(idx) : nullptr;
+				    } else {
+					    cur = cur->Get(seg);
+				    }
+			    }
+			    if (dot == std::string::npos) {
+				    break;
+			    }
+			    pos = dot + 1;
+		    }
+		    if (!cur) {
+			    return StringVector::AddString(result, "");
+		    }
+		    if (cur->type == quackmail::json::Value::String) {
+			    return StringVector::AddString(result, cur->str);
+		    }
+		    return StringVector::AddString(result, quackmail::json::Serialize(*cur));
+	    });
+}
+
 void UrlDecodeScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	BinaryExecutor::Execute<string_t, bool, string_t>(
 	    args.data[0], args.data[1], result, args.size(), [&](string_t in, bool plus_as_space) {
@@ -1976,6 +2052,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_http_keepalive", {V, V}, B, HttpKeepAliveScalar));
 	loader.RegisterFunction(ScalarFunction("qm_dav_name", {V}, V, DavNameScalar));
 	loader.RegisterFunction(ScalarFunction("qm_dav_euid", {V}, V, DavEuidScalar));
+
+	// JSON (pure), the codec JMAP is built on.
+	loader.RegisterFunction(ScalarFunction("qm_json_valid", {V}, B, JsonValidScalar));
+	loader.RegisterFunction(ScalarFunction("qm_json_error", {V}, V, JsonErrorScalar));
+	loader.RegisterFunction(ScalarFunction("qm_json_normalize", {V}, V, JsonNormalizeScalar));
+	loader.RegisterFunction(ScalarFunction("qm_json_get", {V, V}, V, JsonGetScalar));
 
 	loader.RegisterFunction(ScalarFunction("qm_vcard_count", {V}, I, VcardCountScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_get", {V, V}, V, VcardGetScalar));
