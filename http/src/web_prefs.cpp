@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "quackmail/tz.hpp"
 
 #include "quackmail/auth.hpp"
 #include "quackmail/sieve.hpp"
@@ -45,7 +46,7 @@ void GetPrefs(Ctx &ctx) {
 	        (user.axlevel >= 6 ? " (aide)" : "") + "</dd>";
 	body += "<dt>Calls</dt><dd>" + T(std::to_string(user.times_called)) + "</dd>";
 	body += "<dt>Posts</dt><dd>" + T(std::to_string(user.num_posts)) + "</dd>";
-	body += "<dt>Last call</dt><dd>" + T(FormatTime(user.last_call)) + "</dd>";
+	body += "<dt>Last call</dt><dd>" + T(FormatTime(ctx, user.last_call)) + "</dd>";
 	body += "</dl></div>";
 
 	body += "<h2>Password</h2>";
@@ -74,6 +75,19 @@ void GetPrefs(Ctx &ctx) {
 	        Select("theme", ThemeOptions(),
 	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_theme", "auto")) +
 	        "</label>";
+
+	// Every date on every page renders in this zone, and the calendar is
+	// unusable without it. The empty option means "follow the site default",
+	// which is stored as a cleared row rather than today's value of it.
+	std::vector<std::pair<std::string, std::string>> zones;
+	zones.push_back({"", "Follow the server (" + ConfigStr(ctx.con, "qm_default_tz", "UTC") + ")"});
+	for (auto &z : quackmail::tz::List()) {
+		zones.push_back({z, z});
+	}
+	body += "<label class=\"field\"><span>Time zone</span>" +
+	        Select("tz", zones, quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_tz")) +
+	        "</label>";
+
 	body += "<p>" + Button("Save settings") + "</p>";
 	body += "<p class=\"muted\">These are the same preferences the BBS shell's "
 	        "<code>.Enter Configuration</code> edits.</p>";
@@ -170,6 +184,12 @@ void PostSettings(Ctx &ctx) {
 			break;
 		}
 	}
+	// Likewise only a zone the bundled database knows; anything else clears the
+	// row rather than storing a name that would silently fall back on every page.
+	std::string zone = ctx.req.Form("tz");
+	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_tz",
+	                                quackmail::tz::IsKnown(zone) ? zone : "");
+
 	RedirectTo(ctx, "/prefs", "saved");
 }
 
@@ -335,8 +355,8 @@ std::string SessionTable(Ctx &ctx, const std::vector<quackmail::web::SessionRow>
 		}
 		body += Cell(s.peer_ip + (s.tls ? " (HTTPS)" : " (HTTP)"));
 		body += Cell(s.user_agent.size() > 60 ? s.user_agent.substr(0, 60) + "…" : s.user_agent);
-		body += Cell(FormatTime(s.created_at));
-		body += Cell(FormatTime(s.last_seen));
+		body += Cell(FormatTime(ctx, s.created_at));
+		body += Cell(FormatTime(ctx, s.last_seen));
 		body += "<td>";
 		body += FormStart(ctx, action, "inline") + Hidden("token_hash", s.token_hash);
 		bool self = s.token_hash == ctx.session_hash;

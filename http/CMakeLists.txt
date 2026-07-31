@@ -29,6 +29,10 @@ set(EXTENSION_SOURCES
     src/web_bbs.cpp
     src/web_views.cpp
     src/web_contacts.cpp
+    src/web_calendar.cpp
+    src/web_tasks.cpp
+    src/web_notes.cpp
+    src/web_blog.cpp
     src/web_mail.cpp
     src/web_prefs.cpp
     src/web_admin_users.cpp

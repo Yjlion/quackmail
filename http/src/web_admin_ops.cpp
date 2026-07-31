@@ -170,7 +170,7 @@ void GetAdminWho(Ctx &ctx) {
 		body += Cell(s.client);
 		body += Cell(s.last_cmd);
 		body += Cell(std::to_string(s.axlevel));
-		body += Cell(FormatTime(s.since));
+		body += Cell(FormatTime(ctx, s.since));
 		body += "</tr>";
 	}
 	body += "</table></div>";

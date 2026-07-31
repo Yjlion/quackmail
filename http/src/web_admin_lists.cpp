@@ -199,7 +199,7 @@ void GetList(Ctx &ctx) {
 		body += Cell(s.address);
 		body += Cell(s.kind == listserv::SubKind::Digest ? "digest" : "post");
 		body += Cell(StateValue(s.state));
-		body += Cell(s.confirmed_at > 0 ? FormatTime(s.confirmed_at) : "");
+		body += Cell(s.confirmed_at > 0 ? FormatTime(ctx, s.confirmed_at) : "");
 		body += "<td>" + FormStart(ctx, base + "/unsubscribe", "inline") + Hidden("address", s.address) +
 		        Button("Remove", "danger") + FormEnd() + "</td>";
 		body += "</tr>";
@@ -231,7 +231,7 @@ void GetList(Ctx &ctx) {
 			body += "<tr>";
 			body += Cell(h.mail_from);
 			body += Cell(h.subject);
-			body += Cell(FormatTime(h.received_at));
+			body += Cell(FormatTime(ctx, h.received_at));
 			body += "<td>" + FormStart(ctx, base + "/approve", "inline") +
 			        Hidden("id", std::to_string(h.id)) + Button("Approve") + FormEnd() +
 			        FormStart(ctx, base + "/reject", "inline") + Hidden("id", std::to_string(h.id)) +
@@ -462,7 +462,7 @@ void GetFeeds(Ctx &ctx) {
 		body += Cell(source);
 		body += Cell(target);
 		body += Cell(std::to_string(f.interval_secs) + "s");
-		body += Cell(f.last_run_at > 0 ? FormatTime(f.last_run_at) : "never");
+		body += Cell(f.last_run_at > 0 ? FormatTime(ctx, f.last_run_at) : "never");
 		body += Cell(f.last_status + (f.last_error.empty() ? "" : (": " + f.last_error)));
 		body += Cell(std::to_string(f.messages_pulled));
 		body += "<td>" + FormStart(ctx, "/admin/feeds/run", "inline") + Hidden("name", f.name) +

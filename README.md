@@ -61,7 +61,7 @@ extension.
 | `quackmail_nntp` | `qm_nntp_start/_stop/_status`, `qm_nntps_*` | ✅ NNTP reader **and poster** (119/563; dev 1119/1563) — rooms are newsgroups |
 | `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
 | `quackmail_telnet` | `qm_telnet_start/_stop/_status`, `qm_telnets_*` | ✅ BBS shell over telnet (23; dev 2300) and telnets (992; dev 2992) — the Citadel text-client experience, server-side |
-| `quackmail_http` | `qm_http_start/_stop/_status`, `qm_https_*` | ✅ webmail, the BBS over the web, and the admin console (80/443; dev 8080/8443) — server-rendered, no JavaScript framework |
+| `quackmail_http` | `qm_http_start/_stop/_status`, `qm_https_*` | ✅ webmail, the BBS, groupware (contacts, calendar, tasks, notes, blog) and the admin console (80/443; dev 8080/8443) — server-rendered, no JavaScript framework |
 | `quackmail_spool` | `qm_listserv_start/_stop/_status`, `qm_listserv_run`, `qm_fetch_*` | ✅ periodic background work — the only module with no listener. Distributes mailing lists (fan-out, digests, moderation) and pulls messages in from remote POP3/IMAP mailboxes and RSS/Atom feeds |
 
 `*_start(host, port)` also accepts named params: `tls_cert`, `tls_key`,
@@ -233,6 +233,11 @@ Recurring events expand in **wall-clock** terms in the event's own zone, which
 is what keeps a weekly 09:00 meeting at 09:00 across a daylight-saving change
 instead of drifting an hour.
 
+Each user picks their own zone on `/prefs`; the site default is
+`qm_default_tz` (UTC unless an operator changes it). Every date the web
+interface renders goes through it, so two people reading the same room see the
+same instant written in their own local time.
+
 Note that an exact list is *not* uniformly stricter than the two-label
 approximation this replaced: it is correct, which in places means more
 permissive. It also decides which parent-domain DKIM key signs mail for a
@@ -354,15 +359,30 @@ clients see each other in the who-list and can page one another.
   read, forgetting a room, the who-list and instant messages. A post made here
   is an ordinary `format_type = 0` Citadel message, so it reads back over the
   native protocol, telnet, NNTP, IMAP and POP3.
-- **Room views.** A room's Citadel `default_view` decides how it renders.
-  `Contacts` is an address book — browse, view, create, edit and delete, with
-  each address a link that composes to it. Every other view still renders as a
-  message list, and `?view=raw` forces that for any room, which is what you
-  want the first time a Contacts room turns out to hold something that is not a
-  vCard. Objects are ordinary `format_type = 4` messages wrapping one
-  `text/vcard` or `text/calendar` part and keyed by the object's own UID, so a
-  contact created in the browser is a readable MIME message over IMAP with no
-  extra code — and saving it again replaces it rather than appending a copy.
+- **Room views.** A room's Citadel `default_view` decides how it renders:
+
+  | View | What you get |
+  |---|---|
+  | `Contacts` | an address book; each e-mail address is a link that composes to it |
+  | `Calendar` | a month grid, or an agenda for `CALBRIEF`; the day number creates an event |
+  | `Tasks` | VTODO with due date, priority and progress, sorted as a work queue |
+  | `Notes` | a card grid of `text/vnote` sticky notes, colours and all |
+  | `Blog`, `Journal` | whole entries newest-first rather than a list of subjects |
+  | anything else | the ordinary message list |
+
+  `?view=raw` forces the message list for *any* room, which is what you want the
+  first time a Contacts room turns out to hold something that is not a vCard.
+
+  Contacts, calendar entries, tasks and notes are ordinary `format_type = 4`
+  messages wrapping one `text/vcard`, `text/calendar` or `text/vnote` part and
+  keyed by the object's own UID — so an object created in the browser is a
+  readable MIME message over IMAP with no extra code, and saving it again
+  replaces it rather than appending a copy. Blog and journal rooms hold plain
+  messages, so an entry reads back over every other protocol as itself.
+
+  Editing preserves what the forms do not show. A calendar event keeps the alarm
+  someone set on their phone, a contact keeps a second address, a note keeps
+  where another client placed it on a pinboard.
 - **The admin console** at `/admin/` — users, rooms, floors and `citadel_config`,
   plus the whole mail-policy set (domains, aliases, ACLs, DNSBL zones, DKIM
   keys, send quotas), the inbound audit log, the outbound queue, any user's

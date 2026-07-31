@@ -38,11 +38,23 @@ struct Property {
 	Property();
 };
 
-// A resolved instant. `epoch` is always UTC; the other fields record how it was
-// written, because emitting it back has to say the same thing.
+// A resolved date or instant.
+//
+// **What `epoch` means depends on `all_day`, and getting this wrong is an
+// off-by-one-day bug.**
+//
+//   all_day == false   a UTC instant. Render it by shifting into a zone.
+//   all_day == true    a *wall-clock* value: seconds since the epoch as if the
+//                      date were UTC. VALUE=DATE names a day, not a moment, so
+//                      there is no instant to shift and shifting it anyway moves
+//                      the date — a 1 April all-day event becomes 31 March for
+//                      anyone west of Greenwich.
+//
+// The other fields record how the value was written, because emitting it back
+// has to say the same thing.
 struct DateTime {
 	int64_t epoch = 0;
-	bool all_day = false; // VALUE=DATE — a day, not a moment
+	bool all_day = false; // VALUE=DATE — a day, not a moment; see above
 	std::string tzid;     // as received; "" for UTC or floating
 	bool utc = false;     // the trailing-Z form
 	bool valid = false;

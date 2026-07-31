@@ -1,0 +1,101 @@
+# name: test/sql/vnote.test
+# description: vNote parsing and serialization
+# group: [quackmail]
+#
+# The format Citadel stores a sticky note in — vCard 2.1's grammar with its own
+# property names. Storing notes as iCalendar VJOURNAL instead would have needed
+# no new code at all, but then WebCit and the Citadel clients could not read
+# them, and cross-protocol readability is the reason groupware objects are stored
+# as ordinary messages in the first place.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# ---- the basics ------------------------------------------------------------
+
+query IIII
+SELECT qm_vnote_count(E'BEGIN:VNOTE\r\nVERSION:1.1\r\nUID:n1@x\r\nSUMMARY:Shopping\r\nBODY:Milk\r\nEND:VNOTE\r\n'),
+       qm_vnote_get(E'BEGIN:VNOTE\r\nVERSION:1.1\r\nUID:n1@x\r\nSUMMARY:Shopping\r\nBODY:Milk\r\nEND:VNOTE\r\n', 'summary'),
+       qm_vnote_get(E'BEGIN:VNOTE\r\nVERSION:1.1\r\nUID:n1@x\r\nSUMMARY:Shopping\r\nBODY:Milk\r\nEND:VNOTE\r\n', 'body'),
+       qm_vnote_get(E'BEGIN:VNOTE\r\nVERSION:1.1\r\nUID:n1@x\r\nSUMMARY:Shopping\r\nBODY:Milk\r\nEND:VNOTE\r\n', 'uid');
+----
+1	Shopping	Milk	n1@x
+
+# Several notes in one file, and anything that is not a vNote is zero.
+
+query II
+SELECT qm_vnote_count(
+         E'BEGIN:VNOTE\r\nVERSION:1.1\r\nSUMMARY:One\r\nEND:VNOTE\r\n' ||
+         E'BEGIN:VNOTE\r\nVERSION:1.1\r\nSUMMARY:Two\r\nEND:VNOTE\r\n'),
+       qm_vnote_count('BEGIN:VCARD');
+----
+2	0
+
+# ---- the title -------------------------------------------------------------
+# SUMMARY when there is one; otherwise the body's first line, because that is
+# what a note without an explicit title actually reads as. A note with neither is
+# still clickable.
+
+query III
+SELECT qm_vnote_title(E'BEGIN:VNOTE\r\nSUMMARY:Titled\r\nBODY:text\r\nEND:VNOTE\r\n'),
+       qm_vnote_title(E'BEGIN:VNOTE\r\nBODY:First line\\nsecond line\r\nEND:VNOTE\r\n'),
+       qm_vnote_title(E'BEGIN:VNOTE\r\nUID:bare@x\r\nEND:VNOTE\r\n');
+----
+Titled	First line	(untitled)
+
+# ---- escapes and geometry --------------------------------------------------
+# A note body is plain text, so its semicolons and commas are content. The
+# Outlook geometry and colour properties are not modelled as fields but must
+# survive, because they are where another client remembers the note's position
+# on a pinboard.
+
+query II
+SELECT replace(qm_vnote_get(E'BEGIN:VNOTE\r\nBODY:one\\ntwo\\; three\\, four\r\nEND:VNOTE\r\n', 'body'), E'\n', '<LF>'),
+       qm_vnote_get(E'BEGIN:VNOTE\r\nSUMMARY:x\r\nX-OUTLOOK-COLOR:#FFFF88\r\nEND:VNOTE\r\n', 'color');
+----
+one<LF>two; three, four	#FFFF88
+
+query I
+SELECT qm_vnote_emit(E'BEGIN:VNOTE\r\nVERSION:1.1\r\nUID:n@x\r\nSUMMARY:Keep\r\nBODY:text\r\nX-OUTLOOK-LEFT:120\r\nX-OUTLOOK-TOP:40\r\nX-OUTLOOK-WIDTH:300\r\nX-OUTLOOK-HEIGHT:200\r\nEND:VNOTE\r\n')
+       LIKE '%X-OUTLOOK-LEFT:120%';
+----
+true
+
+# ---- the round trip --------------------------------------------------------
+# Emitting is idempotent, so saving a note twice cannot drift.
+
+query I
+SELECT qm_vnote_emit(qm_vnote_emit(v)) = qm_vnote_emit(v)
+FROM (SELECT E'BEGIN:VNOTE\r\nVERSION:1.1\r\nUID:n@x\r\nSUMMARY:Ω title\r\nBODY:one\\ntwo\\; three\r\nX-OUTLOOK-COLOR:#AACCFF\r\nX-OUTLOOK-WIDTH:300\r\nEND:VNOTE\r\n' AS v);
+----
+true
+
+# VERSION is re-emitted from the writer rather than preserved, so a file cannot
+# claim one version while being serialized as another.
+
+query II
+SELECT qm_vnote_emit(E'BEGIN:VNOTE\r\nVERSION:9.9\r\nSUMMARY:x\r\nEND:VNOTE\r\n') LIKE '%VERSION:1.1%',
+       qm_vnote_emit(E'BEGIN:VNOTE\r\nVERSION:9.9\r\nSUMMARY:x\r\nEND:VNOTE\r\n') LIKE '%9.9%';
+----
+true	false
+
+# ---- tolerance and folding -------------------------------------------------
+
+query II
+SELECT qm_vnote_get(E'begin:vnote\nsummary:Lowercase LF\nend:vnote\n', 'summary'),
+       qm_vnote_get(E'BEGIN:VNOTE\r\nBODY:first part\r\n  continued\r\nEND:VNOTE\r\n', 'body');
+----
+Lowercase LF	first part continued
+
+# Every emitted line is at most 75 octets, and a fold never splits a multi-byte
+# character — the body comes back as exactly 200 of them.
+
+query II
+SELECT (SELECT max(octet_length(encode(line))) <= 75
+        FROM (SELECT unnest(str_split(qm_vnote_emit(v), E'\r\n')) AS line) WHERE line <> ''),
+       length(qm_vnote_get(qm_vnote_emit(v), 'body'))
+FROM (SELECT E'BEGIN:VNOTE\r\nSUMMARY:Fold\r\nBODY:' || repeat('Ω', 200) || E'\r\nEND:VNOTE\r\n' AS v);
+----
+true	200
