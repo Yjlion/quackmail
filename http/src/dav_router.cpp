@@ -3,6 +3,8 @@
 
 #include "quackmail/util.hpp"
 
+#include "duckdb/main/materialized_query_result.hpp"
+
 #include <cstdlib>
 
 namespace duckdb {
@@ -135,8 +137,8 @@ std::string CollectionHref(DavKind kind, const std::string &user, int64_t room_n
 	return HomeHref(kind, user) + std::to_string(room_num) + "/";
 }
 
-std::string ObjectHref(DavKind kind, const std::string &user, int64_t room_num, const std::string &euid) {
-	return CollectionHref(kind, user, room_num) + davx::NameForEuid(euid) + ObjectExt(kind);
+std::string ObjectHref(DavKind kind, const std::string &user, int64_t room_num, const std::string &name) {
+	return CollectionHref(kind, user, room_num) + Seg(name);
 }
 
 const char *ObjectExt(DavKind kind) {
@@ -210,6 +212,60 @@ bool ResolveCollection(Ctx &ctx, const DavPath &p, DavCollection &out) {
 	return true;
 }
 
+// ---- resource naming -----------------------------------------------------
+
+std::string ResourceNameFor(Ctx &ctx, const DavCollection &c, const std::string &euid) {
+	auto r = Exec(ctx.con, "SELECT name FROM citadel_dav_names WHERE room_num = $1 AND euid = $2 LIMIT 1",
+	              {Value::BIGINT(c.room.room_num), Value(euid)});
+	if (r) {
+		auto &mat = r->Cast<MaterializedQueryResult>();
+		if (mat.RowCount() > 0) {
+			return mat.GetValue(0, 0).ToString();
+		}
+	}
+	// The default: what an object created through the web UI or by the native
+	// protocol is served as, with no binding row needed.
+	return davx::NameForEuid(euid) + ObjectExt(c.kind);
+}
+
+std::string EuidForResource(Ctx &ctx, const DavCollection &c, const std::string &name) {
+	if (name.empty()) {
+		return std::string();
+	}
+	auto r = Exec(ctx.con, "SELECT euid FROM citadel_dav_names WHERE room_num = $1 AND name = $2",
+	              {Value::BIGINT(c.room.room_num), Value(name)});
+	if (r) {
+		auto &mat = r->Cast<MaterializedQueryResult>();
+		if (mat.RowCount() > 0) {
+			return mat.GetValue(0, 0).ToString();
+		}
+	}
+	// No binding: read the name as an encoded euid, which is what a client that
+	// does use the UID as the resource name produces.
+	return davx::EuidForName(StripExt(name));
+}
+
+void BindResourceName(Ctx &ctx, const DavCollection &c, const std::string &name,
+                      const std::string &euid) {
+	if (name.empty() || euid.empty()) {
+		return;
+	}
+	// Only where it differs from what the fallback would already produce. A row
+	// per object would be a second thing to keep correct for no gain.
+	if (davx::NameForEuid(euid) + ObjectExt(c.kind) == name) {
+		UnbindResourceName(ctx, c, name);
+		return;
+	}
+	Exec(ctx.con,
+	     "INSERT OR REPLACE INTO citadel_dav_names (room_num, name, euid) VALUES ($1, $2, $3)",
+	     {Value::BIGINT(c.room.room_num), Value(name), Value(euid)});
+}
+
+void UnbindResourceName(Ctx &ctx, const DavCollection &c, const std::string &name) {
+	Exec(ctx.con, "DELETE FROM citadel_dav_names WHERE room_num = $1 AND name = $2",
+	     {Value::BIGINT(c.room.room_num), Value(name)});
+}
+
 // ---- objects -------------------------------------------------------------
 
 std::vector<DavObject> ListObjects(Ctx &ctx, const DavCollection &c) {
@@ -230,6 +286,7 @@ std::vector<DavObject> ListObjects(Ctx &ctx, const DavCollection &c) {
 		DavObject o;
 		o.msgnum = msg.msgnum;
 		o.euid = msg.euid;
+		o.name = ResourceNameFor(ctx, c, msg.euid);
 		o.body = std::move(body);
 		o.msgtime = msg.msgtime;
 		out.push_back(std::move(o));
@@ -255,8 +312,21 @@ bool LoadObject(Ctx &ctx, const DavCollection &c, const std::string &euid, DavOb
 	}
 	out.msgnum = msg.msgnum;
 	out.euid = msg.euid;
+	out.name = ResourceNameFor(ctx, c, msg.euid);
 	out.body = std::move(body);
 	out.msgtime = msg.msgtime;
+	return true;
+}
+
+bool LoadObjectByName(Ctx &ctx, const DavCollection &c, const std::string &name, DavObject &out) {
+	std::string euid = EuidForResource(ctx, c, name);
+	if (euid.empty() || !LoadObject(ctx, c, euid, out)) {
+		return false;
+	}
+	// Serve it under the name it was asked for, not the one the binding table
+	// happens to prefer — otherwise a client following its own href would be
+	// told the resource lives somewhere else.
+	out.name = name;
 	return true;
 }
 

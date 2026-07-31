@@ -101,7 +101,7 @@ void DavGet(Ctx &ctx, const DavPath &p, bool head_only) {
 	}
 	DavCollection c;
 	DavObject o;
-	if (!ResolveCollection(ctx, p, c) || !LoadObject(ctx, c, p.euid, o)) {
+	if (!ResolveCollection(ctx, p, c) || !LoadObjectByName(ctx, c, p.name, o)) {
 		DavStatus(ctx, 404);
 		return;
 	}
@@ -168,24 +168,35 @@ void DavPut(Ctx &ctx, const DavPath &p) {
 		return;
 	}
 
-	// The resource name *is* the UID here.
+	// The resource name is the client's to choose, and it is not the UID.
 	//
-	// The store keys a groupware object by its own UID — that is the invariant
-	// the native ENT0 path, the web UI and this module all rely on to agree
-	// about what a second save means — and there is no name-to-UID mapping table
-	// to make a differently named resource resolvable afterwards. Storing under
-	// the body's UID while the client remembers a different href would give it a
-	// 404 on the very next GET, so the disagreement is reported now instead.
+	// This module first required the two to match, on the belief that every
+	// shipping client names a resource after the object's UID. vdirsyncer does
+	// not — it PUTs to a random UUID of its own — so that rule rejected a real
+	// client outright. The store still keys the object by its UID, because the
+	// native ENT0 path and the web UI depend on that; the name is *bound* to it
+	// instead.
 	//
-	// In practice this costs nothing: every client that ships names the resource
-	// after the UID.
-	if (p.euid != uid) {
+	// What is a genuine conflict is the one RFC 4791 actually defines: this UID
+	// already living in this collection under a different URI. Accepting that
+	// would give the collection two hrefs for one object, and a client that
+	// synced both would show the event twice.
+	std::string bound_name = ResourceNameFor(ctx, c, uid);
+	int64_t existing = quackmail::citadel::FindByEuid(ctx.con, c.room.room_num, uid);
+	if (existing >= 0 && bound_name != p.name) {
 		DavError(ctx, 409, c.kind == DavKind::AddressBook ? davx::kNsCardDav : davx::kNsCalDav,
 		         "no-uid-conflict");
 		return;
 	}
-
-	int64_t existing = quackmail::citadel::FindByEuid(ctx.con, c.room.room_num, uid);
+	// And a name already holding a *different* object is a conflict the other
+	// way round: overwriting it would silently destroy the object that is there.
+	std::string name_holds = EuidForResource(ctx, c, p.name);
+	if (!name_holds.empty() && name_holds != uid &&
+	    quackmail::citadel::FindByEuid(ctx.con, c.room.room_num, name_holds) >= 0) {
+		DavError(ctx, 409, c.kind == DavKind::AddressBook ? davx::kNsCardDav : davx::kNsCalDav,
+		         "no-uid-conflict");
+		return;
+	}
 
 	// The conditional headers, which are how two clients editing one event do
 	// not silently overwrite each other.
@@ -212,10 +223,15 @@ void DavPut(Ctx &ctx, const DavPath &p) {
 		return;
 	}
 
+	// Remember what the client calls it, so every href we emit afterwards — in a
+	// PROPFIND listing, a REPORT, a sync-collection removal — is the one it
+	// already has rather than a second spelling of the same resource.
+	BindResourceName(ctx, c, p.name, uid);
+
 	DavStatus(ctx, existing >= 0 ? 204 : 201);
 	ctx.resp.SetHeader("ETag", ETagFor(msgnum));
 	if (existing < 0) {
-		ctx.resp.SetHeader("Location", ObjectHref(c.kind, ctx.username, c.room.room_num, uid));
+		ctx.resp.SetHeader("Location", ObjectHref(c.kind, ctx.username, c.room.room_num, p.name));
 	}
 }
 
@@ -228,7 +244,7 @@ void DavDelete(Ctx &ctx, const DavPath &p) {
 	}
 	DavCollection c;
 	DavObject o;
-	if (!ResolveCollection(ctx, p, c) || !LoadObject(ctx, c, p.euid, o)) {
+	if (!ResolveCollection(ctx, p, c) || !LoadObjectByName(ctx, c, p.name, o)) {
 		DavStatus(ctx, 404);
 		return;
 	}
@@ -251,6 +267,9 @@ void DavDelete(Ctx &ctx, const DavPath &p) {
 		DavStatus(ctx, 409);
 		return;
 	}
+	// The binding goes with it, or the name would still resolve — and a later
+	// PUT reusing it would look like a conflict with an object that is gone.
+	UnbindResourceName(ctx, c, p.name);
 	DavStatus(ctx, 204);
 }
 
