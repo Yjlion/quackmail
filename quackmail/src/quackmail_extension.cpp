@@ -189,7 +189,7 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 
 	switch (bind.kind) {
 	case UmbrellaKind::VERSION:
-		gstate->rows.push_back({Value("QuackCit 0.4.0")});
+		gstate->rows.push_back({Value("QuackCit 0.6.0")});
 		break;
 	case UmbrellaKind::USER_ADD: {
 		std::string err;

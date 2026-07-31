@@ -31,10 +31,15 @@ prefixes still say `quackmail`; the product is QuackCit.
 | 10 | Web overhaul phase 2b: shared content-line grammar, vNote, viewer time zone, calendar/tasks/notes/blog views | PR #26 |
 | 10 | Web overhaul phase 3: MIME builder, two HTML sanitizers, rich compose with cid:, Sieve rule builder | PR #27 |
 | 10 | Web overhaul phase 4: `CanAdminister` on the RFC 4314 `a` right, per-room settings, self-serve rooms | PR #28 |
+| 11 | CalDAV + CardDAV at `/dav/` over the groupware rooms: XML reader/writer in core, the resource-name encoding and binding, sync tombstones | PR #30 |
+| 11 | JMAP Core + Mail at `/jmap/`: a JSON codec in core, Mailbox/Email/Thread/Identity/EmailSubmission, blob upload and download, one shared submission path with `smtp_out` | PR #31 |
 
 Phases 2 and 3 were validated byte-for-byte against the real Citadel server, and
 the **official `citadel` text client drives a full clean session** against
-QuackCit (login banner, `<K>nown rooms`, no spurious errors).
+QuackCit (login banner, `<K>nown rooms`, no spurious errors). Phase 11's DAV half
+was validated against two independent third-party clients (`caldav` 3.2.1 and
+vdirsyncer 0.20), which is what caught a design error the module's own tests had
+been passing over; its JMAP half has no equivalent probe.
 
 ## Decisions worth remembering
 
@@ -657,7 +662,11 @@ part become `_`), a blank line, then the body.
   packaging step has a **hardcoded extension list** that must be updated whenever
   a module is added.
 - **The version string lives in three places** and they must move together, or
-  `qm_version()` drifts the way it did before 0.3.x: the constant in
+  `qm_version()` drifts the way it did before 0.3.x — and the way it did *again*
+  through v0.4.1..v0.5.0, which all shipped with the code still saying 0.4.0
+  despite this note already existing. 0.6.0 skips the gap rather than
+  pretending those releases reported themselves correctly. The three are: the
+  constant in
   `quackmail/src/quackmail_extension.cpp`, the seeded `c_version` in
   `core/src/citadel_store.cpp`, and the assertion in `test/sql/quackmail.test`.
   Note the seed is `INSERT OR IGNORE`, so an existing database keeps whatever

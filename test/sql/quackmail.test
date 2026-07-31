@@ -26,7 +26,7 @@ require quackmail_spool
 query I
 SELECT version FROM qm_version();
 ----
-QuackCit 0.4.0
+QuackCit 0.6.0
 
 # Adding a user succeeds and is reflected in qm_status
 query II
