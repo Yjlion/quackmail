@@ -24,6 +24,7 @@ const std::vector<Route> &Routes() {
 		RegisterMailRoutes(r);
 		RegisterBbsRoutes(r);
 		// After the BBS routes: these share its /bbs/room/:n prefix.
+		RegisterRoomAdminRoutes(r);
 		RegisterViewRoutes(r);
 		RegisterPrefsRoutes(r);
 		RegisterAdminUserRoutes(r);

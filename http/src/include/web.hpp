@@ -75,6 +75,9 @@ struct Route {
 void RegisterStaticRoutes(std::vector<Route> &out);
 void RegisterAuthRoutes(std::vector<Route> &out);
 void RegisterBbsRoutes(std::vector<Route> &out);
+// Per-room management and self-serve creation. Ordinary user routes, gated on
+// citadel::CanAdminister rather than on the Aide role — see web_rooms.cpp.
+void RegisterRoomAdminRoutes(std::vector<Route> &out);
 void RegisterMailRoutes(std::vector<Route> &out);
 void RegisterPrefsRoutes(std::vector<Route> &out);
 void RegisterAdminUserRoutes(std::vector<Route> &out);
@@ -192,6 +195,12 @@ bool RequireUnlocked(Ctx &ctx, const quackmail::citadel::Room &room, const std::
 // no notion of ownership, so skipping this check is a direct IDOR.
 bool LoadMessageIn(Ctx &ctx, const quackmail::citadel::Room &room, int64_t msgnum,
                    quackmail::citadel::Message &out);
+
+// May this user create rooms of their own? `qm_room_create_axlevel` names the
+// access level it takes, defaulting to the aide level so nothing changes on an
+// existing server until an operator lowers it. Defined in web_rooms.cpp and
+// used by the sidebar as well as by the routes themselves.
+bool MayCreateRooms(const Ctx &ctx);
 
 // The canonical URL of a room, and the rendered view of one message (headers,
 // body, sandboxed HTML alternative, attachment list). Both defined in

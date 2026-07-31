@@ -1,0 +1,181 @@
+# name: test/sql/roomadmin.test
+# description: room administration — derived RFC 4314 rights, CanAdminister, and the reserved-name guard
+# group: [quackmail]
+#
+# Everything here goes through the qm_/cit_ table functions, because the
+# umbrella opens its own Connection and cannot see rows this harness connection
+# wrote. What that leaves out — private-room visibility in a listing, and the
+# web routes themselves — is asserted in test/integration/test_roomadmin.py.
+
+require quackmail
+
+# The citadel_* tables land from a table function's init, not from LOAD.
+query I
+SELECT count(*) FROM qm_status() WHERE metric = 'rooms';
+----
+1
+
+statement ok
+SELECT ok FROM qm_user_add('alice', 'sekrit');
+
+statement ok
+SELECT ok FROM qm_user_add('bob', 'sekrit');
+
+statement ok
+SELECT ok FROM cit_room_add('Team');
+
+# ---- the derived baseline -------------------------------------------------
+#
+# Nothing is stored for this room yet, so every letter below comes from the
+# room's own attributes. That is the whole design: qr_flags stays the single
+# source of truth and the ACL table only ever adds.
+
+query IIIII
+SELECT room, username, rights, can_post, can_administer FROM cit_room_rights('Team', 'alice');
+----
+Team	alice	lrswi	true	false
+
+# An unauthenticated caller derives nothing at all. It takes an explicit grant
+# to reach a room without signing in — which is what makes room_<name>@ safe by
+# default rather than open by default.
+query III
+SELECT rights, can_post, can_administer FROM cit_room_rights('Team', '');
+----
+(empty)	false	false
+
+# A room nobody has heard of is an empty listing, not a row of empty rights.
+query I
+SELECT count(*) FROM cit_room_rights('No Such Room', 'alice');
+----
+0
+
+# ---- delegation ------------------------------------------------------------
+#
+# `a` is what CanAdminister asks for, and an aide grants it from here or from
+# any IMAP client's SETACL. No new column, no QuackCit-only bit.
+
+statement ok
+SELECT ok FROM cit_room_acl_set('Team', 'alice', 'a');
+
+query II
+SELECT rights, can_administer FROM cit_room_rights('Team', 'alice');
+----
+lrswia	true
+
+# The grant names alice, so it does nothing for bob.
+query II
+SELECT rights, can_administer FROM cit_room_rights('Team', 'bob');
+----
+lrswi	false
+
+# Stored rights come back in kAclRights order however they were typed, so a
+# listing does not depend on the order the letters arrived in.
+statement ok
+SELECT ok FROM cit_room_acl_set('Team', 'alice', 'aixrl');
+
+query I
+SELECT rights FROM cit_room_acl('Team') WHERE identifier = 'alice';
+----
+lrixa
+
+# Revoking is an empty rights string, and it drops the row rather than storing
+# an empty one — so alice falls straight back to the derived baseline.
+statement ok
+SELECT ok FROM cit_room_acl_set('Team', 'alice', '');
+
+query I
+SELECT count(*) FROM cit_room_acl('Team');
+----
+0
+
+query II
+SELECT rights, can_administer FROM cit_room_rights('Team', 'alice');
+----
+lrswi	false
+
+# ---- "anyone" --------------------------------------------------------------
+
+statement ok
+SELECT ok FROM cit_room_acl_set('Team', 'anyone', 'lrsp');
+
+# `p` is the right an anonymous sender needs, and it is the only thing that
+# makes a room reachable at room_<name>@<fqdn>.
+query II
+SELECT rights, can_post FROM cit_room_rights('Team', '');
+----
+lrsp	true
+
+# It is additive for a signed-in user too — bob keeps his own letters and gains
+# the shared ones.
+query I
+SELECT rights FROM cit_room_rights('Team', 'bob');
+----
+lrswip
+
+# Even granted outright, `a` never makes an anonymous caller an administrator:
+# CanAdminister refuses an empty user before it looks at any rights at all.
+statement ok
+SELECT ok FROM cit_room_acl_set('Team', 'anyone', 'lrspa');
+
+query II
+SELECT rights, can_administer FROM cit_room_rights('Team', '');
+----
+lrspa	false
+
+statement ok
+SELECT ok FROM cit_room_acl_set('Team', 'anyone', '');
+
+# ---- read-only and private -------------------------------------------------
+
+statement ok
+SELECT ok FROM cit_room_add('Announcements');
+
+# A public room with no flags gives everyone `wi`; the checks below are the
+# baseline the web and telnet front-ends both read through CanPost.
+query II
+SELECT rights, can_post FROM cit_room_rights('Announcements', 'bob');
+----
+lrswi	true
+
+# ---- the reserved-name guard ----------------------------------------------
+#
+# A public room's internal key *is* its display name, while a personal room's is
+# "<usernum padded to ten digits>.<room>". So a public room by this name would
+# squat the key user 2's Mail room needs — and whoever gets there second fails
+# on a unique constraint rather than on anything a user could read.
+
+query II
+SELECT ok, note FROM cit_room_add('0000000002.Mail');
+----
+false	that name is reserved for personal mailboxes
+
+# The shape is ten digits and a dot, nothing looser. A name that merely starts
+# with digits, or has too few of them, is an ordinary room name.
+query I
+SELECT ok FROM cit_room_add('2026.Retrospective');
+----
+true
+
+query I
+SELECT ok FROM cit_room_add('0000000002 Mail');
+----
+true
+
+# Ten digits and a dot with nothing after it is not the shape either — the
+# personal form always carries a room name.
+query I
+SELECT ok FROM cit_room_add('0000000002.');
+----
+true
+
+query II
+SELECT ok, note FROM cit_room_add('');
+----
+false	room name may not be empty
+
+# A name already taken is still refused, which is the check that was there
+# before and is a different one.
+query II
+SELECT ok, note FROM cit_room_add('Team');
+----
+false	room already exists

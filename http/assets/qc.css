@@ -195,6 +195,15 @@ iframe.htmlpart {
 .msghead dt { color: var(--muted); font-size: .85em; }
 .msghead dd { margin: 0; }
 
+/* The RFC 4314 rights legend on a room's settings page: one letter, one
+   sentence. Same two-column grid as a message header, but keyed by a glyph. */
+dl.rights {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: .15rem .7rem; margin: var(--s2) 0; font-size: .9em;
+}
+dl.rights dt { font-family: var(--mono); }
+dl.rights dd { margin: 0; color: var(--muted); }
+
 /* ---- misc -------------------------------------------------------------- */
 
 .roomgrid {

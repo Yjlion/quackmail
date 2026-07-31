@@ -59,6 +59,7 @@ enum class UmbrellaKind {
 	CIT_FLOOR_ADD,
 	CIT_ROOM_ACL,
 	CIT_ROOM_ACL_SET,
+	CIT_ROOM_RIGHTS,
 	// Site policy administration — what the deploy/quackcitadm.sh CLI drives.
 	DOMAIN_ADD,
 	DOMAIN_REMOVE,
@@ -242,6 +243,21 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 		     Value(ok ? (bind.args[2].empty() ? ("removed " + bind.args[1])
 		                                      : (bind.args[1] + " = " + bind.args[2]))
 		              : err)});
+		break;
+	}
+	case UmbrellaKind::CIT_ROOM_RIGHTS: {
+		// The *derived* view, which cit_room_acl cannot show: rights come from
+		// the room's own attributes unioned with the stored grants, so the
+		// stored table alone never answers "may this person do this".
+		quackmail::citadel::Room room;
+		if (!quackmail::citadel::ResolveRoom(con, bind.args[1], bind.args[0], room)) {
+			break; // no such room visible to that user: an empty listing
+		}
+		std::string rights = quackmail::citadel::EffectiveRights(con, bind.args[1], room);
+		gstate->rows.push_back(
+		    {Value(room.display_name), Value(bind.args[1]), Value(rights),
+		     Value::BOOLEAN(quackmail::citadel::CanPost(con, bind.args[1], room)),
+		     Value::BOOLEAN(quackmail::citadel::CanAdminister(con, bind.args[1], room))});
 		break;
 	}
 	case UmbrellaKind::CIT_FLOOR_ADD: {
@@ -935,6 +951,17 @@ unique_ptr<FunctionData> CitRoomAclSetBind(ClientContext &, TableFunctionBindInp
 	b->args = {input.inputs[0].ToString(), input.inputs[1].ToString(), input.inputs[2].ToString()};
 	names = {"ok", "note"};
 	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> CitRoomRightsBind(ClientContext &, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::CIT_ROOM_RIGHTS;
+	b->args = {input.inputs[0].ToString(), input.inputs[1].ToString()};
+	names = {"room", "username", "rights", "can_post", "can_administer"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::BOOLEAN, LogicalType::BOOLEAN};
 	return std::move(b);
 }
 
@@ -1828,6 +1855,10 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(TableFunction("cit_room_acl_set",
 	                                      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                      RowsFunc, CitRoomAclSetBind, RowsInit));
+	// What one person may actually do in one room, derived rather than stored —
+	// the predicate the front-ends ask, exposed so it can be asserted in SQL.
+	loader.RegisterFunction(TableFunction("cit_room_rights", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                      RowsFunc, CitRoomRightsBind, RowsInit));
 
 	// MIME / message-format helpers (RFC 2045-2049, 822/2822/5322).
 	loader.RegisterFunction(
