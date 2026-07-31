@@ -294,12 +294,40 @@ def main():
         status, _, _ = d.go("GET", calendar + "nothing-here.ics")
         assert status == 404
 
-        # The name has to match the UID: the store keys an object by its own
-        # UID, so a resource stored under a different name could never be found
-        # again at the URL the client remembers.
+        # The resource name is the client's to choose, and need not be the UID.
+        #
+        # This is a regression test with a story: the name and the UID were
+        # first required to match, on the belief that every shipping client
+        # names a resource after the object's UID. vdirsyncer does not — it PUTs
+        # to a random UUID of its own — so that rule rejected a real client
+        # outright, and a live probe was what found it.
+        chosen = calendar + "a-name-of-my-own-choosing.ics"
+        other_event = EVENT.replace(EVENT_UID, "different-uid@example.com")
+        status, headers, _ = d.go("PUT", chosen, other_event.encode(),
+                                  {"Content-Type": "text/calendar"})
+        assert status == 201, f"a client-chosen resource name returned {status}"
+
+        # And it is addressable there afterwards, which is the whole point: a
+        # client remembers the href it PUT to.
+        status, _, body = d.go("GET", chosen)
+        assert status == 200 and "different-uid@example.com" in body, \
+            f"the object is not at the name it was PUT to ({status})"
+
+        # It also appears in the listing under that name rather than under a
+        # second spelling, or a client would sync the same object twice.
+        status, _, xml = d.propfind(calendar, prop(["D:getetag"]), depth="1")
+        listed = [h for h, _ in responses(xml) if h.endswith(".ics")]
+        assert chosen in listed, f"the listing does not use the client's name: {listed}"
+        assert len([h for h in listed if "different-uid" in h]) == 0, \
+            f"the object is listed under a second name as well: {listed}"
+        d.go("DELETE", chosen)
+
+        # What *is* a conflict is the one RFC 4791 defines: a UID that already
+        # lives in this collection under a different URI. Accepting it would
+        # give the collection two hrefs for one object.
         status, _, xml = d.go("PUT", calendar + "some-other-name.ics", EVENT.encode(),
                               {"Content-Type": "text/calendar"})
-        assert status == 409, f"a name/UID mismatch returned {status}"
+        assert status == 409, f"a duplicate UID at a new URI returned {status}"
         assert "no-uid-conflict" in xml, f"no precondition named: {xml}"
 
         # Something that is not iCalendar at all.

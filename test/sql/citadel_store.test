@@ -91,9 +91,26 @@ SELECT count(*) FROM duckdb_tables() WHERE table_name IN (
     'citadel_messages', 'citadel_room_msgs', 'citadel_room_tombstones',
     'citadel_room_state', 'citadel_msg_flags', 'citadel_config',
     'citadel_sessions', 'citadel_user_prefs', 'citadel_room_acl',
-    'citadel_express');
+    'citadel_express', 'citadel_dav_names');
 ----
-14
+15
+
+# What a DAV client calls each object.
+#
+# A resource name is not the object's UID: the store keys by UID, but a WebDAV
+# client owns the URL space and several shipping ones (vdirsyncer among them)
+# PUT to a random UUID of their own. A row exists only where the name differs
+# from the default encoding, so nothing created through the web UI needs one.
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index)
+FROM duckdb_columns() WHERE table_name = 'citadel_dav_names';
+----
+room_num,name,euid
+
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_dav_names_euid';
+----
+1
 
 # The token a collection's ctag and sync-token are built from spans both halves:
 # the largest message number pointed into the room, and the largest tombstone
