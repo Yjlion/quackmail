@@ -64,13 +64,28 @@ constexpr int64_t kAideRoom = 1;
 constexpr int64_t kAideAxLevel = 6;
 
 // Citadel default_view codes (VIEW_*): what kind of content a room holds.
+//
+// These numbers go on the wire in GETR/SETR, where a real Citadel client reads
+// them, so they are not ours to choose. Transcribed from the ROOM_VIEWS enum in
+// libcitadel/lib/libcitadel.h on the parity oracle — verify there, not against
+// documentation, before adding to this list.
+//
+// Not every code has a renderer here. An unimplemented view falls back to the
+// ordinary message list, which is always a truthful way to show a room: the
+// objects really are messages.
 enum RoomView {
-	VIEW_BBS = 0,       // ordinary message board
-	VIEW_MAILBOX = 1,   // mail folder
+	VIEW_BBS = 0,     // ordinary message board
+	VIEW_MAILBOX = 1, // mail folder
 	VIEW_ADDRESSBOOK = 2,
 	VIEW_CALENDAR = 3,
 	VIEW_TASKS = 4,
 	VIEW_NOTES = 5,
+	VIEW_WIKI = 6,
+	VIEW_CALBRIEF = 7, // the calendar, listed rather than gridded
+	VIEW_JOURNAL = 8,
+	VIEW_DRAFTS = 9,
+	VIEW_BLOG = 10,
+	VIEW_QUEUE = 11, // Citadel's own SMTP spool view, not a user view
 };
 
 struct Room {
@@ -349,6 +364,30 @@ bool DeleteMessage(duckdb::Connection &con, int64_t room_num, int64_t msgnum, st
 // Point a message into `to_room`, unlinking it from `from_room` unless is_copy.
 bool MoveMessage(duckdb::Connection &con, int64_t from_room, int64_t to_room, int64_t msgnum, bool is_copy,
                  std::string &err);
+
+// ---- groupware objects, addressed by euid --------------------------------
+//
+// Citadel identifies a contact, event or task by its euid (the object's own UID
+// from the vCard or iCalendar body) and *replaces* rather than appends when one
+// is saved again. Ordinary messages have no such identity — InsertMessage
+// ignores euid entirely — so this is a separate, deliberate operation rather
+// than something InsertMessage should start doing on its own.
+//
+// It lives here, not in a front-end, so the native ENT0/EUID path, the web UI
+// and any future CalDAV module all agree about what saving an object twice
+// means.
+
+// The msgnum in `room_num` carrying `euid`, or -1 when there is none.
+int64_t FindByEuid(duckdb::Connection &con, int64_t room_num, const std::string &euid);
+
+// Insert `msg` into `room_num`, replacing any message already there with the
+// same euid. Returns the new msgnum, or -1 with `err` set.
+//
+// The old message is unlinked from this room, not deleted globally — the same
+// rule DeleteMessage follows, so a copy pointed into another room survives.
+// Fails when msg.euid is empty: without one there is nothing to replace, and
+// silently appending would duplicate the object on every edit.
+int64_t UpsertByEuid(duckdb::Connection &con, const Message &msg, int64_t room_num, std::string &err);
 
 // ---- per-user string preferences ----------------------------------------
 // The US_* bit field holds the boolean BBS toggles; this holds anything with a

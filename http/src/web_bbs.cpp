@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_views.hpp"
 
 #include "quackmail/citadel_msg.hpp"
 #include "quackmail/mime.hpp"
@@ -166,6 +167,17 @@ void GetBbsRoom(Ctx &ctx) {
 	if (quackmail::citadel::IsZapped(ctx.con, ctx.username, room.room_num)) {
 		std::string err;
 		quackmail::citadel::ZapRoom(ctx.con, ctx.username, room.room_num, false, err);
+	}
+
+	// A room whose view has its own renderer uses it. `?view=raw` is a
+	// deliberate escape hatch back to the message list — you want it the first
+	// time a Contacts room turns out to hold something that is not a vCard.
+	if (ctx.req.Param("view") != "raw") {
+		const RoomViewHandler &vh = ViewFor((int)room.default_view);
+		if (vh.index) {
+			vh.index(ctx, room);
+			return;
+		}
 	}
 
 	std::string filter = ctx.req.Param("f");

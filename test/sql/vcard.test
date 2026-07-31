@@ -1,0 +1,172 @@
+# name: test/sql/vcard.test
+# description: vCard 3.0/4.0 parsing and serialization
+# group: [quackmail]
+#
+# Contacts arrive from phones, from Thunderbird, and from other people's
+# servers. The rule this file exists to pin down is that a card edited here
+# keeps the fields we do not understand — losing someone's custom field because
+# this parser had never heard of it is the worst thing a contact store can do.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# ---- the basics ------------------------------------------------------------
+
+query III
+SELECT qm_vcard_count(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada\r\nUID:a@x\r\nEND:VCARD\r\n'),
+       qm_vcard_fn(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada\r\nUID:a@x\r\nEND:VCARD\r\n'),
+       qm_vcard_euid(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada\r\nUID:a@x\r\nEND:VCARD\r\n');
+----
+1	Ada	a@x
+
+# Several cards in one file, which is what an address-book export looks like.
+
+query I
+SELECT qm_vcard_count(
+  E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:One\r\nEND:VCARD\r\n' ||
+  E'BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Two\r\nEND:VCARD\r\n' ||
+  E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Three\r\nEND:VCARD\r\n');
+----
+3
+
+# Anything that is not a vCard is 0 cards and NULL fields, never a guess.
+
+query III
+SELECT qm_vcard_count('just some text'),
+       qm_vcard_fn('just some text'),
+       qm_vcard_euid('');
+----
+0	NULL	NULL
+
+# ---- the display name ------------------------------------------------------
+# FN when there is one; otherwise assembled from N rather than shown with its
+# semicolons; otherwise the first address. A card with none of those is still
+# listable, because a row with no label at all cannot be clicked on.
+
+query IIII
+SELECT qm_vcard_fn(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada Lovelace\r\nEND:VCARD\r\n'),
+       qm_vcard_fn(E'BEGIN:VCARD\r\nVERSION:3.0\r\nN:Lovelace;Ada;;;\r\nEND:VCARD\r\n'),
+       qm_vcard_fn(E'BEGIN:VCARD\r\nVERSION:3.0\r\nEMAIL:ada@example.org\r\nEND:VCARD\r\n'),
+       qm_vcard_fn(E'BEGIN:VCARD\r\nVERSION:3.0\r\nUID:bare@x\r\nEND:VCARD\r\n');
+----
+Ada Lovelace	Ada Lovelace	ada@example.org	(no name)
+
+# ---- escaping --------------------------------------------------------------
+# \n \, \; and \\ all resolve on the way in. A structured property keeps its
+# components; a plain one keeps its semicolons as text.
+#
+# The newline is rendered as <LF> here rather than left in the value: an
+# embedded newline cannot be written in a sqllogictest expected block, and a
+# test that cannot state what it wants is not asserting anything.
+
+query II
+SELECT replace(qm_vcard_get(E'BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE:one\\ntwo\\; three\\, four\r\nEND:VCARD\r\n', 'NOTE'), E'\n', '<LF>'),
+       qm_vcard_get(E'BEGIN:VCARD\r\nVERSION:3.0\r\nADR:;;12 Main St.\\, Apt 3;Dublin;;D02;IE\r\nEND:VCARD\r\n', 'ADR');
+----
+one<LF>two; three, four	;;12 Main St., Apt 3;Dublin;;D02;IE
+
+# A backslash that escapes nothing keeps both characters rather than being
+# guessed at: vCard in the wild is full of stray backslashes that were never
+# meant as escapes, and dropping them silently corrupts addresses.
+
+query I
+SELECT qm_vcard_get(E'BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE:C:\\\\path\\\\file\r\nEND:VCARD\r\n', 'NOTE');
+----
+C:\path\file
+
+# ---- tolerance -------------------------------------------------------------
+# Real input has LF instead of CRLF, lowercase property names, folded lines and
+# blank lines. None of that is worth rejecting a contact over.
+
+query II
+SELECT qm_vcard_fn(E'begin:vcard\nversion:3.0\nfn:Messy Card\nend:vcard\n'),
+       qm_vcard_get(E'BEGIN:VCARD\nVERSION:3.0\nNOTE:first part\n  continued\n\nEND:VCARD\n', 'NOTE');
+----
+Messy Card	first part continued
+
+# A line with no colon is skipped rather than failing the whole card: one
+# malformed property should not cost the other twelve.
+
+query I
+SELECT qm_vcard_fn(E'BEGIN:VCARD\r\nVERSION:3.0\r\ngarbage line\r\nFN:Survived\r\nEND:VCARD\r\n');
+----
+Survived
+
+# ---- the round trip --------------------------------------------------------
+# The property this parser has never heard of has to come back out. This is the
+# assertion the whole design is for.
+
+query I
+SELECT qm_vcard_emit(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada\r\nX-INVENTED-BY-SOMEONE-ELSE:keep me\r\nUID:a@x\r\nEND:VCARD\r\n', 0)
+       LIKE '%X-INVENTED-BY-SOMEONE-ELSE:keep me%';
+----
+true
+
+# Emitting is idempotent: whatever emit produces, parsing and emitting again
+# produces byte for byte. Without this, saving a contact twice could drift.
+
+query I
+SELECT qm_vcard_emit(qm_vcard_emit(v, 0), 0) = qm_vcard_emit(v, 0)
+FROM (SELECT E'BEGIN:VCARD\r\nVERSION:3.0\r\nN:Ó Briain;Séamus;;Dr.;PhD\r\nFN:Dr. Séamus Ó Briain\r\nitem1.TEL;TYPE=WORK;TYPE=VOICE:+353 1 555 0100\r\nEMAIL;TYPE=INTERNET,PREF:s@example.ie\r\nNOTE:one\\ntwo\\; three\r\nADR;TYPE=WORK:;;12 Main St.\\, Apt 3;Dublin;;D02;IE\r\nCATEGORIES:Work,Research\r\nORG:Example Teo;Research\r\nX-CUSTOM:verbatim\r\nUID:abc@example.ie\r\nEND:VCARD\r\n' AS v);
+----
+true
+
+# A comma in a TYPE parameter is the list separator, so it must not be quoted:
+# TYPE="INTERNET,PREF" would be one type whose name contains a comma.
+
+query I
+SELECT qm_vcard_emit(E'BEGIN:VCARD\r\nVERSION:3.0\r\nEMAIL;TYPE=INTERNET,PREF:a@x\r\nEND:VCARD\r\n', 0)
+       LIKE '%TYPE=INTERNET,PREF:a@x%';
+----
+true
+
+# The version is taken from the card and can be overridden.
+
+query II
+SELECT qm_vcard_emit(E'BEGIN:VCARD\r\nVERSION:4.0\r\nFN:V\r\nEND:VCARD\r\n', 0) LIKE '%VERSION:4.0%',
+       qm_vcard_emit(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:V\r\nEND:VCARD\r\n', 4) LIKE '%VERSION:4.0%';
+----
+true	true
+
+# ---- folding ---------------------------------------------------------------
+# Every emitted line is at most 75 octets, and a fold never lands inside a
+# multi-byte character — Ω is two bytes, so a naive 75-byte cut would split one.
+
+query II
+-- encode() rather than ::BLOB, which refuses non-ASCII. Measuring octets and
+-- not characters is the point: a character-based check would pass a sheet that
+-- overflows the limit on every non-ASCII line.
+SELECT max(octet_length(encode(line))) <= 75,   -- nothing over the limit
+       count(*) FILTER (WHERE starts_with(line, ' ')) > 0   -- it really did fold
+FROM (
+  SELECT unnest(str_split(qm_vcard_emit(
+    E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Fold\r\nNOTE:' ||
+    repeat('Ω', 200) || E'\r\nEND:VCARD\r\n', 0), E'\r\n')) AS line
+) WHERE line <> '';
+----
+true	true
+
+# The value survives the fold. This is also what proves no fold landed inside a
+# character: a split two-byte Ω would not decode back to 200 of them.
+
+query I
+SELECT length(qm_vcard_get(qm_vcard_emit(
+  E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Fold\r\nNOTE:' || repeat('Ω', 200) || E'\r\nEND:VCARD\r\n', 0),
+  'NOTE'));
+----
+200
+
+# ---- euid ------------------------------------------------------------------
+# A card with no UID still needs a stable key, or every edit would create a
+# duplicate instead of replacing the original.
+
+query III
+SELECT qm_vcard_euid(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEMAIL:a@x\r\nEND:VCARD\r\n') =
+       qm_vcard_euid(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEMAIL:a@x\r\nEND:VCARD\r\n'),
+       qm_vcard_euid(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEMAIL:a@x\r\nEND:VCARD\r\n') <>
+       qm_vcard_euid(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEMAIL:b@x\r\nEND:VCARD\r\n'),
+       starts_with(qm_vcard_euid(E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEND:VCARD\r\n'), 'qc-');
+----
+true	true	true

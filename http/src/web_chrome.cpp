@@ -301,6 +301,39 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	item("/mail/compose", "Compose", "compose");
 	endgroup();
 
+	// The user's own groupware rooms, linked by number because that is how rooms
+	// are addressed. EnsureUserRooms provisions these at first login, so they
+	// exist for anyone signed in; a room that somehow does not is simply omitted
+	// rather than linked to a 404.
+	{
+		std::string groupware;
+		struct Personal {
+			const char *room;
+			const char *label;
+			const char *key;
+		};
+		static const Personal kPersonal[] = {
+		    {"Calendar", "Calendar", "calendar"},
+		    {"Contacts", "Contacts", "contacts"},
+		    {"Tasks", "Tasks", "tasks"},
+		    {"Notes", "Notes", "notes"},
+		};
+		for (auto &p : kPersonal) {
+			int64_t num = quackmail::citadel::FindUserRoom(ctx.con, ctx.username, p.room);
+			if (num < 0) {
+				continue;
+			}
+			std::string href = "/bbs/room/" + std::to_string(num);
+			std::string extra = (active == p.key) ? " aria-current=\"page\"" : "";
+			groupware += "<a href=\"" + A(href) + "\"" + extra + "><span>" + T(p.label) + "</span></a>";
+		}
+		if (!groupware.empty()) {
+			group("Groupware");
+			out += groupware;
+			endgroup();
+		}
+	}
+
 	group("Rooms");
 	item("/bbs/", "All rooms", "bbs");
 	item("/bbs/who", "Who is online", "who");

@@ -183,6 +183,11 @@ void EnsureCitadelSchema(Connection &con) {
 		)
 	)");
 
+	// Groupware looks messages up by euid rather than by number — that is how a
+	// contact or event is replaced in place. Without this every such lookup is a
+	// full scan of citadel_messages, which a calendar does once per item.
+	con.Query("CREATE INDEX IF NOT EXISTS idx_msg_euid ON citadel_messages(euid)");
+
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_state (
 			username  VARCHAR,
@@ -1458,6 +1463,45 @@ bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::strin
 		return false;
 	}
 	return true;
+}
+
+int64_t FindByEuid(Connection &con, int64_t room_num, const std::string &euid) {
+	if (euid.empty()) {
+		return -1;
+	}
+	auto v = ScalarP(con,
+	                 "SELECT m.msgnum FROM citadel_messages m "
+	                 "JOIN citadel_room_msgs r ON r.msgnum = m.msgnum "
+	                 "WHERE r.room_num = $1 AND m.euid = $2 "
+	                 "ORDER BY m.msgnum DESC LIMIT 1",
+	                 {Value::BIGINT(room_num), Value(euid)});
+	return v.IsNull() ? -1 : v.GetValue<int64_t>();
+}
+
+int64_t UpsertByEuid(Connection &con, const Message &msg, int64_t room_num, std::string &err) {
+	if (msg.euid.empty()) {
+		// Refused rather than treated as an insert. An object with no euid
+		// cannot be replaced, so accepting it here would quietly turn every
+		// subsequent save into a duplicate.
+		err = "a groupware object needs an euid";
+		return -1;
+	}
+
+	int64_t old = FindByEuid(con, room_num, msg.euid);
+
+	// InsertMessage runs its own transaction, so the replace cannot be wrapped
+	// in an outer one without nesting. Insert first and unlink second: the
+	// failure that leaves two copies of an object is recoverable and visible,
+	// whereas unlinking first and then failing to insert would lose it.
+	int64_t created = InsertMessage(con, msg, {room_num}, err);
+	if (created < 0) {
+		return -1;
+	}
+	if (old >= 0 && old != created) {
+		std::string ignored;
+		DeleteMessage(con, room_num, old, ignored);
+	}
+	return created;
 }
 
 bool MoveMessage(Connection &con, int64_t from_room, int64_t to_room, int64_t msgnum, bool is_copy,

@@ -54,3 +54,12 @@ query I
 SELECT count(*) FROM duckdb_tables() WHERE table_name = 'citadel_user_reg';
 ----
 1
+
+# Groupware objects are found by euid, not by message number: that is how saving
+# a contact or an event replaces the one already there instead of appending a
+# second copy. Without an index, every such lookup scans citadel_messages — and
+# a calendar does one per item it draws.
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_msg_euid';
+----
+1

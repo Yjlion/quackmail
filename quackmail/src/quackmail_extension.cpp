@@ -4,6 +4,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/vector_operations/binary_executor.hpp"
+#include "duckdb/common/vector_operations/ternary_executor.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -18,6 +19,7 @@
 #include "quackmail/feed.hpp"
 #include "quackmail/fetch.hpp"
 #include "quackmail/http.hpp"
+#include "quackmail/ical.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
@@ -26,7 +28,9 @@
 #include "quackmail/rbl.hpp"
 #include "quackmail/sieve.hpp"
 #include "quackmail/spf.hpp"
+#include "quackmail/tz.hpp"
 #include "quackmail/util.hpp"
+#include "quackmail/vcard.hpp"
 
 #include <cstdlib>
 #include <ctime>
@@ -1155,6 +1159,324 @@ void HttpKeepAliveScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	    });
 }
 
+// ---- vCard ---------------------------------------------------------------
+// Contacts are stored as a text/vcard part of an ordinary message, so the
+// parser is what stands between a phone's address book and this one. Exposed as
+// scalars so the escaping, folding and round-trip rules are assertable from
+// sqllogictest with no room and no session in the way.
+
+// qm_vcard_count(text) -> how many cards parsed; 0 when the input is not vCard.
+void VcardCountScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, int64_t>(args.data[0], result, args.size(), [&](string_t in) {
+		std::vector<quackmail::vcard::Card> cards;
+		quackmail::vcard::Parse(in.GetString(), cards);
+		return (int64_t)cards.size();
+	});
+}
+
+// qm_vcard_get(text, property) -> the property's value, NULL when absent.
+// Structured properties come back with their components joined by ';'.
+void VcardGetScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, string_t prop, ValidityMask &mask, idx_t idx) {
+		    quackmail::vcard::Card card;
+		    if (!quackmail::vcard::ParseOne(text.GetString(), card)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    const quackmail::vcard::Property *p = card.Find(prop.GetString());
+		    if (!p) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, p->Value());
+	    });
+}
+
+// qm_vcard_fn(text) -> the display name, however it has to be derived.
+void VcardFnScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    quackmail::vcard::Card card;
+		    if (!quackmail::vcard::ParseOne(in.GetString(), card)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, card.Fn());
+	    });
+}
+
+// qm_vcard_euid(text) -> the euid the card would be stored under.
+void VcardEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    quackmail::vcard::Card card;
+		    if (!quackmail::vcard::ParseOne(in.GetString(), card)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::vcard::EuidFor(card));
+	    });
+}
+
+// qm_vcard_emit(text, version) -> parse and re-serialize. This is the function
+// that makes the round-trip testable: emit(parse(x)) has to preserve every
+// property, including ones this code does not model.
+void VcardEmitScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, int64_t version, ValidityMask &mask, idx_t idx) {
+		    quackmail::vcard::Card card;
+		    if (!quackmail::vcard::ParseOne(text.GetString(), card)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(
+		        result, quackmail::vcard::Emit(card, version ? (int)version : card.version));
+	    });
+}
+
+// ---- iCalendar -----------------------------------------------------------
+// Events, tasks and journal entries, stored as a text/calendar part of an
+// ordinary message. Exposed as scalars so recurrence expansion — the part with
+// the most ways to be subtly wrong — is assertable without a calendar room.
+
+void IcalCountScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, int64_t>(args.data[0], result, args.size(), [&](string_t in) {
+		std::vector<quackmail::ical::Item> items;
+		quackmail::ical::ParseItems(in.GetString(), items);
+		return (int64_t)items.size();
+	});
+}
+
+// qm_ical_get(text, component, property) -> a property of the first component
+// of that type. "VEVENT", "SUMMARY".
+void IcalGetScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, string_t, string_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t text, string_t comp, string_t prop, ValidityMask &mask, idx_t idx) {
+		    quackmail::ical::Component root;
+		    if (!quackmail::ical::Parse(text.GetString(), root)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    const quackmail::ical::Component *c = root.Child(comp.GetString());
+		    if (!c) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    const quackmail::ical::Property *p = c->Find(prop.GetString());
+		    if (!p) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, p->value);
+	    });
+}
+
+// qm_ical_start(text) -> the first item's start instant, NULL when it has none.
+void IcalStartScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, int64_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) -> int64_t {
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::ParseItems(in.GetString(), items) || items.empty() ||
+		        !items[0].start.valid) {
+			    mask.SetInvalid(idx);
+			    return 0;
+		    }
+		    return items[0].start.epoch;
+	    });
+}
+
+void IcalEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::ParseItems(in.GetString(), items) || items.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::ical::EuidFor(items[0]));
+	    });
+}
+
+// qm_ical_expand_count(text, from, to) -> how many occurrences fall in the
+// window. The cheap way to assert a recurrence rule.
+void IcalExpandCountScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t, int64_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t text, int64_t from, int64_t to, ValidityMask &mask, idx_t idx) -> int64_t {
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::ParseItems(text.GetString(), items) || items.empty()) {
+			    mask.SetInvalid(idx);
+			    return 0;
+		    }
+		    return (int64_t)quackmail::ical::Expand(items[0], from, to).size();
+	    });
+}
+
+// qm_ical_expand_starts(text, from, to) -> the occurrence instants, comma
+// separated. Counting is not enough for the assertion that matters: a weekly
+// meeting has to keep its *local* hour across a DST change, and only the
+// instants show that.
+void IcalExpandStartsScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t text, int64_t from, int64_t to, ValidityMask &mask, idx_t idx) {
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::ParseItems(text.GetString(), items) || items.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    std::string out;
+		    for (auto &o : quackmail::ical::Expand(items[0], from, to)) {
+			    if (!out.empty()) {
+				    out += ",";
+			    }
+			    out += std::to_string(o.start);
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_ical_set_summary(text, summary) -> the calendar with the first item's
+// SUMMARY changed, everything else untouched.
+//
+// A small operation that happens to exercise the whole reason there are two
+// representations: alarms, X- properties and attendee parameters have to come
+// back out, because losing the reminder someone set on their phone is the worst
+// thing a calendar store can do.
+void IcalSetSummaryScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, string_t summary, ValidityMask &mask, idx_t idx) {
+		    quackmail::ical::Component root;
+		    std::vector<quackmail::ical::Item> items;
+		    if (!quackmail::ical::Parse(text.GetString(), root) ||
+		        !quackmail::ical::ParseItems(text.GetString(), items) || items.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    quackmail::ical::Item it = items[0];
+		    it.summary = summary.GetString();
+		    it.sequence++;
+		    if (!quackmail::ical::ApplyItem(root, it)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, quackmail::ical::Emit(root));
+	    });
+}
+
+// qm_ical_vtimezone(tzid, from_year, to_year) -> a VTIMEZONE from the bundled
+// database.
+void IcalVtimezoneScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t tzid, int64_t y0, int64_t y1, ValidityMask &mask, idx_t idx) {
+		    std::string out = quackmail::ical::EmitVtimezone(tzid.GetString(), (int)y0, (int)y1);
+		    if (out.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// ---- time zones ----------------------------------------------------------
+// The bundled IANA database, exposed so the offset tables can be asserted from
+// sqllogictest. Every date a calendar renders passes through these, and a
+// half-hour zone or a southern-hemisphere DST rule getting it wrong is the kind
+// of bug that only shows up in someone else's timezone.
+
+void TzVersionScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	ConstantVector::GetData<string_t>(result)[0] =
+	    StringVector::AddString(result, quackmail::tz::Version());
+	(void)args;
+}
+
+// qm_tz_canonical(tzid) -> the modern spelling, or NULL for an unknown zone.
+void TzCanonicalScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t in, ValidityMask &mask, idx_t idx) {
+		    std::string out = quackmail::tz::Canonical(in.GetString());
+		    if (out.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_tz_offset(tzid, epoch) -> seconds east of UTC, NULL for an unknown zone.
+void TzOffsetScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t zone, int64_t utc, ValidityMask &mask, idx_t idx) -> int64_t {
+		    int off = 0;
+		    bool dst = false;
+		    std::string abbrev;
+		    if (!quackmail::tz::OffsetAt(zone.GetString(), utc, off, dst, abbrev)) {
+			    mask.SetInvalid(idx);
+			    return 0;
+		    }
+		    return off;
+	    });
+}
+
+// qm_tz_abbrev(tzid, epoch) -> "EST", "AEDT", "+0530".
+void TzAbbrevScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t zone, int64_t utc, ValidityMask &mask, idx_t idx) {
+		    int off = 0;
+		    bool dst = false;
+		    std::string abbrev;
+		    if (!quackmail::tz::OffsetAt(zone.GetString(), utc, off, dst, abbrev)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, abbrev);
+	    });
+}
+
+// qm_tz_to_utc(tzid, wall) -> the instant, NULL for an unknown zone. An
+// ambiguous wall time resolves to the earlier of its two instants and a
+// nonexistent one shifts past the gap; qm_tz_to_utc_kind reports which
+// happened, because a caller that silently gets one of two answers has no way
+// to tell it was asked an unanswerable question.
+void TzToUtcScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t zone, int64_t wall, ValidityMask &mask, idx_t idx) -> int64_t {
+		    int64_t utc = 0;
+		    bool ambiguous = false, nonexistent = false;
+		    if (!quackmail::tz::ToUtc(zone.GetString(), wall, utc, ambiguous, nonexistent)) {
+			    mask.SetInvalid(idx);
+			    return 0;
+		    }
+		    return utc;
+	    });
+}
+
+// qm_tz_to_utc_kind(tzid, wall) -> 'normal' | 'ambiguous' | 'nonexistent'.
+void TzToUtcKindScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, int64_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t zone, int64_t wall, ValidityMask &mask, idx_t idx) {
+		    int64_t utc = 0;
+		    bool ambiguous = false, nonexistent = false;
+		    if (!quackmail::tz::ToUtc(zone.GetString(), wall, utc, ambiguous, nonexistent)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    const char *kind = ambiguous ? "ambiguous" : (nonexistent ? "nonexistent" : "normal");
+		    return StringVector::AddString(result, kind);
+	    });
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	// Ensure the shared schema exists as soon as the umbrella loads.
 	Connection con(loader.GetDatabaseInstance());
@@ -1252,6 +1574,31 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_html_escape", {V}, V, HtmlEscapeScalar));
 	loader.RegisterFunction(ScalarFunction("qm_url_path", {V}, V, UrlPathScalar));
 	loader.RegisterFunction(ScalarFunction("qm_http_keepalive", {V, V}, B, HttpKeepAliveScalar));
+
+	loader.RegisterFunction(ScalarFunction("qm_vcard_count", {V}, I, VcardCountScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vcard_get", {V, V}, V, VcardGetScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vcard_fn", {V}, V, VcardFnScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vcard_euid", {V}, V, VcardEuidScalar));
+	loader.RegisterFunction(ScalarFunction("qm_vcard_emit", {V, I}, V, VcardEmitScalar));
+
+	loader.RegisterFunction(ScalarFunction("qm_ical_count", {V}, I, IcalCountScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_get", {V, V, V}, V, IcalGetScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_start", {V}, I, IcalStartScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_euid", {V}, V, IcalEuidScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_expand_count", {V, I, I}, I, IcalExpandCountScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_expand_starts", {V, I, I}, V, IcalExpandStartsScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_set_summary", {V, V}, V, IcalSetSummaryScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_vtimezone", {V, I, I}, V, IcalVtimezoneScalar));
+
+	// Time zones. BIGINT rather than VARCHAR for the epoch arguments: DuckDB
+	// will not implicitly convert an INTEGER literal to VARCHAR, so a VARCHAR
+	// signature would force every caller to quote its numbers.
+	loader.RegisterFunction(ScalarFunction("qm_tz_version", {}, V, TzVersionScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_canonical", {V}, V, TzCanonicalScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_offset", {V, I}, I, TzOffsetScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_abbrev", {V, I}, V, TzAbbrevScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_to_utc", {V, I}, I, TzToUtcScalar));
+	loader.RegisterFunction(ScalarFunction("qm_tz_to_utc_kind", {V, I}, V, TzToUtcKindScalar));
 
 	// Per-user send quotas.
 	RegisterPolicyFn(loader, "qm_ratelimit_set", UmbrellaKind::RATELIMIT_SET, {V, I, I, I}, kOkNote, kOkNoteTypes);

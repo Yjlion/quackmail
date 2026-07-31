@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_views.hpp"
 
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/util.hpp"
@@ -22,6 +23,8 @@ const std::vector<Route> &Routes() {
 		RegisterAuthRoutes(r);
 		RegisterMailRoutes(r);
 		RegisterBbsRoutes(r);
+		// After the BBS routes: these share its /bbs/room/:n prefix.
+		RegisterViewRoutes(r);
 		RegisterPrefsRoutes(r);
 		RegisterAdminUserRoutes(r);
 		RegisterAdminPolicyRoutes(r);
