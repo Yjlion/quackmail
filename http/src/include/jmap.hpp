@@ -135,6 +135,12 @@ bool CheckAccount(JmapCtx &jc, const js::Value &args, js::Value &err);
 // reports as invalidResultReference.
 bool ResolveIds(JmapCtx &jc, const js::Value &args, std::vector<std::string> &out, bool &present);
 
+// Apply one Email/update patch: keywords and mailboxIds. Shared with
+// EmailSubmission's onSuccessUpdateEmail, which sends exactly the same shape and
+// must not grow a second copy of the "additions before removals" rule that makes
+// a move a move rather than a way to lose the message.
+bool ApplyEmailPatch(Ctx &ctx, int64_t msgnum, const js::Value &patch, std::string &why);
+
 // Serialize one Email into the JMAP shape, honouring a `properties` filter.
 js::Value EmailToJson(Ctx &ctx, const quackmail::citadel::Message &msg, int64_t room_num,
                       const js::Value &properties, const js::Value &body_properties,

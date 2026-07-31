@@ -940,10 +940,64 @@ js::Value EmailChanges(JmapCtx &jc, const js::Value &args) {
 	return out;
 }
 
-// Apply one Email/update patch. JMAP patches are flat pointer paths
-// ("keywords/$seen": true), and only the two a mail client actually sends are
-// honoured: keywords and mailboxIds.
+// Point a message at some mailboxes and unlink it from others.
+//
+// **Additions run before removals, always.** Moving a message from Drafts to
+// Sent is one patch naming both, and applying them in the order the client
+// happened to write them unlinks the only pointer first — after which there is
+// no source room left to copy from, the add silently fails, and the message
+// belongs to no mailbox at all. Ordering the two passes is what makes the
+// operation a move rather than a way to lose mail.
+bool ApplyMailboxWants(Ctx &ctx, int64_t msgnum, const std::vector<std::pair<int64_t, bool>> &wants,
+                       std::string &why) {
+	for (int pass = 0; pass < 2; pass++) {
+		const bool adding = (pass == 0);
+		for (const auto &w : wants) {
+			if (w.second != adding) {
+				continue;
+			}
+			Room room;
+			if (!ResolveMailbox(ctx, IdOf(w.first), room)) {
+				why = "no such mailbox";
+				return false;
+			}
+			if (!quackmail::citadel::CanPost(ctx.con, ctx.username, room)) {
+				why = "you cannot change that mailbox";
+				return false;
+			}
+			if (quackmail::citadel::MessageInRoom(ctx.con, room.room_num, msgnum) == adding) {
+				continue; // already where the client wants it
+			}
+			std::string err;
+			if (adding) {
+				// Filing into a mailbox is a copy, so the message keeps its
+				// pointers into every other room it is already in. The source
+				// is re-resolved here rather than captured earlier, because an
+				// earlier item in this same patch may have moved it.
+				Message msg;
+				int64_t from = -1;
+				if (!LoadEmailFor(ctx, msgnum, msg, from)) {
+					why = "no such email";
+					return false;
+				}
+				quackmail::citadel::MoveMessage(ctx.con, from, room.room_num, msgnum, true, err);
+			} else {
+				quackmail::citadel::DeleteMessage(ctx.con, room.room_num, msgnum, err);
+			}
+		}
+	}
+	return true;
+}
+
+} // namespace
+
+// Declared in jmap.hpp: EmailSubmission's onSuccessUpdateEmail sends the same
+// patch shape and must go through this rather than growing a second copy.
+//
+// JMAP patches are flat pointer paths ("keywords/$seen": true), and only the two
+// a mail client actually sends are honoured: keywords and mailboxIds.
 bool ApplyEmailPatch(Ctx &ctx, int64_t msgnum, const js::Value &patch, std::string &why) {
+	std::vector<std::pair<int64_t, bool>> wants;
 	for (const auto &m : patch.members) {
 		const std::string &path = m.first;
 		if (path == "keywords" && m.second.type == js::Value::Object) {
@@ -956,57 +1010,26 @@ bool ApplyEmailPatch(Ctx &ctx, int64_t msgnum, const js::Value &patch, std::stri
 			continue;
 		}
 		if (path.rfind("keywords/", 0) == 0) {
+			// A null value removes, which is how JMAP spells "unset" in a patch.
 			SetKeyword(ctx, msgnum, path.substr(9), m.second.AsBool(false));
 			continue;
 		}
 		if (path.rfind("mailboxIds/", 0) == 0) {
-			Room room;
-			if (!ResolveMailbox(ctx, path.substr(11), room)) {
+			int64_t id = IdNum(path.substr(11));
+			if (id < 0) {
 				why = "no such mailbox";
 				return false;
 			}
-			if (!quackmail::citadel::CanPost(ctx.con, ctx.username, room)) {
-				why = "you cannot change that mailbox";
-				return false;
-			}
-			std::string err;
-			if (m.second.AsBool(false)) {
-				// Filing into a mailbox is a copy: the message keeps its
-				// pointers into every other room it is already in.
-				int64_t from = -1;
-				Message msg;
-				if (!LoadEmailFor(ctx, msgnum, msg, from)) {
-					why = "no such email";
-					return false;
-				}
-				quackmail::citadel::MoveMessage(ctx.con, from, room.room_num, msgnum, true, err);
-			} else {
-				quackmail::citadel::DeleteMessage(ctx.con, room.room_num, msgnum, err);
-			}
+			wants.push_back(std::make_pair(id, m.second.AsBool(false)));
 			continue;
 		}
 		if (path == "mailboxIds" && m.second.type == js::Value::Object) {
-			// A wholesale replacement: file into everything named, unlink from
-			// everything not.
+			// A wholesale replacement: in everything named, out of everything
+			// not.
 			for (const auto &room : JmapMailboxes(ctx)) {
 				bool want = m.second[IdOf(room.room_num)].AsBool(false);
-				bool have = quackmail::citadel::MessageInRoom(ctx.con, room.room_num, msgnum);
-				if (want == have) {
-					continue;
-				}
-				if (!quackmail::citadel::CanPost(ctx.con, ctx.username, room)) {
-					why = "you cannot change that mailbox";
-					return false;
-				}
-				std::string err;
-				if (want) {
-					int64_t from = -1;
-					Message msg;
-					if (LoadEmailFor(ctx, msgnum, msg, from)) {
-						quackmail::citadel::MoveMessage(ctx.con, from, room.room_num, msgnum, true, err);
-					}
-				} else {
-					quackmail::citadel::DeleteMessage(ctx.con, room.room_num, msgnum, err);
+				if (want != quackmail::citadel::MessageInRoom(ctx.con, room.room_num, msgnum)) {
+					wants.push_back(std::make_pair(room.room_num, want));
 				}
 			}
 			continue;
@@ -1014,8 +1037,10 @@ bool ApplyEmailPatch(Ctx &ctx, int64_t msgnum, const js::Value &patch, std::stri
 		why = "cannot set " + path;
 		return false;
 	}
-	return true;
+	return ApplyMailboxWants(ctx, msgnum, wants, why);
 }
+
+namespace {
 
 js::Value EmailSet(JmapCtx &jc, const js::Value &args) {
 	js::Value err;

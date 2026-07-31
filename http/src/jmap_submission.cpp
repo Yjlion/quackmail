@@ -269,29 +269,19 @@ js::Value EmailSubmissionSet(JmapCtx &jc, const js::Value &args) {
 		sub.Set("deliveryStatus", delivered);
 		created.Set(m.first, sub);
 
-		// onSuccessUpdateEmail: file the sent message and mark it. This is how a
-		// client moves a draft to Sent in the same round trip it sends it.
+		// onSuccessUpdateEmail: file the sent message and mark it, which is how
+		// a client moves a draft to Sent in the round trip it sends it in.
+		//
+		// Through ApplyEmailPatch rather than by walking the patch here: it is
+		// the same shape Email/set takes, and it is where the rule lives that
+		// additions happen before removals. A second copy of that would be a
+		// second chance to unlink a message's only pointer and lose it.
+		(void)found;
 		const js::Value &on_success = args["onSuccessUpdateEmail"];
 		std::string key = "#" + m.first;
 		if (on_success.Has(key)) {
-			const js::Value &patch = on_success[key];
-			for (const auto &p : patch.members) {
-				if (p.first.rfind("keywords/", 0) == 0) {
-					SetKeyword(ctx, msgnum, p.first.substr(9), p.second.AsBool(false));
-				} else if (p.first.rfind("mailboxIds/", 0) == 0) {
-					Room target;
-					if (!ResolveMailbox(ctx, p.first.substr(11), target)) {
-						continue;
-					}
-					std::string move_err;
-					if (p.second.AsBool(false)) {
-						quackmail::citadel::MoveMessage(ctx.con, found.room_num, target.room_num, msgnum,
-						                                true, move_err);
-					} else {
-						quackmail::citadel::DeleteMessage(ctx.con, target.room_num, msgnum, move_err);
-					}
-				}
-			}
+			std::string patch_why;
+			ApplyEmailPatch(ctx, msgnum, on_success[key], patch_why);
 		}
 	}
 
