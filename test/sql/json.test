@@ -58,10 +58,17 @@ WHERE qm_json_valid(s);
 
 # ---- strings and escaping --------------------------------------------------
 
-query II
-SELECT qm_json_get('{"s":"a\"b"}', 's'), qm_json_get('{"s":"tab\there"}', 's');
+query I
+SELECT qm_json_get('{"s":"a\"b"}', 's');
 ----
-a"b	tab	here
+a"b
+
+# The C escapes, checked by length rather than by value: sqllogictest separates
+# columns with a tab, so a result containing one cannot be written down here.
+query I
+SELECT length(qm_json_get('{"s":"a\tb\nc\r\f\b\/"}', 's'));
+----
+9
 
 # A surrogate pair becomes one code point; a lone half is refused. Encoding an
 # unpaired surrogate as UTF-8 anyway is the CESU-8 that makes two systems
