@@ -56,6 +56,7 @@ enum class UmbrellaKind {
 	PARSE_DATE,
 	MIME_PARTS,
 	CIT_ROOM_ADD,
+	CIT_ROOM_KILL,
 	CIT_FLOOR_ADD,
 	CIT_ROOM_ACL,
 	CIT_ROOM_ACL_SET,
@@ -218,6 +219,17 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 		int64_t num = quackmail::citadel::CreateRoom(con, bind.args[0], 0, 0, "", 0, err);
 		gstate->rows.push_back(
 		    {Value::BOOLEAN(num >= 0), Value(num >= 0 ? ("room " + std::to_string(num) + " created") : err)});
+		break;
+	}
+	case UmbrellaKind::CIT_ROOM_KILL: {
+		quackmail::citadel::Room room;
+		std::string err;
+		if (!quackmail::citadel::ResolveRoom(con, "", bind.args[0], room)) {
+			gstate->rows.push_back({Value::BOOLEAN(false), Value("no such public room")});
+			break;
+		}
+		bool ok = quackmail::citadel::KillRoom(con, room.room_num, err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "room deleted" : err)});
 		break;
 	}
 	case UmbrellaKind::CIT_ROOM_ACL: {
@@ -928,6 +940,16 @@ unique_ptr<FunctionData> CitRoomAddBind(ClientContext &, TableFunctionBindInput 
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	auto b = make_uniq<RowsBindData>();
 	b->kind = UmbrellaKind::CIT_ROOM_ADD;
+	b->args = {input.inputs[0].ToString()};
+	names = {"ok", "note"};
+	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	return std::move(b);
+}
+
+unique_ptr<FunctionData> CitRoomKillBind(ClientContext &, TableFunctionBindInput &input,
+                                         vector<LogicalType> &return_types, vector<string> &names) {
+	auto b = make_uniq<RowsBindData>();
+	b->kind = UmbrellaKind::CIT_ROOM_KILL;
 	b->args = {input.inputs[0].ToString()};
 	names = {"ok", "note"};
 	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
@@ -1842,9 +1864,13 @@ void LoadInternal(ExtensionLoader &loader) {
 	    TableFunction("qm_user_remove", {LogicalType::VARCHAR}, RowsFunc, UserRemoveBind, RowsInit));
 	loader.RegisterFunction(TableFunction("qm_status", {}, RowsFunc, StatusBind, RowsInit));
 
-	// Citadel admin: create a public room / a floor.
+	// Citadel admin: create a public room / a floor, and delete a room. Deleting
+	// takes everything keyed by the room with it — message pointers, read state,
+	// access list, and any mailing list or feed configured against it.
 	loader.RegisterFunction(
 	    TableFunction("cit_room_add", {LogicalType::VARCHAR}, RowsFunc, CitRoomAddBind, RowsInit));
+	loader.RegisterFunction(
+	    TableFunction("cit_room_kill", {LogicalType::VARCHAR}, RowsFunc, CitRoomKillBind, RowsInit));
 	loader.RegisterFunction(
 	    TableFunction("cit_floor_add", {LogicalType::VARCHAR}, RowsFunc, CitFloorAddBind, RowsInit));
 

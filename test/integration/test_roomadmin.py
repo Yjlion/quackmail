@@ -309,14 +309,32 @@ def main():
         assert status == 400, "a room was deleted without its name being typed"
         assert flags_of(con, room_num) is not None
 
-        # KillRoom cannot reach the list tables, so deleting a room that is
-        # still a list would leave its address resolving to nothing. The route
-        # refuses rather than doing half the job.
+        # KillRoom does take the list configuration with it now, so this refusal
+        # is about authority rather than about leaving half a list behind: the
+        # address a list stops accepting mail for is the site's, so unmaking one
+        # is an aide's call and not a room administrator's.
         con.execute("CALL qm_list_create('Project X', 'projectx')")
         status, _, body = post(owner, settings + "/kill", {"confirm": "Project X"},
                                csrf_from=settings)
         assert status == 400 and "projectx@" in body, f"a list's room was deletable: {status}"
+        assert con.execute(
+            "SELECT count(*) FROM citadel_lists WHERE room_num = ?", [room_num]
+        ).fetchone()[0] == 1, "the refused delete removed the list anyway"
         con.execute("CALL qm_list_remove('Project X')")
+
+        # What an aide gets instead: room and list go together, so no address is
+        # left accepting mail for a room that is not there.
+        con.execute("CALL cit_room_add('Doomed')")
+        con.execute("CALL qm_list_create('Doomed', 'doomed')")
+        con.execute("CALL qm_list_sub_add('Doomed', 'erin@example.com', 'post')")
+        con.execute("CALL cit_room_kill('Doomed')")
+        assert con.execute(
+            "SELECT count(*) FROM citadel_lists WHERE address = 'doomed'"
+        ).fetchone()[0] == 0, "the list survived the room it was configured against"
+        assert con.execute(
+            "SELECT count(*) FROM citadel_list_subs s "
+            "WHERE NOT EXISTS (SELECT 1 FROM citadel_rooms r WHERE r.room_num = s.room_num)"
+        ).fetchone()[0] == 0, "subscribers were left pointing at a room that is gone"
 
         status, headers, _ = post(owner, settings + "/kill", {"confirm": "Project X"},
                                   csrf_from=settings)

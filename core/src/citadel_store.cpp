@@ -8,8 +8,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace quackmail {
 namespace citadel {
@@ -832,6 +834,33 @@ bool UpdateRoom(Connection &con, const Room &room, std::string &err) {
 	return true;
 }
 
+namespace {
+
+// The room-deleted hook registry. Guarded because EnsureSchema runs on every
+// session and sessions are threads.
+std::mutex &HookMutex() {
+	static std::mutex m;
+	return m;
+}
+
+std::vector<std::pair<std::string, RoomDeletedHook>> &Hooks() {
+	static std::vector<std::pair<std::string, RoomDeletedHook>> hooks;
+	return hooks;
+}
+
+} // namespace
+
+void RegisterRoomDeletedHook(const std::string &name, RoomDeletedHook hook) {
+	std::lock_guard<std::mutex> lock(HookMutex());
+	for (auto &h : Hooks()) {
+		if (h.first == name) {
+			h.second = hook;
+			return;
+		}
+	}
+	Hooks().emplace_back(name, hook);
+}
+
 bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
 	if (room_num == kLobbyRoom) {
 		err = "cannot delete the Lobby";
@@ -842,6 +871,19 @@ bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
 		// the server's own log channel rather than just removing a room.
 		err = "cannot delete the Aide room";
 		return false;
+	}
+	// Everything keyed by this room goes before the room itself, children first.
+	// What the layers above hung off it is theirs to remove, so they get asked
+	// rather than having their table names written in here — see
+	// RegisterRoomDeletedHook. Copy the list out from under the lock so a hook is
+	// free to register another one.
+	std::vector<std::pair<std::string, RoomDeletedHook>> hooks;
+	{
+		std::lock_guard<std::mutex> lock(HookMutex());
+		hooks = Hooks();
+	}
+	for (auto &h : hooks) {
+		h.second(con, room_num);
 	}
 	ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1", {Value::BIGINT(room_num)});
 	ExecP(con, "DELETE FROM citadel_room_state WHERE room_num = $1", {Value::BIGINT(room_num)});

@@ -54,6 +54,17 @@ was deliberately left out of it.
         than merely removing a room. Personal folders are refused by the
         settings page outright: renaming "Mail" would leave IMAP's INBOX and
         every Sieve `fileinto` pointing at a room that no longer exists.
+  - [x] **`KillRoom` no longer leaves rows keyed to a room that is gone.** A
+        `citadel_lists` row outliving its room left `ResolveAddress` pointing
+        the list's inbound address at nothing; a `quackmail_feeds` row left
+        `RunDue` polling a feed with nowhere to put the result. `listserv` and
+        `fetch` both depend on `citadel_store`, so it cannot call into them and
+        should not learn their table names either — each registers a cleanup
+        with `RegisterRoomDeletedHook` from its own `EnsureSchema` and
+        `KillRoom` runs the set. A new table keyed by `room_num` means a hook
+        beside it, not an edit to `citadel_store.cpp`. `cit_room_kill` exposes
+        the whole thing to SQL (and to `quackcitadm.sh room kill`), which is
+        what makes it assertable in `test/sql/`.
   - [x] `cit_room_rights(room, user)` — the *derived* view, which
         `cit_room_acl` cannot show, so the predicate the front-ends ask is
         assertable in SQL. `quackcitadm.sh room rights` beside it.

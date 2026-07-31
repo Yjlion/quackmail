@@ -420,10 +420,10 @@ void GetRoomSettings(Ctx &ctx) {
 		        "room; the pointers from this one, its access list and everyone's read state go.</p>";
 		listserv::List as_list;
 		if (listserv::GetList(ctx.con, room.room_num, as_list)) {
-			body += "<p class=\"muted\">Not while this room is the mailing list <code>" +
+			body += "<p class=\"muted\">Not from here while this room is the mailing list <code>" +
 			        T(listserv::ListAddress(ctx.con, as_list)) +
-			        "</code>, though — an aide has to remove the list first, or its address would go on "
-			        "accepting mail for a room that is no longer there.</p>";
+			        "</code>, though — that address is the site's, so removing the list is an aide's "
+			        "call rather than a room administrator's.</p>";
 		}
 	}
 
@@ -519,12 +519,12 @@ void PostRoomKill(Ctx &ctx) {
 		BadRequest(ctx, "The name you typed does not match this room, so nothing was deleted.");
 		return;
 	}
-	// KillRoom removes the room's messages, state and access list — not its list
-	// configuration, which lives in tables core/citadel_store.cpp cannot reach
-	// without a dependency cycle. Deleting the room out from under a list would
-	// leave an inbound address resolving to nothing, so this route refuses the
-	// order rather than doing half of it. Unmaking a list is an aide's action
-	// for the same reason making one is.
+	// KillRoom now takes the list configuration with it, so refusing here is no
+	// longer about leaving half a list behind — it is about who may do it. This
+	// route answers to a room's own administrator, not to an aide, and unmaking
+	// a list is an aide's action for the same reason making one is: the address
+	// it stops accepting mail for is the site's, not the room's. The aide-only
+	// /admin/rooms/kill deletes the room and the list together.
 	listserv::List still_a_list;
 	if (listserv::GetList(ctx.con, room.room_num, still_a_list)) {
 		BadRequest(ctx, "This room is still the mailing list " +

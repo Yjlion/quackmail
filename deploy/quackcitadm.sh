@@ -158,6 +158,7 @@ cmd_room() {
     action=${1:-list}; shift 2>/dev/null || true
     case "$action" in
         add)  need 1 "$@"; q "SELECT ok, note FROM cit_room_add($(sql_str "$1"))" ;;
+        kill) need 1 "$@"; q "SELECT ok, note FROM cit_room_kill($(sql_str "$1"))" ;;
         list) q "SELECT room_num, display_name, floor_num, qr_flags, highest_msg
                  FROM citadel_rooms ORDER BY floor_num, listorder, room_num" ;;
         acl)  need 1 "$@"
@@ -168,7 +169,7 @@ cmd_room() {
               fi ;;
         rights) need 2 "$@"
               q "SELECT * FROM cit_room_rights($(sql_str "$1"), $(sql_str "$2"))" ;;
-        *) die "unknown room command '$action' (add|list|acl|rights)" ;;
+        *) die "unknown room command '$action' (add|kill|list|acl|rights)" ;;
     esac
 }
 
@@ -371,8 +372,11 @@ usage: quackcitadm.sh <object> <action> [arguments]
               web: qm_web_force_https, qm_web_trusted_proxies, qm_web_hsts,
                    qm_web_origins, qm_web_admin_enabled (off by default),
                    qm_web_admin_require_tls
-  room      add <name> | list | acl <room> [<identifier> <rights>]
+  room      add <name> | kill <name> | list | acl <room> [<identifier> <rights>]
             rights <room> <user>
+              "kill" takes everything keyed by the room with it: message
+              pointers, read state, access list, and any mailing list or feed
+              configured against it. Neither the Lobby nor Aide may go.
               RFC 4314 rights: lrswipkxtea. Granting "anyone" the p right opens
               the room to mail at room_<name>@<fqdn>; no rights removes the entry.
               Granting a user the a right makes them that room's administrator.

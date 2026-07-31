@@ -51,7 +51,7 @@ extension.
 
 | Extension | Functions | Role |
 |---|---|---|
-| `quackmail` (umbrella) | `qm_version`, `qm_status`, `qm_user_add/remove`, `cit_room_add`, `cit_floor_add`, `qm_mime_*`, `qm_parse_date`, and the site-policy admin functions (`qm_domain_*`, `qm_alias_*`, `qm_acl_*`, `qm_rbl_*`, `qm_dkim_*`, `qm_ratelimit_*`, `qm_config_*`) | schema init, users, room/floor admin, MIME helpers, policy administration |
+| `quackmail` (umbrella) | `qm_version`, `qm_status`, `qm_user_add/remove`, `cit_room_add`, `cit_room_kill`, `cit_floor_add`, `qm_mime_*`, `qm_parse_date`, and the site-policy admin functions (`qm_domain_*`, `qm_alias_*`, `qm_acl_*`, `qm_rbl_*`, `qm_dkim_*`, `qm_ratelimit_*`, `qm_config_*`) | schema init, users, room/floor admin, MIME helpers, policy administration |
 | `quackmail_citadel` | `cit_start/_stop/_status` | ✅ native Citadel protocol (TCP 504; dev default 5040) |
 | `quackmail_smtp_in` | `qm_smtp_in_start/_stop/_status`, `qm_lmtp_*` | ✅ inbound MX with SPF/DKIM/DMARC/DNSBL, hosted domains, aliases and allow/block rules — plus an LMTP local-injection listener (24; dev 2033) |
 | `quackmail_smtp_out` | `qm_smtp_submission_start/_stop/_status`, `qm_smtp_smtps_*`, `qm_smtp_relay_*` | ✅ authenticated submission (587/465; dev 2587/2465) with DKIM signing and per-user rate limiting, plus the outbound queue drainer |

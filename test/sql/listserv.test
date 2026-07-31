@@ -348,3 +348,53 @@ query I
 SELECT count(*) FROM citadel_room_msgs WHERE msgnum IN (9001, 9002);
 ----
 2
+
+# ---- deleting the room takes the list with it -----------------------------
+#
+# The other direction, and the one nothing used to do. A citadel_lists row that
+# outlives its room leaves ResolveAddress pointing the list's inbound address at
+# a room_num that is no longer there, so the address goes on accepting mail for
+# nowhere. citadel_store.cpp cannot reach these tables to tidy them — listserv
+# depends on it, not the reverse — so listserv registers a room-deleted hook
+# from its EnsureSchema and KillRoom runs it.
+#
+# Chatter is still a list here and the Announce and Lobby lists are both gone,
+# so the three counts below are Chatter's alone.
+
+statement ok
+SELECT ok FROM qm_list_sub_add('Chatter', 'erin@example.com', 'post');
+
+statement ok
+INSERT INTO citadel_list_held (room_num, mail_from, subject, raw, received_at)
+SELECT room_num, 'mallory@example.com', 'Awaiting a moderator', 'Held body.'::BLOB, 1753660800
+FROM citadel_lists WHERE address = 'chatter';
+
+query III
+SELECT (SELECT count(*) FROM citadel_lists),
+       (SELECT count(*) FROM citadel_list_subs),
+       (SELECT count(*) FROM citadel_list_held);
+----
+1	1	1
+
+query II
+SELECT ok, note FROM cit_room_kill('Chatter');
+----
+true	room deleted
+
+query I
+SELECT count(*) FROM citadel_rooms WHERE display_name = 'Chatter';
+----
+0
+
+# The configuration, the subscribers and the moderation queue went with it.
+query III
+SELECT (SELECT count(*) FROM citadel_lists),
+       (SELECT count(*) FROM citadel_list_subs),
+       (SELECT count(*) FROM citadel_list_held);
+----
+0	0	0
+
+query I
+SELECT count(*) FROM qm_lists();
+----
+0
