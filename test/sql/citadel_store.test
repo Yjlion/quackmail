@@ -63,3 +63,52 @@ query I
 SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_msg_euid';
 ----
 1
+
+# The sync tombstones, and the column list rather than just the table name.
+#
+# `con.Query` results are not checked in EnsureCitadelSchema, so a statement
+# that will not parse fails in complete silence and every read of the table
+# afterwards returns nothing. That is not hypothetical: this table was first
+# written with a column called `at`, which DuckDB parses as a keyword (AT TIME
+# ZONE, and the time-travel FROM ... AT clause), and the only symptom was a
+# CalDAV client that never noticed a deletion.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name = 'citadel_room_tombstones';
+----
+1
+
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index)
+FROM duckdb_columns() WHERE table_name = 'citadel_room_tombstones';
+----
+room_num,seq,euid,msgnum,deleted_at
+
+# Every table EnsureCitadelSchema claims to create, in one assertion, so the
+# next one added silently cannot go missing the same way.
+query I
+SELECT count(*) FROM duckdb_tables() WHERE table_name IN (
+    'citadel_users', 'citadel_user_reg', 'citadel_floors', 'citadel_rooms',
+    'citadel_messages', 'citadel_room_msgs', 'citadel_room_tombstones',
+    'citadel_room_state', 'citadel_msg_flags', 'citadel_config',
+    'citadel_sessions', 'citadel_user_prefs', 'citadel_room_acl',
+    'citadel_express');
+----
+14
+
+# The token a collection's ctag and sync-token are built from spans both halves:
+# the largest message number pointed into the room, and the largest tombstone
+# sequence. A deletion has to move it, which is the whole reason the table
+# exists — citadel_rooms.highest_msg only ever grows.
+statement ok
+INSERT INTO citadel_room_tombstones (room_num, seq, euid, msgnum, deleted_at)
+VALUES (0, 999999, 'gone@example.com', 4242, 1753900000);
+
+query I
+SELECT greatest(
+    coalesce((SELECT max(msgnum) FROM citadel_room_msgs WHERE room_num = 0), 0),
+    coalesce((SELECT max(seq) FROM citadel_room_tombstones WHERE room_num = 0), 0));
+----
+999999
+
+statement ok
+DELETE FROM citadel_room_tombstones WHERE seq = 999999;

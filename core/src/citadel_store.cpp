@@ -207,9 +207,13 @@ void EnsureCitadelSchema(Connection &con) {
 		CREATE TABLE IF NOT EXISTS citadel_room_tombstones (
 			room_num BIGINT,
 			seq      BIGINT,
-			euid     VARCHAR DEFAULT '',
-			msgnum   BIGINT,
-			at       BIGINT,
+			euid       VARCHAR DEFAULT '',
+			msgnum     BIGINT,
+			-- Not `at`: DuckDB parses AT as a keyword (AT TIME ZONE, and the
+			-- time-travel FROM ... AT clause), so the column name would take
+			-- the whole CREATE down — silently, because con.Query's result is
+			-- not checked here any more than it is for the tables above.
+			deleted_at BIGINT,
 			PRIMARY KEY (room_num, seq)
 		)
 	)");
@@ -1597,7 +1601,7 @@ bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::strin
 	auto seq_v = ScalarP(con, "SELECT nextval('citadel_msg_seq')", {});
 	if (!seq_v.IsNull()) {
 		ExecP(con,
-		      "INSERT OR REPLACE INTO citadel_room_tombstones (room_num, seq, euid, msgnum, at) "
+		      "INSERT OR REPLACE INTO citadel_room_tombstones (room_num, seq, euid, msgnum, deleted_at) "
 		      "VALUES ($1, $2, $3, $4, $5)",
 		      {Value::BIGINT(room_num), Value::BIGINT(seq_v.GetValue<int64_t>()), Value(euid),
 		       Value::BIGINT(msgnum), Value::BIGINT((int64_t)std::time(nullptr))});
@@ -1651,7 +1655,7 @@ void PruneTombstones(Connection &con, int64_t older_than_seconds) {
 		return;
 	}
 	int64_t cutoff = (int64_t)std::time(nullptr) - older_than_seconds;
-	ExecP(con, "DELETE FROM citadel_room_tombstones WHERE at < $1", {Value::BIGINT(cutoff)});
+	ExecP(con, "DELETE FROM citadel_room_tombstones WHERE deleted_at < $1", {Value::BIGINT(cutoff)});
 }
 
 int64_t FindByEuid(Connection &con, int64_t room_num, const std::string &euid) {
