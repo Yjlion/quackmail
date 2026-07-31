@@ -101,10 +101,15 @@ false
 
 # It has to be escaped on the way out too, or a round trip would produce
 # something the parser just rejected.
-query I
-SELECT qm_json_normalize('{"s":"a\nb"}');
+#
+# Asserted as the property rather than as a literal: a backslash in an expected
+# value is not something this harness passes through untouched.
+query III
+SELECT qm_json_valid(qm_json_normalize('{"s":"a\nb"}')),
+       length(qm_json_normalize('{"s":"a\nb"}')),
+       length(qm_json_get('{"s":"a\nb"}', 's'));
 ----
-{"s":"a\nb"}
+true	12	3
 
 # Valid UTF-8 goes out as itself rather than as \u escapes: smaller, and what
 # every other JMAP implementation emits.
