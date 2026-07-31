@@ -16,6 +16,7 @@ Run after `make release` so the loadable extensions exist under
 build/release/extension.
 """
 import http.cookiejar
+import imaplib
 import os
 import re
 import time
@@ -29,6 +30,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 EXT_DIR = os.path.join(REPO, "build", "release", "extension")
 HOST = "127.0.0.1"
 PORT = 18085
+PORT_IMAP = 11435
 BASE = f"http://{HOST}:{PORT}"
 
 
@@ -96,7 +98,10 @@ def flags_of(con, room_num):
 
 def main():
     con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-    for name in ("quackmail", "quackmail_citadel", "quackmail_http"):
+    # IMAP is here for one section: the whole design rests on `a` being one
+    # right that every front-end reads the same way, and nothing else in the
+    # suite crosses protocols to prove it.
+    for name in ("quackmail", "quackmail_citadel", "quackmail_http", "quackmail_imap"):
         con.execute(f"LOAD '{ext(name)}'")
 
     for user, ax in (("owner", 4), ("member", 4), ("stranger", 4), ("boss", 6)):
@@ -110,7 +115,9 @@ def main():
 
     note = con.execute(f"SELECT note FROM qm_http_start('{HOST}', {PORT})").fetchone()[0]
     assert note == "started", f"http did not start: {note}"
-    time.sleep(0.4)
+    note = con.execute(f"SELECT note FROM qm_imap_start('{HOST}', {PORT_IMAP})").fetchone()[0]
+    assert note == "started", f"imap did not start: {note}"
+    time.sleep(0.5)
 
     try:
         owner = sign_in("owner", "secret")
@@ -334,6 +341,59 @@ def main():
             )
             assert status == 400, f"room {reserved} was deletable: {status}"
 
+        # ---- delegation crosses protocols ---------------------------------
+        #
+        # The claim the whole design rests on: `a` is one right, stored once, and
+        # an aide delegates a room from whatever client is already open. Nothing
+        # else in the suite exercises the crossing.
+        con.execute("CALL cit_room_add('Steering')")
+        steering = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'Steering'"
+        ).fetchone()[0]
+        status, _, _ = request(member, BASE + f"/bbs/room/{steering}/settings")
+        assert status == 403, "a room was administrable before anyone granted it"
+
+        imap = imaplib.IMAP4(HOST, PORT_IMAP)
+        assert "ACL" in imap.capabilities, "the IMAP listener does not advertise ACL"
+        imap.login("boss", "secret")
+        box = next(
+            b.decode().split(' "/" ')[-1].strip('"')
+            for b in imap.list()[1]
+            if "Steering" in b.decode()
+        )
+        typ, _ = imap._simple_command("SETACL", f'"{box}"', "member", "lrswia")
+        assert typ == "OK", f"SETACL failed: {typ}"
+        imap.logout()
+
+        status, _, page = request(member, BASE + f"/bbs/room/{steering}/settings")
+        assert status == 200, f"a SETACL grant did not reach the web: {status}"
+        # And it is a working grant, not just a visible page.
+        status, _, _ = post(
+            member, f"/bbs/room/{steering}/settings/save",
+            {"display_name": "Steering Group", "floor": "0", "view": "0", "listorder": "0",
+             "password": ""},
+            csrf_from=f"/bbs/room/{steering}/settings",
+        )
+        assert status == 303
+        assert con.execute(
+            "SELECT display_name FROM citadel_rooms WHERE room_num = ?", [steering]
+        ).fetchone()[0] == "Steering Group"
+
+        # Revocation crosses back. The mailbox path follows the room's new name,
+        # which is itself a check that the rename really moved it.
+        imap = imaplib.IMAP4(HOST, PORT_IMAP)
+        imap.login("boss", "secret")
+        box = next(
+            b.decode().split(' "/" ')[-1].strip('"')
+            for b in imap.list()[1]
+            if "Steering Group" in b.decode()
+        )
+        typ, _ = imap._simple_command("DELETEACL", f'"{box}"', "member")
+        assert typ == "OK", f"DELETEACL failed: {typ}"
+        imap.logout()
+        status, _, _ = request(member, BASE + f"/bbs/room/{steering}/settings")
+        assert status == 403, f"a DELETEACL revocation did not reach the web: {status}"
+
         # ---- personal folders are not rooms to administer -----------------
         mail_num = con.execute(
             "SELECT r.room_num FROM citadel_rooms r JOIN citadel_users u "
@@ -346,6 +406,7 @@ def main():
         print("test_roomadmin: OK")
     finally:
         con.execute("CALL qm_http_stop()")
+        con.execute("CALL qm_imap_stop()")
         con.close()
 
 
