@@ -31,6 +31,13 @@ enum class Role {
 	Anon, // no session needed
 	User, // any signed-in user
 	Aide, // axlevel >= 6, plus the admin-area TLS and enable gates
+	// A programmatic client rather than a browser: CalDAV, CardDAV. Same
+	// credentials as IMAP, presented as HTTP Basic, and answered with 401 rather
+	// than a redirect to the login page. Exempt from CSRF, which a client that
+	// has never seen an HTML form cannot possibly satisfy — and does not need
+	// to, because Basic credentials are not ambient authority the way a cookie
+	// is, so there is nothing for a cross-site request to ride.
+	Dav,
 };
 
 struct Ctx {
@@ -65,6 +72,9 @@ struct Ctx {
 using Handler = void (*)(Ctx &);
 
 struct Route {
+	// The HTTP method, or "*" for a route that takes every verb and dispatches
+	// them itself. Only the DAV subtree uses "*": ten verbs would otherwise be
+	// ten entries in a table that is scanned linearly on every request.
 	const char *method;
 	const char *pattern;
 	Role role;
@@ -86,6 +96,9 @@ void RegisterAdminOpsRoutes(std::vector<Route> &out);
 // Also contributes the anonymous /lists self-service pages, which live beside
 // the admin ones because they share the same model.
 void RegisterAdminListRoutes(std::vector<Route> &out);
+// CalDAV and CardDAV over the groupware rooms, plus the .well-known redirects
+// that let a client find them. Defined in dav_router.cpp.
+void RegisterDavRoutes(std::vector<Route> &out);
 
 // Handle one already-parsed request: resolve the session, apply the transport
 // and role gates, verify CSRF, dispatch. Always fills `resp`.

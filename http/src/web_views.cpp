@@ -93,17 +93,20 @@ std::string WrapObject(Ctx &ctx, const std::string &content_type, const std::str
 	return out;
 }
 
-bool SaveObject(Ctx &ctx, const Room &room, const std::string &euid, const std::string &subject,
-                const std::string &content_type, const std::string &body) {
+int64_t SaveObjectRaw(Ctx &ctx, const Room &room, const std::string &euid, const std::string &subject,
+                      const std::string &content_type, const std::string &body, int &status,
+                      std::string &err) {
 	// The one post predicate. Re-deriving it is how the read-only flag stopped
 	// applying to a front-end once before.
 	if (!quackmail::citadel::CanPost(ctx.con, ctx.username, room)) {
-		Forbidden(ctx, "You cannot add anything to this room.");
-		return false;
+		status = 403;
+		err = "You cannot add anything to this room.";
+		return -1;
 	}
 	if (euid.empty()) {
-		BadRequest(ctx, "That object has no identifier, so it cannot be saved.");
-		return false;
+		status = 400;
+		err = "That object has no identifier, so it cannot be saved.";
+		return -1;
 	}
 
 	Message msg;
@@ -117,12 +120,30 @@ bool SaveObject(Ctx &ctx, const Room &room, const std::string &euid, const std::
 	msg.node = ConfigStr(ctx.con, "c_nodename", "");
 	msg.raw = WrapObject(ctx, content_type, body, subject, euid);
 
-	std::string err;
-	if (quackmail::citadel::UpsertByEuid(ctx.con, msg, room.room_num, err) < 0) {
-		BadRequest(ctx, err.empty() ? "The object could not be saved." : err);
-		return false;
+	std::string store_err;
+	int64_t msgnum = quackmail::citadel::UpsertByEuid(ctx.con, msg, room.room_num, store_err);
+	if (msgnum < 0) {
+		status = 400;
+		err = store_err.empty() ? "The object could not be saved." : store_err;
+		return -1;
 	}
-	return true;
+	status = 200;
+	return msgnum;
+}
+
+bool SaveObject(Ctx &ctx, const Room &room, const std::string &euid, const std::string &subject,
+                const std::string &content_type, const std::string &body) {
+	int status = 200;
+	std::string err;
+	if (SaveObjectRaw(ctx, room, euid, subject, content_type, body, status, err) >= 0) {
+		return true;
+	}
+	if (status == 403) {
+		Forbidden(ctx, err);
+	} else {
+		BadRequest(ctx, err);
+	}
+	return false;
 }
 
 // ---- routes --------------------------------------------------------------

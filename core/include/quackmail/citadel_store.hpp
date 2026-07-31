@@ -433,6 +433,42 @@ int64_t FindByEuid(duckdb::Connection &con, int64_t room_num, const std::string 
 // silently appending would duplicate the object on every edit.
 int64_t UpsertByEuid(duckdb::Connection &con, const Message &msg, int64_t room_num, std::string &err);
 
+// ---- what changed in a room ----------------------------------------------
+//
+// Enough for a synchronizing client (CalDAV's sync-collection, JMAP's /changes)
+// to catch up without re-reading a whole collection.
+//
+// Additions need no bookkeeping: msgnum comes from a monotone sequence, so
+// "newer than N" is a range scan. Removals do, because DeleteMessage unlinks the
+// pointer row and leaves nothing behind — hence citadel_room_tombstones, written
+// only on the delete path so the insert path (every inbound message the server
+// accepts) is untouched.
+
+struct RoomChange {
+	int64_t seq = 0;   // position in the shared monotone space; the sync cursor
+	std::string euid;  // the resource that changed, "" for an ordinary message
+	int64_t msgnum = 0;
+	bool deleted = false;
+};
+
+// The collection's current version: the largest seq anything in this room has
+// reached. Changes on an insert *and* on a delete, which is what makes it usable
+// as a CalDAV ctag and sync-token. 0 for a room nothing has ever touched.
+int64_t RoomChangeToken(duckdb::Connection &con, int64_t room_num);
+
+// Everything that has happened in `room_num` since `since`, in seq order.
+//
+// A replaced object appears twice — once as its new msgnum, once as the
+// tombstone for the msgnum it displaced — so a caller must resolve each euid
+// through FindByEuid rather than trusting `deleted` alone: still resolves means
+// changed, no longer resolves means removed.
+std::vector<RoomChange> RoomChangesSince(duckdb::Connection &con, int64_t room_num, int64_t since);
+
+// Drop tombstones older than `older_than_seconds`. A client whose sync token
+// predates the cutoff is answered with a full re-listing instead, which is what
+// the sync-collection spec requires of an expired token.
+void PruneTombstones(duckdb::Connection &con, int64_t older_than_seconds);
+
 // ---- per-user string preferences ----------------------------------------
 // The US_* bit field holds the boolean BBS toggles; this holds anything with a
 // value. An unset preference returns `dflt`, which is how "follow the site

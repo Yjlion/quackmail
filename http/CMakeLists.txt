@@ -40,6 +40,13 @@ set(EXTENSION_SOURCES
     src/web_admin_policy.cpp
     src/web_admin_ops.cpp
     src/web_admin_lists.cpp
+    # CalDAV and CardDAV. Not an extension of their own: they are a second
+    # projection of the same groupware rooms the pages above render, over the
+    # same two listeners, so they ride here rather than binding a port.
+    src/dav_router.cpp
+    src/dav_propfind.cpp
+    src/dav_report.cpp
+    src/dav_objects.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

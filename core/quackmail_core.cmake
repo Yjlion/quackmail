@@ -32,6 +32,9 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/telnet.cpp
         ${QUACKMAIL_CORE_DIR}/src/wildmat.cpp
         ${QUACKMAIL_CORE_DIR}/src/xmlstream.cpp
+        # The pure half of WebDAV: the XML document reader and writer built on
+        # that tokenizer, plus the resource-name encoding.
+        ${QUACKMAIL_CORE_DIR}/src/davxml.cpp
         ${QUACKMAIL_CORE_DIR}/src/server_controller.cpp
         ${QUACKMAIL_CORE_DIR}/src/server_controls.cpp
         ${QUACKMAIL_CORE_DIR}/src/worker.cpp

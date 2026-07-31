@@ -190,6 +190,30 @@ void EnsureCitadelSchema(Connection &con) {
 	// full scan of citadel_messages, which a calendar does once per item.
 	con.Query("CREATE INDEX IF NOT EXISTS idx_msg_euid ON citadel_messages(euid)");
 
+	// Removals, so a synchronizing client can be told about them.
+	//
+	// An addition is already discoverable: msgnum comes from a monotone sequence,
+	// so "what is new since token N" is a range scan of citadel_room_msgs and the
+	// insert path needs no help. A removal leaves nothing behind at all —
+	// DeleteMessage unlinks the pointer row, and citadel_rooms.highest_msg only
+	// ever grows via greatest() — so without this table a deletion is invisible
+	// to any token derived from the store, and a CalDAV client would keep showing
+	// an event the user cancelled.
+	//
+	// `seq` comes from citadel_msg_seq, the same sequence msgnum does, so the two
+	// share one monotone space and a single integer is a valid sync token for
+	// both halves.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_room_tombstones (
+			room_num BIGINT,
+			seq      BIGINT,
+			euid     VARCHAR DEFAULT '',
+			msgnum   BIGINT,
+			at       BIGINT,
+			PRIMARY KEY (room_num, seq)
+		)
+	)");
+
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_state (
 			username  VARCHAR,
@@ -888,6 +912,9 @@ bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
 	ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1", {Value::BIGINT(room_num)});
 	ExecP(con, "DELETE FROM citadel_room_state WHERE room_num = $1", {Value::BIGINT(room_num)});
 	ExecP(con, "DELETE FROM citadel_room_acl WHERE room_num = $1", {Value::BIGINT(room_num)});
+	// No tombstones either: there is no collection left for anyone to synchronize
+	// against, and the room number is reusable.
+	ExecP(con, "DELETE FROM citadel_room_tombstones WHERE room_num = $1", {Value::BIGINT(room_num)});
 	auto r = ExecP(con, "DELETE FROM citadel_rooms WHERE room_num = $1", {Value::BIGINT(room_num)});
 	if (!r) {
 		err = "delete failed";
@@ -1548,6 +1575,14 @@ bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::strin
 		err = "message not found in this room";
 		return false;
 	}
+	// The euid is read before the unlink, because the tombstone is keyed by it:
+	// a synchronizing client asks about resources, and a resource is an euid.
+	std::string euid;
+	auto euid_v = ScalarP(con, "SELECT euid FROM citadel_messages WHERE msgnum = $1", {Value::BIGINT(msgnum)});
+	if (!euid_v.IsNull()) {
+		euid = AsString(euid_v);
+	}
+
 	// Only the room pointer goes: the message row may still be pointed into
 	// other rooms (a mail message lives in both Mail and Sent Items).
 	if (!ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2",
@@ -1555,7 +1590,68 @@ bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::strin
 		err = "delete failed";
 		return false;
 	}
+
+	// Recorded after the unlink succeeds, so a tombstone never claims a removal
+	// that did not happen. The reverse failure — an unlink with no tombstone — is
+	// the recoverable one: a client re-reads the collection and notices.
+	auto seq_v = ScalarP(con, "SELECT nextval('citadel_msg_seq')", {});
+	if (!seq_v.IsNull()) {
+		ExecP(con,
+		      "INSERT OR REPLACE INTO citadel_room_tombstones (room_num, seq, euid, msgnum, at) "
+		      "VALUES ($1, $2, $3, $4, $5)",
+		      {Value::BIGINT(room_num), Value::BIGINT(seq_v.GetValue<int64_t>()), Value(euid),
+		       Value::BIGINT(msgnum), Value::BIGINT((int64_t)std::time(nullptr))});
+	}
 	return true;
+}
+
+int64_t RoomChangeToken(Connection &con, int64_t room_num) {
+	auto v = ScalarP(con,
+	                 "SELECT greatest("
+	                 "  coalesce((SELECT max(msgnum) FROM citadel_room_msgs WHERE room_num = $1), 0), "
+	                 "  coalesce((SELECT max(seq) FROM citadel_room_tombstones WHERE room_num = $1), 0))",
+	                 {Value::BIGINT(room_num)});
+	return v.IsNull() ? 0 : v.GetValue<int64_t>();
+}
+
+std::vector<RoomChange> RoomChangesSince(Connection &con, int64_t room_num, int64_t since) {
+	std::vector<RoomChange> out;
+	// Both halves in one ordered pass. A resource that was replaced shows up
+	// twice — once as the new msgnum and once as the tombstone for the old one —
+	// which is correct and why callers resolve the euid afterwards rather than
+	// trusting `deleted` on its own.
+	auto r = ExecP(con,
+	               "SELECT seq, euid, msgnum, deleted FROM ("
+	               "  SELECT m.msgnum AS seq, m.euid AS euid, m.msgnum AS msgnum, false AS deleted "
+	               "    FROM citadel_room_msgs rm JOIN citadel_messages m ON m.msgnum = rm.msgnum "
+	               "   WHERE rm.room_num = $1 AND m.msgnum > $2 "
+	               "  UNION ALL "
+	               "  SELECT seq, euid, msgnum, true FROM citadel_room_tombstones "
+	               "   WHERE room_num = $1 AND seq > $2"
+	               ") ORDER BY seq",
+	               {Value::BIGINT(room_num), Value::BIGINT(since)});
+	if (!r) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		RoomChange c;
+		c.seq = AsBigint(mat.GetValue(0, i));
+		c.euid = AsString(mat.GetValue(1, i));
+		c.msgnum = AsBigint(mat.GetValue(2, i));
+		Value d = mat.GetValue(3, i);
+		c.deleted = !d.IsNull() && d.GetValue<bool>();
+		out.push_back(std::move(c));
+	}
+	return out;
+}
+
+void PruneTombstones(Connection &con, int64_t older_than_seconds) {
+	if (older_than_seconds <= 0) {
+		return;
+	}
+	int64_t cutoff = (int64_t)std::time(nullptr) - older_than_seconds;
+	ExecP(con, "DELETE FROM citadel_room_tombstones WHERE at < $1", {Value::BIGINT(cutoff)});
 }
 
 int64_t FindByEuid(Connection &con, int64_t room_num, const std::string &euid) {
