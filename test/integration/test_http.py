@@ -416,8 +416,15 @@ def main():
         status, headers, html = request(op, f"{BASE}/bbs/room/{mail_room}/msg/{mime_num}/html")
         assert status == 200
         assert headers.get("Content-Type", "").startswith("text/html")
-        assert "default-src 'none'" in headers.get("Content-Security-Policy", "")
-        assert "img-src data:" in headers.get("Content-Security-Policy", "")
+        frame_csp = headers.get("Content-Security-Policy", "")
+        assert "default-src 'none'" in frame_csp, frame_csp
+        # img-src carries 'self' so a cid: image — which travelled inside the
+        # message and reveals nothing by loading — can be served from our own
+        # route. The frame is sandboxed with no allow-same-origin, so this grants
+        # it no origin access; see the assertions just above.
+        assert "img-src 'self' data:" in frame_csp, frame_csp
+        # Remote images stay behind the ?images=1 opt-in: those are trackers.
+        assert "https:" not in frame_csp.split("img-src")[1].split(";")[0], frame_csp
         assert "<script>" not in html, "the sanitizer left a script tag"
         assert "onclick" not in html, "the sanitizer left an event handler"
 

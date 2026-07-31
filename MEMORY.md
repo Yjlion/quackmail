@@ -29,6 +29,7 @@ prefixes still say `quackmail`; the product is QuackCit.
 | 10 | Web overhaul phase 1: persistent connections, `/static` assets, a grouped sidebar | PR #24 |
 | 10 | Web overhaul phase 2a: bundled IANA tz database, vCard/iCalendar, `UpsertByEuid`, the contacts view | PR #25 |
 | 10 | Web overhaul phase 2b: shared content-line grammar, vNote, viewer time zone, calendar/tasks/notes/blog views | PR #26 |
+| 10 | Web overhaul phase 3: MIME builder, two HTML sanitizers, rich compose with cid:, Sieve rule builder | PR #27 |
 
 Phases 2 and 3 were validated byte-for-byte against the real Citadel server, and
 the **official `citadel` text client drives a full clean session** against
@@ -92,6 +93,47 @@ RFC 8536 says the first non-DST type), and converting a wall clock back to an
 instant has to probe the offset a day either side rather than at the wall time
 itself, or the two candidates converge and an ambiguous time is silently
 resolved instead of reported.
+
+### Composed HTML gets an allow-list; received HTML gets a deny-list
+
+Two sanitizer profiles, and the asymmetry is the point.
+
+`SanitizeForDisplay` cleans a part that arrived in someone else's mail. A
+deny-list is defensible there *only* because it is not the boundary: the part
+renders inside a sandboxed frame under its own `default-src 'none'` policy, and
+the sanitizer is defence in depth behind that.
+
+`SanitizeForCompose` cleans HTML a local user typed, and is a true allow-list
+applied **before the message is built**. That HTML is stored and then re-served
+from our origin to other people — the recipient, everyone in a public room, every
+list subscriber. "It is the user's own input" stops being true the moment paste is
+involved: markup copied out of a hostile page is a stored-XSS vector aimed at
+third parties, so the tests assert against the *stored* bytes rather than a
+rendered page. A display-side test would pass with the hole wide open.
+
+Specific decisions worth keeping: a URL scheme is compared after control
+characters are stripped (`java	script:` is the classic bypass);
+`data:image/svg+xml` is refused where png/jpeg/gif/webp are allowed, because SVG
+is scriptable; an `http:` image is dropped on the way in because it is a tracking
+pixel, leaving the reader's `?images=1` opt-in as the only way to load remote
+images; and an element not on the list loses its tag but keeps its words.
+
+### The Sieve script text is the single source of truth
+
+The rule builder derives rules from the script on every load and stores nothing
+structured. `quackmail_sieve_scripts` is also written by ManageSieve and by
+`/admin/sieve`, so a rules table would mean regenerating destroys an out-of-band
+edit, or trusting the table makes the UI describe filtering that is not what
+runs. Marker comments fail the same way and evaporate the first time a
+third-party client rewrites the script.
+
+`Decompose` walks the same AST `Evaluate` runs, so what the UI shows cannot drift
+from what happens. The important half is what it refuses: a nested `if`, an
+`else`, an action outside any rule, an `envelope` or `exists` test each return a
+sentence the page shows instead of a builder — and a rule-add against such a
+script is a 400, not a silent rewrite. Rule *names* live in `# rule: <name>`
+comments, and a name belongs to the `if` it sits directly above; anything in
+between and it is a comment about something else.
 
 ### An all-day value is a date, not an instant
 

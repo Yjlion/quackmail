@@ -136,5 +136,54 @@ struct MimePart {
 // section numbers (RFC 3501 §6.4.5 numbering), for FETCH BODYSTRUCTURE reuse.
 std::vector<MimePart> FlattenParts(const MimeEntity &root);
 
+// ---- building ------------------------------------------------------------
+//
+// Assembling a message is the inverse of ParseEntity, and it lives here rather
+// than in a front-end because there were three hand-rolled copies of it: the web
+// composer, the mailing-list digest builder and the feed importer. It also means
+// the exact bytes are assertable from sqllogictest through `qm_mime_build`.
+
+// A header list. Named here rather than reusing http::Headers, which is the same
+// shape but belongs to a layer MIME must not depend on.
+using HeaderList = std::vector<std::pair<std::string, std::string>>;
+
+struct BuildPart {
+	std::string content_type;      // "text/plain", "text/html", "image/png"
+	std::string charset = "utf-8"; // ignored for non-text parts
+	std::string content;           // decoded bytes; encoding is chosen below
+	std::string filename;          // set to make this an attachment
+	std::string content_id;        // set to make this referable as cid:<id>
+	std::string disposition;       // "inline" | "attachment" | "" (decide from the above)
+
+	BuildPart();
+};
+
+// Assemble a message from headers and parts, choosing the nesting for you:
+//
+//   one text part                    -> text/plain (or text/html)
+//   text + html                      -> multipart/alternative
+//   the above + inline (cid:) parts  -> multipart/related
+//   any of the above + attachments   -> multipart/mixed
+//
+// So a plain note stays a single-part message rather than being wrapped in a
+// pointless multipart, and a rich message with an inline image and a PDF nests
+// mixed(related(alternative(plain, html), image), pdf) — which is the order every
+// mail client expects to find them in.
+//
+// Boundaries are random *and verified absent from every part's bytes*: a part
+// that happened to contain the boundary string would otherwise truncate the
+// message at that point, and an attacker who controls an attachment controls
+// those bytes.
+//
+// `headers` are emitted verbatim in order, minus any Content-Type,
+// Content-Transfer-Encoding or MIME-Version — the framing is decided here, and
+// letting a caller also set it is how the two end up disagreeing.
+std::string BuildMessage(const HeaderList &headers, const std::vector<BuildPart> &parts);
+
+// Choose a transfer encoding for a part: 8bit for text that is already clean,
+// quoted-printable for text with long lines or control characters, base64 for
+// anything binary. Exposed because the choice is worth asserting.
+std::string ChooseEncoding(const BuildPart &part);
+
 } // namespace mime
 } // namespace quackmail

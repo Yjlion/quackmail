@@ -5,6 +5,7 @@
 #include "quackmail/dkim.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
+#include "quackmail/html_sanitize.hpp"
 #include "quackmail/mime.hpp"
 #include "quackmail/util.hpp"
 
@@ -12,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <ctime>
 
 namespace duckdb {
@@ -56,88 +58,149 @@ std::string SenderAddress(Ctx &ctx) {
 	return ctx.username + "@" + ConfigStr(ctx.con, "c_fqdn", "quackmail.test");
 }
 
-std::string Base64Wrapped(const std::string &raw) {
-	std::string b64 = quackmail::util::Base64Encode(raw);
-	std::string out;
-	for (size_t i = 0; i < b64.size(); i += 76) {
-		out += b64.substr(i, 76);
-		out += "\r\n";
-	}
-	return out;
-}
+// Turn every `data:image/...;base64,...` in composed HTML into a real inline
+// part, rewriting the src to the `cid:` that names it.
+//
+// The editor produces data: URIs because that is what a FileReader gives it.
+// Leaving them would work, but base64 inside the body bloats the message and
+// several clients refuse to render a data: image at all — so they become parts,
+// which is what every mail client does understand.
+std::string ExtractDataImages(const std::string &fqdn, const std::string &html,
+                              std::vector<quackmail::mime::BuildPart> &parts) {
+	static const struct {
+		const char *prefix;
+		const char *type;
+	} kKinds[] = {
+	    {"data:image/png;base64,", "image/png"},
+	    {"data:image/jpeg;base64,", "image/jpeg"},
+	    {"data:image/gif;base64,", "image/gif"},
+	    {"data:image/webp;base64,", "image/webp"},
+	};
 
-std::string CrlfBody(const std::string &in) {
 	std::string out;
-	out.reserve(in.size() + in.size() / 40);
-	for (size_t i = 0; i < in.size(); i++) {
-		if (in[i] == '\r') {
+	size_t i = 0;
+	int found = 0;
+	while (i < html.size()) {
+		size_t at = html.find("data:image/", i);
+		if (at == std::string::npos || found >= 16) {
+			out += html.substr(i);
+			break;
+		}
+		const char *type = nullptr;
+		size_t prefix_len = 0;
+		for (auto &k : kKinds) {
+			size_t n = std::strlen(k.prefix);
+			if (html.compare(at, n, k.prefix) == 0) {
+				type = k.type;
+				prefix_len = n;
+				break;
+			}
+		}
+		if (!type) {
+			// Not a form we convert — including data:image/svg+xml, which the
+			// compose allow-list has already refused.
+			out += html.substr(i, at + 11 - i);
+			i = at + 11;
 			continue;
 		}
-		if (in[i] == '\n') {
-			out += "\r\n";
-		} else {
-			out += in[i];
+		// The URI runs to the closing quote of the attribute.
+		size_t end = html.find_first_of("\"'", at);
+		if (end == std::string::npos) {
+			out += html.substr(i);
+			break;
 		}
+		std::string b64 = html.substr(at + prefix_len, end - at - prefix_len);
+		std::string raw;
+		if (!quackmail::util::Base64Decode(b64, raw) || raw.empty()) {
+			out += html.substr(i, end - i);
+			i = end;
+			continue;
+		}
+
+		std::string cid = "img" + std::to_string(++found) + "." + quackmail::util::RandomHex(6) + "@" + fqdn;
+		quackmail::mime::BuildPart p;
+		p.content_type = type;
+		p.content = raw;
+		p.content_id = cid;
+		p.disposition = "inline";
+		parts.push_back(p);
+
+		out += html.substr(i, at - i);
+		out += "cid:" + cid;
+		i = end;
 	}
 	return out;
 }
 
-// Build the RFC822 message that gets signed, delivered and filed. Attachments
-// make it multipart/mixed; without them it stays a plain text/plain message,
-// which is what a Citadel or POP3 reader will see on the other side.
+// Build the RFC822 message that gets signed, delivered and filed.
+//
+// The nesting is core's job now (mime::BuildMessage): this only decides *which*
+// parts exist. An HTML body arrives already through the compose allow-list, and
+// any data: image in it becomes a real inline part so the message is
+// self-contained rather than pointing at anything remote.
 std::string BuildMessage(Ctx &ctx, const std::string &from, const std::string &to, const std::string &cc,
-                         const std::string &subject, const std::string &body,
+                         const std::string &subject, const std::string &body, const std::string &html,
                          const std::vector<http::FormFile> &files, const std::string &in_reply_to,
                          const std::string &references, std::string &message_id) {
 	std::string fqdn = ConfigStr(ctx.con, "c_fqdn", "quackmail.test");
 	int64_t now = (int64_t)std::time(nullptr);
 	message_id = "<" + quackmail::util::RandomHex(12) + "." + std::to_string(now) + "@" + fqdn + ">";
 
-	std::string head;
-	head += "Message-ID: " + message_id + "\r\n";
-	head += "Date: " + RfcDate(now) + "\r\n";
-	head += "From: " + HeaderSafe(from) + "\r\n";
-	head += "To: " + HeaderSafe(to) + "\r\n";
+	quackmail::mime::HeaderList headers;
+	headers.push_back({"Message-ID", message_id});
+	headers.push_back({"Date", RfcDate(now)});
+	headers.push_back({"From", from});
+	headers.push_back({"To", to});
 	if (!cc.empty()) {
-		head += "Cc: " + HeaderSafe(cc) + "\r\n";
+		headers.push_back({"Cc", cc});
 	}
-	head += "Subject: " + HeaderSafe(subject) + "\r\n";
+	headers.push_back({"Subject", subject});
 	if (!in_reply_to.empty()) {
-		head += "In-Reply-To: " + HeaderSafe(in_reply_to) + "\r\n";
+		headers.push_back({"In-Reply-To", in_reply_to});
 	}
 	if (!references.empty()) {
-		head += "References: " + HeaderSafe(references) + "\r\n";
-	}
-	head += "MIME-Version: 1.0\r\n";
-
-	if (files.empty()) {
-		head += "Content-Type: text/plain; charset=utf-8\r\n";
-		head += "Content-Transfer-Encoding: 8bit\r\n\r\n";
-		return head + CrlfBody(body);
+		headers.push_back({"References", references});
 	}
 
-	std::string boundary = "=_qc_" + quackmail::util::RandomHex(16);
-	head += "Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n\r\n";
-	std::string out = head;
-	out += "--" + boundary + "\r\n";
-	out += "Content-Type: text/plain; charset=utf-8\r\n";
-	out += "Content-Transfer-Encoding: 8bit\r\n\r\n";
-	out += CrlfBody(body);
-	out += "\r\n";
+	std::vector<quackmail::mime::BuildPart> parts;
+
+	std::string html_out = html;
+	std::vector<quackmail::mime::BuildPart> inline_parts;
+	if (!html_out.empty()) {
+		// A data: image the editor inserted becomes a cid: part. Left as a data:
+		// URI it would still work, but base64 inside the HTML bloats the body and
+		// several clients refuse to render it.
+		html_out = ExtractDataImages(fqdn, html_out, inline_parts);
+	}
+
+	quackmail::mime::BuildPart text_part;
+	text_part.content_type = "text/plain";
+	text_part.content = body;
+	parts.push_back(text_part);
+
+	if (!html_out.empty()) {
+		quackmail::mime::BuildPart html_part;
+		html_part.content_type = "text/html";
+		html_part.content = html_out;
+		parts.push_back(html_part);
+	}
+	for (auto &p : inline_parts) {
+		parts.push_back(p);
+	}
+
 	for (auto &f : files) {
 		if (f.content.empty()) {
 			continue;
 		}
-		std::string name = http::SanitizeFilename(f.filename);
-		std::string type = f.content_type.empty() ? "application/octet-stream" : f.content_type;
-		out += "--" + boundary + "\r\n";
-		out += "Content-Type: " + HeaderSafe(type) + "; name=\"" + HeaderSafe(name) + "\"\r\n";
-		out += "Content-Disposition: attachment; filename=\"" + HeaderSafe(name) + "\"\r\n";
-		out += "Content-Transfer-Encoding: base64\r\n\r\n";
-		out += Base64Wrapped(f.content);
+		quackmail::mime::BuildPart att;
+		att.content_type = f.content_type.empty() ? "application/octet-stream" : f.content_type;
+		att.content = f.content;
+		att.filename = http::SanitizeFilename(f.filename);
+		att.disposition = "attachment";
+		parts.push_back(att);
 	}
-	out += "--" + boundary + "--\r\n";
-	return out;
+
+	return quackmail::mime::BuildMessage(headers, parts);
 }
 
 // Split a comma-separated recipient list into addresses.
@@ -276,6 +339,60 @@ void GetMsgPart(Ctx &ctx) {
 	                       http::PercentEncode(name));
 }
 
+// Serve the part a `cid:` reference names, for the sandboxed HTML frame.
+//
+// Separate from GetMsgPart because the answers differ: that one forces
+// `application/octet-stream` and `attachment` so nothing served from our origin
+// can ever render. This one has to render — but only as a real image, and only
+// one of four types. `image/svg+xml` is an image by content type and a script
+// host in practice, so it falls through to being downloaded like anything else.
+void GetMsgCid(Ctx &ctx) {
+	Room room;
+	Message msg;
+	if (!LoadForPart(ctx, room, msg)) {
+		NotFound(ctx);
+		return;
+	}
+	std::string want = ctx.Cap(2);
+	if (want.empty()) {
+		NotFound(ctx);
+		return;
+	}
+
+	auto entity = quackmail::mime::ParseEntity(msg.raw);
+	std::function<const quackmail::mime::MimeEntity *(const quackmail::mime::MimeEntity &)> find =
+	    [&](const quackmail::mime::MimeEntity &e) -> const quackmail::mime::MimeEntity * {
+		if (!e.content_id.empty() && e.content_id == want) {
+			return &e;
+		}
+		for (auto &child : e.children) {
+			if (const quackmail::mime::MimeEntity *hit = find(child)) {
+				return hit;
+			}
+		}
+		return nullptr;
+	};
+	const quackmail::mime::MimeEntity *part = find(entity);
+	if (!part) {
+		NotFound(ctx);
+		return;
+	}
+
+	// The type is decided here from a fixed list, never taken from the sender.
+	std::string mime = part->content_type.Mime();
+	bool renderable = mime == "image/png" || mime == "image/jpeg" || mime == "image/gif" ||
+	                  mime == "image/webp";
+	SecurityHeaders(ctx, "default-src 'none'; sandbox");
+	if (!renderable) {
+		std::string name = http::SanitizeFilename(part->filename.empty() ? "attachment" : part->filename);
+		ctx.resp.Bytes(part->body_decoded, "application/octet-stream");
+		ctx.resp.SetHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
+		return;
+	}
+	ctx.resp.Bytes(part->body_decoded, mime);
+	ctx.resp.SetHeader("Content-Disposition", "inline");
+}
+
 void GetMsgHtml(Ctx &ctx) {
 	Room room;
 	Message msg;
@@ -301,8 +418,20 @@ void GetMsgHtml(Ctx &ctx) {
 	// allow-same-origin, so the markup runs in an opaque origin with no script
 	// and no access to anything of ours.
 	html = SanitizeHtmlPart(html);
+	// Rewrite `cid:` references to a route that serves the matching part. Done
+	// over the already-sanitized string as a targeted attribute edit, not a DOM
+	// round-trip: re-serializing risks reintroducing what the sanitizer removed.
+	html = quackmail::html::RewriteCidUrls(
+	    html, RoomHref(room, "/msg/" + std::to_string(msg.msgnum) + "/cid/"));
+
 	bool show_remote = ctx.req.Param("images") == "1";
-	std::string img = show_remote ? "img-src data: https:" : "img-src data:";
+	// `img-src 'self'` is what lets the cid: route above load. The frame is
+	// sandboxed with no allow-same-origin, so 'self' permits subresource loads
+	// without granting the frame any origin access — which is the point.
+	//
+	// Remote images stay behind the ?images=1 opt-in: those are trackers. A cid:
+	// image travelled inside the message and reveals nothing by loading.
+	std::string img = show_remote ? "img-src 'self' data: https:" : "img-src 'self' data:";
 	SecurityHeaders(ctx, "default-src 'none'; " + img +
 	                         "; style-src 'unsafe-inline'; frame-ancestors 'self'; sandbox");
 	ctx.resp.SetHeader("X-Frame-Options", "SAMEORIGIN"); // it is meant to be framed by us
@@ -379,14 +508,25 @@ void GetCompose(Ctx &ctx) {
 		}
 	}
 
-	std::string body = "<form method=\"post\" action=\"/mail/send\" enctype=\"multipart/form-data\">";
+	// data-compose is what qc-compose.js looks for. Without it — or with
+	// JavaScript off — this stays exactly the plain-text form it was, which is
+	// why the textarea is the field the server actually reads for the text half.
+	std::string body = "<form method=\"post\" action=\"/mail/send\" enctype=\"multipart/form-data\" "
+	                   "data-compose>";
 	body += Hidden("_csrf", ctx.csrf);
 	body += Hidden("in_reply_to", in_reply_to);
 	body += Hidden("references", references);
+	// Filled in by the editor on submit; empty means "this message is plain
+	// text", which is the state of every submission from a browser without it.
+	body += Hidden("html_body", "");
 	body += "<label class=\"field\"><span>To</span>" + TextInput("to", to) + "</label>";
 	body += "<label class=\"field\"><span>Cc</span>" + TextInput("cc", cc) + "</label>";
 	body += "<label class=\"field\"><span>Subject</span>" + TextInput("subject", subject) + "</label>";
 	body += "<label class=\"field\"><span>Message</span>" + TextArea("body", quoted, 18) + "</label>";
+	// Hidden until the editor loads and marks it available: offering "formatted
+	// text" to someone who will only ever get a textarea would be a lie.
+	body += "<label class=\"chk richopt\"><input type=\"checkbox\" name=\"rich\" value=\"1\"> "
+	        "Formatted text</label>";
 	body += "<label class=\"field\"><span>Attachment</span><input type=\"file\" name=\"attachment\" "
 	        "multiple></label>";
 	body += "<p>" + Button("Send") + " ";
@@ -395,6 +535,7 @@ void GetCompose(Ctx &ctx) {
 	body += "</form>";
 	PageOpts opts;
 	opts.active = "compose";
+	opts.script = "qc-compose.js";
 	Render(ctx, "Write a message", body, opts);
 }
 
@@ -428,6 +569,22 @@ void PostSend(Ctx &ctx) {
 	std::string text = field("body");
 	bool draft = !field("draft").empty();
 
+	// The HTML half, if the composer sent one. Sanitized *here*, before the
+	// message is built — what gets stored is already safe, rather than relying on
+	// every future reader to clean it again. See html_sanitize.hpp on why this is
+	// an allow-list and the display path is not.
+	std::string html = field("html_body");
+	if (!html.empty()) {
+		html = quackmail::html::SanitizeForCompose(html);
+		// A plain-text alternative is not optional: a recipient on a text-only
+		// client, or reading over Citadel or POP3, gets this one. If the composer
+		// did not send text of its own, derive it rather than sending an empty
+		// part.
+		if (text.empty()) {
+			text = quackmail::html::ToPlainText(html);
+		}
+	}
+
 	auto rcpts = SplitAddresses(to);
 	for (auto &a : SplitAddresses(cc)) {
 		rcpts.push_back(a);
@@ -439,7 +596,7 @@ void PostSend(Ctx &ctx) {
 
 	std::string from = SenderAddress(ctx);
 	std::string message_id;
-	std::string body = BuildMessage(ctx, from, to, cc, subject, text, files, field("in_reply_to"),
+	std::string body = BuildMessage(ctx, from, to, cc, subject, text, html, files, field("in_reply_to"),
 	                                field("references"), message_id);
 
 	if (draft) {
@@ -689,6 +846,7 @@ void RegisterMailRoutes(std::vector<Route> &out) {
 	// BBS posts and mail behave identically.
 	out.push_back({"GET", "/bbs/room/:n/msg/:m/part/:s", Role::User, GetMsgPart});
 	out.push_back({"GET", "/bbs/room/:n/msg/:m/html", Role::User, GetMsgHtml});
+	out.push_back({"GET", "/bbs/room/:n/msg/:m/cid/:c", Role::User, GetMsgCid});
 	out.push_back({"GET", "/bbs/room/:n/msg/:m/source", Role::User, GetMsgSource});
 }
 

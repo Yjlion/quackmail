@@ -180,3 +180,131 @@ query I
 SELECT ok FROM qm_sieve_check('frobnicate "x";');
 ----
 false
+
+# ---- the rule view ---------------------------------------------------------
+# A rule builder needs to show a script as a list of rules and write one back.
+# The script text stays the single source of truth: quackmail_sieve_scripts is
+# also written by ManageSieve and by the admin console, so keeping structured
+# rules in a table beside it would mean regenerating destroys an out-of-band
+# edit, or trusting the table makes the UI describe filtering that is not what
+# runs. So rules are *derived* from the text every time.
+
+# The ordinary case: a name from the comment, the condition, the action.
+query I
+SELECT qm_sieve_rules(E'require ["fileinto"];\n# rule: Newsletters\nif header :contains "from" "news@" {\n  fileinto "Lists";\n}\n');
+----
+Newsletters|all|from contains news@|fileinto Lists
+
+# A name belongs to the `if` it sits directly above. Anything in between means it
+# was a comment about something else — a comment at the top of a file is a file
+# comment, not the first rule's name, and borrowing it would put a stranger's
+# words on someone's rule.
+query I
+SELECT qm_sieve_rules(E'# rule: Not a rule name\nrequire ["fileinto"];\nif header :contains "from" "news@" {\n  fileinto "Lists";\n}\n');
+----
+|all|from contains news@|fileinto Lists
+
+# allof and anyof, several conditions, several actions, and a trailing stop.
+query I
+SELECT qm_sieve_rules(E'require ["fileinto"];\n# rule: Loud\nif anyof (header :is "subject" "SALE", header :contains "from" "spam.example") {\n  fileinto "Junk";\n  stop;\n}\n');
+----
+Loud|any|subject is SALE,from contains spam.example|fileinto Junk|stop
+
+# A negated condition, a header the UI does not name directly, size and body.
+query I
+SELECT qm_sieve_rules(E'if allof (not header :contains "to" "me@x", header :is "x-mailer" "thing", size :over 100000, body :text :contains "unsubscribe") {\n  discard;\n}\n');
+----
+|all|!to contains me@x,header:x-mailer is thing,size over 100000,body contains unsubscribe|discard
+
+# Several rules, and an unnamed one keeps its position rather than borrowing the
+# next rule's name — which is what a naive "next comment wins" would do.
+#
+# One rule per line, joined with " / " so the whole answer is a single value: an
+# expected block spanning lines is read as several *rows*.
+query I
+SELECT replace(qm_sieve_rules(E'# rule: First\nif header :is "from" "a@x" {\n  keep;\n}\nif header :is "from" "b@x" {\n  discard;\n}\n# rule: Third\nif header :is "from" "c@x" {\n  redirect "d@x";\n}\n'), chr(10), ' / ');
+----
+First|all|from is a@x|keep / |all|from is b@x|discard / Third|all|from is c@x|redirect d@x
+
+# ---- what the rule view refuses to show -----------------------------------
+# Each of these must decompose to NULL with a reason, so the UI falls back to the
+# text editor. Silently showing a partial decomposition would describe filtering
+# the server does not do.
+
+query I
+SELECT count(*) FROM (VALUES
+    -- a nested rule
+    (E'if header :is "from" "a@x" {\n  if header :is "to" "b@x" {\n    discard;\n  }\n}\n'),
+    -- an else branch
+    (E'if header :is "from" "a@x" {\n  keep;\n} else {\n  discard;\n}\n'),
+    -- an action outside any rule
+    (E'require ["fileinto"];\nfileinto "Inbox";\n'),
+    -- a test the flat view does not model
+    (E'if envelope :is "from" "a@x" {\n  discard;\n}\n'),
+    (E'if exists "x-spam" {\n  discard;\n}\n'),
+    (E'if true {\n  keep;\n}\n'),
+    -- several headers or values in one test
+    (E'if header :is ["from", "to"] "a@x" {\n  keep;\n}\n'),
+    (E'if header :is "from" ["a@x", "b@x"] {\n  keep;\n}\n'),
+    -- not something that parses at all
+    ('if header :is {')
+) AS t(s)
+WHERE qm_sieve_rules(s) IS NOT NULL;
+----
+0
+
+# And each of those gives a reason rather than an empty failure, so the banner
+# can say something useful.
+query IIII
+SELECT qm_sieve_rules_why(E'if header :is "from" "a@x" {\n  if header :is "to" "b@x" {\n    discard;\n  }\n}\n') LIKE '%nests one rule inside another%',
+       qm_sieve_rules_why(E'if header :is "from" "a@x" {\n  keep;\n} else {\n  discard;\n}\n') LIKE '%else%',
+       qm_sieve_rules_why(E'require ["fileinto"];\nfileinto "Inbox";\n') LIKE '%outside any rule%',
+       qm_sieve_rules_why('if header :is {') LIKE '%does not parse%';
+----
+true	true	true	true
+
+# A script the rule view *can* show has no reason to report.
+query I
+SELECT qm_sieve_rules_why(E'if header :is "from" "a@x" {\n  keep;\n}\n');
+----
+NULL
+
+# ---- the round trip --------------------------------------------------------
+# Compose is the only writer, so whatever it produces must parse — and must
+# decompose to the same rules it came from, or saving twice would drift.
+
+query I
+SELECT qm_sieve_valid(qm_sieve_recompose(s))
+FROM (SELECT E'# rule: Keep it\nrequire ["fileinto", "reject"];\nif anyof (header :contains "from" "a@x", not header :is "subject" "ok", size :over 1000) {\n  fileinto "Box";\n  reject "no thanks";\n  stop;\n}\n' AS s);
+----
+true
+
+query I
+SELECT qm_sieve_rules(qm_sieve_recompose(s)) = qm_sieve_rules(s)
+FROM (SELECT E'# rule: Keep it\nrequire ["fileinto", "reject"];\nif anyof (header :contains "from" "a@x", not header :is "subject" "ok", size :over 1000) {\n  fileinto "Box";\n  reject "no thanks";\n  stop;\n}\n' AS s);
+----
+true
+
+# Recomposing is idempotent at the text level too, so a save that changes nothing
+# writes nothing new.
+query I
+SELECT qm_sieve_recompose(qm_sieve_recompose(s)) = qm_sieve_recompose(s)
+FROM (SELECT E'# rule: R\nif header :is "from" "a@x" {\n  fileinto "B";\n}\n' AS s);
+----
+true
+
+# `require` is emitted from the actions actually used, so a script does not claim
+# to need an extension it never invokes.
+query III
+SELECT qm_sieve_recompose(E'if header :is "from" "a@x" {\n  discard;\n}\n') LIKE '%require%',
+       qm_sieve_recompose(E'require ["fileinto"];\nif header :is "from" "a@x" {\n  fileinto "B";\n}\n') LIKE '%"fileinto"%',
+       qm_sieve_recompose(E'require ["fileinto"];\nif header :is "from" "a@x" {\n  fileinto "B";\n}\n') LIKE '%reject%';
+----
+false	true	false
+
+# A value containing a quote or a backslash survives the round trip rather than
+# ending the string early.
+query I
+SELECT qm_sieve_rules(qm_sieve_recompose(E'if header :is "subject" "a \\"quoted\\" word" {\n  keep;\n}\n'));
+----
+|all|subject is a "quoted" word|keep

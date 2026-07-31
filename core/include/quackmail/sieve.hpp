@@ -83,5 +83,60 @@ std::string LoadActiveScript(duckdb::Connection &con, const std::string &usernam
 // "SIEVE" capability line. Only what actually works is advertised.
 std::string Capabilities();
 
+// ---- the rule view -------------------------------------------------------
+//
+// A rule builder needs to show a script as a list of rules and write one back.
+// The hard part is not the UI, it is deciding what the source of truth is.
+//
+// **It is the script text.** `quackmail_sieve_scripts` is also written by
+// ManageSieve and by the admin console, so a client can replace a script at any
+// moment. Keeping structured rules in a table beside it would mean two sources
+// of truth: regenerating from the table would destroy the out-of-band edit, and
+// trusting the table instead would make the builder describe something the
+// server does not do. Marker comments fail the same way and evaporate the first
+// time a third-party client rewrites the script.
+//
+// So the rules are *derived* from the text every time, by walking the same parse
+// tree Evaluate uses. When a script says something the rule view cannot express,
+// Decompose says so and the caller must fall back to the raw editor rather than
+// silently rewriting it.
+
+// One condition inside a rule.
+struct RuleTest {
+	// "from" | "to" | "cc" | "subject" | "header:X" | "size" | "body"
+	std::string field;
+	// "is" | "contains" | "matches" for text; "over" | "under" for size
+	std::string op = "contains";
+	std::string value;
+	bool negate = false;
+
+	RuleTest() = default;
+};
+
+// One `if <tests> { <actions> }` in the script.
+struct Rule {
+	// From a `# rule: <name>` comment above the `if`. A name is the one thing a
+	// parse tree cannot carry, and losing it is cosmetic — an unnamed rule shows
+	// as "Rule 3" rather than breaking.
+	std::string name;
+	bool all = true; // allof (every test) vs anyof (any test)
+	std::vector<RuleTest> tests;
+	std::vector<Action> actions;
+	bool stop = false; // a trailing `stop;` inside the block
+
+	Rule() = default;
+};
+
+// Break a script into rules. False when it uses something the rule view cannot
+// represent — a nested `if`, an `else`, a test this does not model — with `why`
+// set to a sentence a UI can show. The caller must then offer only the text
+// editor: displaying a partial decomposition would describe filtering that is
+// not what runs.
+bool Decompose(const std::string &script, std::vector<Rule> &out, std::string &why);
+
+// The inverse. The output always parses — Compose is the only writer, so a rule
+// set that came from the UI cannot produce a script `Check` rejects.
+std::string Compose(const std::vector<Rule> &rules);
+
 } // namespace sieve
 } // namespace quackmail

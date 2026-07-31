@@ -8,19 +8,6 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 **Bringing the web interface up to WebCit-level capability**, in four PRs.
 Phase 1 is done; the rest follow in order.
 
-- [ ] **Phase 3 — rich mail and a Sieve rule builder**
-  - [ ] `core/src/mime_build.cpp`: one `multipart/alternative`/`related`/`mixed`
-        builder, replacing the third hand-rolled one in the tree.
-  - [ ] `core/src/html_sanitize.cpp` with two profiles — the existing deny-list
-        for display, and a true **allow-list** for compose, applied before the
-        message is built. Compose output is stored and re-served to other
-        people, so a deny-list is not defensible there.
-  - [ ] `cid:` inline images, with the served type forced to a real image format
-        (`image/svg+xml` is scriptable and must become an attachment).
-  - [ ] `sieve::Decompose`/`Compose` over the AST that already exists in
-        `core/src/sieve.cpp`. The script text stays the single source of truth —
-        ManageSieve can overwrite it at any moment, so a rules table or marker
-        comments would both make the UI lie about what the server does.
 - [ ] **Phase 4 — per-room management and self-serve rooms**
   - [ ] `citadel::CanAdminister` riding on the RFC 4314 `a` right, so an aide
         delegates room administration from any IMAP client with `SETACL`. No new
@@ -34,6 +21,29 @@ Phase 1 is done; the rest follow in order.
         against names colliding with the `0000000002.Mail` mailbox keyspace.
 
 ## Shipped
+
+- [x] **Rich mail and a Sieve rule builder** (phase 3 of the web overhaul)
+  - [x] `core/src/mime_build.cpp` — one builder choosing the nesting
+        (plain / alternative / related / mixed), replacing the third hand-rolled
+        copy in the tree. Boundaries verified absent from every part's bytes;
+        transfer encoding chosen rather than fixed.
+  - [x] `core/src/html_sanitize.cpp` with two profiles: the existing deny-list
+        for *display* (defensible only behind the sandboxed frame) and a true
+        **allow-list** for *compose*, applied before the message is built,
+        because composed HTML is stored and re-served to other people.
+        28 evasions and 14 must-survive constructs asserted.
+  - [x] `cid:` inline images end to end: data: URIs from the editor become real
+        parts, and the serving route forces the type from a list of four —
+        `image/svg+xml` downloads rather than rendering.
+  - [x] `sieve::Decompose`/`Compose` over the AST that was already in
+        `core/src/sieve.cpp`. The script text stays the single source of truth;
+        anything the rule view cannot express is reported and left alone.
+  - [x] `http/assets/qc-compose.js` — hand-rolled contenteditable editor, no
+        dependency, degrading to the plain textarea when JS is off.
+  - [x] `/prefs/sieve` rule cards with add, delete and reorder, all plain form
+        posts and no JavaScript.
+  - [x] `test/sql/{mime,html_sanitize,sieve}.test` plus
+        `test/integration/test_richmail.py` and `test_sieve_rules.py`.
 
 - [x] **The remaining room views** (phase 2b of the web overhaul)
   - [x] `core/contentline.{hpp,cpp}` — the line grammar vCard, iCalendar and

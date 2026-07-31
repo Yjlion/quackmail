@@ -144,6 +144,10 @@ struct PageOpts {
 	bool wide = false;
 	// A per-page action strip rendered by the shell, above `body`.
 	std::string toolbar;
+	// An extra script from /static, by logical name ("qc-compose.js"), loaded
+	// deferred after the shared one. Pages that need no script leave it empty,
+	// which is most of them.
+	std::string script;
 
 	PageOpts();
 };

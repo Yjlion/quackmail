@@ -471,6 +471,10 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(kCriticalCss) + RawHtml(ThemeCss(ctx)) +
 	        "</style>";
 	page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl("qc.js")) + "\" defer></script>";
+	if (!opts.script.empty()) {
+		page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl(opts.script.c_str())) +
+		        "\" defer></script>";
+	}
 	page += "</head>";
 
 	std::string body_class;
