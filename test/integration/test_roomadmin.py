@@ -302,6 +302,15 @@ def main():
         assert status == 400, "a room was deleted without its name being typed"
         assert flags_of(con, room_num) is not None
 
+        # KillRoom cannot reach the list tables, so deleting a room that is
+        # still a list would leave its address resolving to nothing. The route
+        # refuses rather than doing half the job.
+        con.execute("CALL qm_list_create('Project X', 'projectx')")
+        status, _, body = post(owner, settings + "/kill", {"confirm": "Project X"},
+                               csrf_from=settings)
+        assert status == 400 and "projectx@" in body, f"a list's room was deletable: {status}"
+        con.execute("CALL qm_list_remove('Project X')")
+
         status, headers, _ = post(owner, settings + "/kill", {"confirm": "Project X"},
                                   csrf_from=settings)
         assert status == 303, f"deleting the room returned {status}"

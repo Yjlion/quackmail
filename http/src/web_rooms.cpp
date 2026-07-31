@@ -145,7 +145,10 @@ const RightDoc kRightDocs[] = {
     {'w', "set message flags"},
     {'i', "post a message"},
     {'p', "post by e-mail, without signing in"},
-    {'k', "create rooms under this one"},
+    // `k` is stored and reported over IMAP, but nothing in this server acts on
+    // it yet. Listing it without saying so would be the page claiming a
+    // capability the grant does not actually confer.
+    {'k', "create rooms under this one — stored, but nothing acts on it yet"},
     {'x', "delete the room"},
     {'t', "delete a message"},
     {'e', "expunge deleted messages"},
@@ -415,6 +418,13 @@ void GetRoomSettings(Ctx &ctx) {
 		body += FormEnd();
 		body += "<p class=\"muted\">The messages themselves survive if they are also pointed into another "
 		        "room; the pointers from this one, its access list and everyone's read state go.</p>";
+		listserv::List as_list;
+		if (listserv::GetList(ctx.con, room.room_num, as_list)) {
+			body += "<p class=\"muted\">Not while this room is the mailing list <code>" +
+			        T(listserv::ListAddress(ctx.con, as_list)) +
+			        "</code>, though — an aide has to remove the list first, or its address would go on "
+			        "accepting mail for a room that is no longer there.</p>";
+		}
 	}
 
 	PageOpts opts;
@@ -507,6 +517,20 @@ void PostRoomKill(Ctx &ctx) {
 	}
 	if (ctx.req.Form("confirm") != room.display_name) {
 		BadRequest(ctx, "The name you typed does not match this room, so nothing was deleted.");
+		return;
+	}
+	// KillRoom removes the room's messages, state and access list — not its list
+	// configuration, which lives in tables core/citadel_store.cpp cannot reach
+	// without a dependency cycle. Deleting the room out from under a list would
+	// leave an inbound address resolving to nothing, so this route refuses the
+	// order rather than doing half of it. Unmaking a list is an aide's action
+	// for the same reason making one is.
+	listserv::List still_a_list;
+	if (listserv::GetList(ctx.con, room.room_num, still_a_list)) {
+		BadRequest(ctx, "This room is still the mailing list " +
+		                    listserv::ListAddress(ctx.con, still_a_list) +
+		                    ". An aide has to remove the list first, or its address would go on "
+		                    "accepting mail for a room that no longer exists.");
 		return;
 	}
 	std::string err;

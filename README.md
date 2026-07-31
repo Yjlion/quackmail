@@ -411,6 +411,34 @@ clients see each other in the who-list and can page one another.
   Editing preserves what the forms do not show. A calendar event keeps the alarm
   someone set on their phone, a contact keeps a second address, a note keeps
   where another client placed it on a pinboard.
+- **Room settings** at `/bbs/room/:n/settings` — not part of the admin console.
+  The page is gated on the RFC 4314 `a` ("administer") right, so an aide hands
+  somebody a room by granting it and that person manages the room without ever
+  reaching `/admin`, which is root-equivalent. The grant can be made from that
+  page, from `quackcitadm.sh room acl`, or from any mail client:
+
+  ```
+  a1 SETACL "Project X" alice lrswia                  # alice now runs that room
+  ```
+
+  ```sh
+  quackcitadm.sh room rights "Project X" alice        # what alice may actually do
+  ```
+
+  A room's administrator sets its name, floor, view, description and flags;
+  edits its access list; opens or closes its `room_<name>@` address; runs its
+  mailing list's presentation and membership; polls a feed pointed at it; and
+  deletes it. Two things stay an operator's, and the page says why: **creating**
+  a feed (it stores a plaintext password and dials whatever host it names) and
+  **making** a room into a mailing list (that mints an inbound address and a
+  fan-out engine). Inviting a subscriber sends a confirmation and nothing else,
+  so a room administrator cannot sign up an address nobody reads.
+- **Creating a room** at `/bbs/new`, gated on `qm_room_create_axlevel` — the
+  Citadel access level it takes, defaulting to aide (6) so nothing changes on an
+  existing server until an operator lowers it. Whoever creates a room
+  administers it. An invitation-only room is listed only for the people its
+  access list names with `l`, which is what makes "private" mean invitation
+  rather than merely name-guessing.
 - **The admin console** at `/admin/` — users, rooms, floors and `citadel_config`,
   plus the whole mail-policy set (domains, aliases, ACLs, DNSBL zones, DKIM
   keys, send quotas), the inbound audit log, the outbound queue, any user's
@@ -571,9 +599,17 @@ permissions; the table only adds grants Citadel has nowhere else to put. Because
 the two are unioned, an ACL entry can widen access but never narrow it: taking
 read access away is still a matter of the room's flags.
 
-The grant that matters most is RFC 4314's `p` ("post") right for the special
-identifier `anyone`, which is what makes a public room reachable by e-mail at
-`room_<name>@<fqdn>` (spaces in the room name become underscores):
+Two grants carry more than the rest. `a` ("administer") is what
+`citadel::CanAdminister` asks for, and it is how a room is delegated: the holder
+manages that room and nothing else, from the web, the CLI or `SETACL`. `l`
+("lookup") makes an invitation-only room visible to the person named, so a
+private room can be joined by invitation rather than only by an aide moving
+people into it. `anyone` may never hold `a` — it covers callers who are not
+signed in.
+
+The grant that matters most for mail is RFC 4314's `p` ("post") right for the
+special identifier `anyone`, which is what makes a public room reachable by
+e-mail at `room_<name>@<fqdn>` (spaces in the room name become underscores):
 
 ```
 a1 SETACL "Main Floor/Announcements" anyone lrsp      # from any mail client
