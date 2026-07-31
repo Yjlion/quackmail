@@ -164,22 +164,16 @@ js::Value EmailSubmissionSet(JmapCtx &jc, const js::Value &args) {
 	for (const auto &m : args["create"].members) {
 		const js::Value &spec = m.second;
 		std::string email_id = spec["emailId"].AsString();
-		// A back-reference to an Email/set in the same request: "#emailId"
-		// naming the creation id, which is how a client composes and sends in
-		// one round trip.
-		if (email_id.empty()) {
-			std::string ref = spec["#emailId"]["path"].AsString();
-			size_t slash = ref.rfind('/');
-			std::string creation_id = slash == std::string::npos ? ref : ref.substr(slash + 1);
-			for (size_t i = 0; i < jc.responses.Size(); i++) {
-				const js::Value &entry = jc.responses.At(i);
-				if (entry.At(0).AsString() != "Email/set") {
-					continue;
-				}
-				const js::Value &made = entry.At(1)["created"][creation_id];
-				if (!made.IsNull()) {
-					email_id = made["id"].AsString();
-				}
+		// A back-reference to an Email/set in the same request, which is how a
+		// client composes and sends in one round trip. The path is a JSON
+		// pointer ("/created/<creationId>/id"), so it goes through the same
+		// resolver "#ids" does rather than a substring guess — which gets the
+		// creation id wrong in a way that looks exactly like the message not
+		// existing.
+		if (email_id.empty() && spec.Has("#emailId")) {
+			std::vector<std::string> refs;
+			if (ResolveReference(jc, spec["#emailId"], refs) && !refs.empty()) {
+				email_id = refs[0];
 			}
 		}
 

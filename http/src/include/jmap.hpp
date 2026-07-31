@@ -135,6 +135,15 @@ bool CheckAccount(JmapCtx &jc, const js::Value &args, js::Value &err);
 // reports as invalidResultReference.
 bool ResolveIds(JmapCtx &jc, const js::Value &args, std::vector<std::string> &out, bool &present);
 
+// Resolve one {resultOf, name, path} back-reference against the calls already
+// answered in this request. The path is a JSON pointer; a string result yields
+// one element and an array yields all of them.
+//
+// Shared rather than re-derived per call site: EmailSubmission's "#emailId"
+// points at "/created/<creationId>/id", which a substring guess gets wrong in a
+// way that looks exactly like the message not existing.
+bool ResolveReference(JmapCtx &jc, const js::Value &ref, std::vector<std::string> &out);
+
 // Apply one Email/update patch: keywords and mailboxIds. Shared with
 // EmailSubmission's onSuccessUpdateEmail, which sends exactly the same shape and
 // must not grow a second copy of the "additions before removals" rule that makes

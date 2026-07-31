@@ -145,7 +145,9 @@ void GetSession(Ctx &ctx) {
 // supported: a member name, an array index, and the "/*/id" form that plucks one
 // property out of every element. Anything else is a failure rather than a guess,
 // because a silently-empty id list looks to a client like an empty mailbox.
-bool ResolveBackReference(JmapCtx &jc, const js::Value &ref, std::vector<std::string> &out) {
+} // namespace
+
+bool ResolveReference(JmapCtx &jc, const js::Value &ref, std::vector<std::string> &out) {
 	std::string result_of = ref["resultOf"].AsString();
 	std::string name = ref["name"].AsString();
 	std::string path = ref["path"].AsString();
@@ -227,6 +229,8 @@ bool ResolveBackReference(JmapCtx &jc, const js::Value &ref, std::vector<std::st
 	}
 	return true;
 }
+
+namespace {
 
 void PostApi(Ctx &ctx) {
 	if (ctx.req.method != "POST") {
@@ -404,7 +408,7 @@ bool ResolveIds(JmapCtx &jc, const js::Value &args, std::vector<std::string> &ou
 	}
 	if (args.Has("#ids")) {
 		present = true;
-		return ResolveBackReference(jc, args["#ids"], out);
+		return ResolveReference(jc, args["#ids"], out);
 	}
 	return true;
 }
