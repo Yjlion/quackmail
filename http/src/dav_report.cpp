@@ -180,7 +180,7 @@ bool MatchesCardFilter(const std::string &body, const davx::Node &filter) {
 void EmitObject(Ctx &ctx, davx::Writer &w, const DavCollection &c, const DavObject &o,
                 const PropRequest &pr) {
 	PropSource src;
-	src.href = ObjectHref(c.kind, ctx.username, c.room.room_num, o.euid);
+	src.href = ObjectHref(c.kind, ctx.username, c.room.room_num, o.name);
 	src.type = DavRes::Object;
 	src.kind = c.kind;
 	src.user = ctx.username;
@@ -192,10 +192,13 @@ void EmitObject(Ctx &ctx, davx::Writer &w, const DavCollection &c, const DavObje
 	WriteResponse(ctx, w, src, pr);
 }
 
-// The hrefs a multiget listed, reduced to the euids they name. An href that is
-// not inside this collection is skipped rather than resolved — a client must not
-// be able to read another room by naming it in a multiget aimed here.
-std::vector<std::string> MultigetEuids(Ctx &ctx, const DavCollection &c, const davx::Node &root) {
+// The hrefs a multiget listed, reduced to the resource names they name. An href
+// that is not inside this collection is skipped rather than resolved — a client
+// must not be able to read another room by naming it in a multiget aimed here.
+//
+// Names, not euids: a client echoes back the href we gave it, and that href is
+// whatever the resource is bound to rather than the object's UID.
+std::vector<std::string> MultigetNames(Ctx &ctx, const DavCollection &c, const davx::Node &root) {
 	std::vector<std::string> out;
 	std::string prefix = CollectionHref(c.kind, ctx.username, c.room.room_num);
 	for (const auto *href : root.Children(davx::kNsDav, "href")) {
@@ -217,8 +220,8 @@ std::vector<std::string> MultigetEuids(Ctx &ctx, const DavCollection &c, const d
 		// Decoded through ParseDavPath rather than by a second copy of the
 		// name-and-extension rules, so the two can never drift apart.
 		DavPath parsed = ParseDavPath(decoded.substr(std::string("/dav/").size()));
-		if (parsed.type == DavRes::Object && parsed.room_num == c.room.room_num && !parsed.euid.empty()) {
-			out.push_back(parsed.euid);
+		if (parsed.type == DavRes::Object && parsed.room_num == c.room.room_num && !parsed.name.empty()) {
+			out.push_back(parsed.name);
 		}
 	}
 	return out;
@@ -294,7 +297,8 @@ void DavReport(Ctx &ctx, const DavPath &p) {
 				if (LoadObject(ctx, c, ch.euid, o)) {
 					EmitObject(ctx, w, c, o, pr);
 				} else {
-					WriteGoneResponse(w, ObjectHref(c.kind, ctx.username, c.room.room_num, ch.euid));
+					WriteGoneResponse(w, ObjectHref(c.kind, ctx.username, c.room.room_num,
+				                                ResourceNameFor(ctx, c, ch.euid)));
 				}
 			}
 		}
@@ -318,14 +322,15 @@ void DavReport(Ctx &ctx, const DavPath &p) {
 		}
 		davx::Writer w;
 		w.StartDoc(davx::kNsDav, "multistatus");
-		for (const auto &euid : MultigetEuids(ctx, c, root)) {
+		for (const auto &name : MultigetNames(ctx, c, root)) {
 			DavObject o;
-			if (LoadObject(ctx, c, euid, o)) {
+			if (LoadObjectByName(ctx, c, name, o)) {
 				EmitObject(ctx, w, c, o, pr);
 			} else {
 				// Named but gone. Reporting it as 404 inside the multistatus is
-				// how a client learns to drop it, rather than retrying forever.
-				WriteGoneResponse(w, ObjectHref(c.kind, ctx.username, c.room.room_num, euid));
+				// how a client learns to drop it, rather than retrying forever —
+				// and at the href it asked about, not at some other spelling.
+				WriteGoneResponse(w, ObjectHref(c.kind, ctx.username, c.room.room_num, name));
 			}
 		}
 		w.Close();

@@ -83,7 +83,10 @@ DavPath ParseDavPath(const std::string &tail);
 std::string PrincipalHref(const std::string &user);
 std::string HomeHref(DavKind kind, const std::string &user);
 std::string CollectionHref(DavKind kind, const std::string &user, int64_t room_num);
-std::string ObjectHref(DavKind kind, const std::string &user, int64_t room_num, const std::string &euid);
+// The href for a resource *name* — the last path segment, extension included.
+// Not for an euid: the two are not the same thing (see the naming section
+// below), and a caller that has only an euid asks ResourceNameFor first.
+std::string ObjectHref(DavKind kind, const std::string &user, int64_t room_num, const std::string &name);
 
 // ".ics" / ".vcf", and "text/calendar" / "text/vcard".
 const char *ObjectExt(DavKind kind);
@@ -106,15 +109,44 @@ bool ResolveCollection(Ctx &ctx, const DavPath &p, DavCollection &out);
 struct DavObject {
 	int64_t msgnum = 0;
 	std::string euid;
-	std::string body; // the text/calendar or text/vcard part, as stored
+	std::string name;  // the resource name it is served under, extension included
+	std::string body;  // the text/calendar or text/vcard part, as stored
 	int64_t msgtime = 0;
 };
+
+// ---- resource naming -----------------------------------------------------
+//
+// A resource name is *not* the object's UID, and assuming it was is a mistake
+// this module made once. The store keys an object by its own UID — an invariant
+// the native ENT0 path and the web UI both rely on — but a WebDAV client owns
+// the URL space, and several shipping ones (vdirsyncer among them) PUT a new
+// object to a random UUID of their own choosing. Refusing that is refusing the
+// client.
+//
+// So the two are bound rather than equated. `citadel_dav_names` records the
+// binding where it is not the default, and the default is the euid run through
+// dav::NameForEuid plus the collection's extension — which is what an object
+// created through the web UI or by the native protocol is served as, with no
+// row needed.
+
+// The name a stored object is served under.
+std::string ResourceNameFor(Ctx &ctx, const DavCollection &c, const std::string &euid);
+// The euid a resource name resolves to, or "" when it names nothing here.
+// Falls back to decoding the name as an euid, so a client that *does* use the
+// UID as the name needs no binding.
+std::string EuidForResource(Ctx &ctx, const DavCollection &c, const std::string &name);
+// Record (or forget) that `name` in this collection holds `euid`.
+void BindResourceName(Ctx &ctx, const DavCollection &c, const std::string &name,
+                      const std::string &euid);
+void UnbindResourceName(Ctx &ctx, const DavCollection &c, const std::string &name);
 
 // Every object in the collection, in msgnum order. Messages carrying no part of
 // the collection's media type are skipped rather than mis-rendered — a room can
 // hold an ordinary message alongside its objects.
 std::vector<DavObject> ListObjects(Ctx &ctx, const DavCollection &c);
 bool LoadObject(Ctx &ctx, const DavCollection &c, const std::string &euid, DavObject &out);
+// The same, by resource name rather than by euid — what a request path gives.
+bool LoadObjectByName(Ctx &ctx, const DavCollection &c, const std::string &name, DavObject &out);
 
 // The ETag for a stored object. It is the message number, which UpsertByEuid
 // allocates afresh on every save — so it changes exactly when the object does,

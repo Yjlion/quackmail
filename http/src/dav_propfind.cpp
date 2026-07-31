@@ -554,7 +554,7 @@ void DavPropfind(Ctx &ctx, const DavPath &p) {
 		if (depth >= 1) {
 			for (const auto &o : ListObjects(ctx, c)) {
 				PropSource os;
-				os.href = ObjectHref(p.kind, ctx.username, c.room.room_num, o.euid);
+				os.href = ObjectHref(p.kind, ctx.username, c.room.room_num, o.name);
 				os.type = DavRes::Object;
 				os.kind = p.kind;
 				os.user = ctx.username;
@@ -571,12 +571,12 @@ void DavPropfind(Ctx &ctx, const DavPath &p) {
 	case DavRes::Object: {
 		DavCollection c;
 		DavObject o;
-		if (!ResolveCollection(ctx, p, c) || !LoadObject(ctx, c, p.euid, o)) {
+		if (!ResolveCollection(ctx, p, c) || !LoadObjectByName(ctx, c, p.name, o)) {
 			DavStatus(ctx, 404);
 			return;
 		}
 		PropSource src;
-		src.href = ObjectHref(p.kind, ctx.username, c.room.room_num, o.euid);
+		src.href = ObjectHref(p.kind, ctx.username, c.room.room_num, o.name);
 		src.type = DavRes::Object;
 		src.kind = p.kind;
 		src.user = ctx.username;

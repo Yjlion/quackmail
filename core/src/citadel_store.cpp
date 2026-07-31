@@ -218,6 +218,29 @@ void EnsureCitadelSchema(Connection &con) {
 		)
 	)");
 
+	// What a DAV client calls each object.
+	//
+	// The store keys a groupware object by its own UID, and that invariant is
+	// load-bearing: the native ENT0/EUID path, the web UI and the DAV module all
+	// rely on it to agree about what a second save means. But a WebDAV client
+	// owns the URL space, and several shipping ones — vdirsyncer among them —
+	// name a new resource with a random UUID of their own rather than with the
+	// object's UID. Refusing that is refusing the client.
+	//
+	// So the two names are separated: euid stays the object's UID, and this
+	// records the resource name it is served under. A row exists only where the
+	// two differ from the default encoding, so objects created through the web
+	// UI or by the native protocol need none.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_dav_names (
+			room_num BIGINT,
+			name     VARCHAR,
+			euid     VARCHAR,
+			PRIMARY KEY (room_num, name)
+		)
+	)");
+	con.Query("CREATE INDEX IF NOT EXISTS idx_dav_names_euid ON citadel_dav_names(room_num, euid)");
+
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_state (
 			username  VARCHAR,
@@ -919,6 +942,7 @@ bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
 	// No tombstones either: there is no collection left for anyone to synchronize
 	// against, and the room number is reusable.
 	ExecP(con, "DELETE FROM citadel_room_tombstones WHERE room_num = $1", {Value::BIGINT(room_num)});
+	ExecP(con, "DELETE FROM citadel_dav_names WHERE room_num = $1", {Value::BIGINT(room_num)});
 	auto r = ExecP(con, "DELETE FROM citadel_rooms WHERE room_num = $1", {Value::BIGINT(room_num)});
 	if (!r) {
 		err = "delete failed";
