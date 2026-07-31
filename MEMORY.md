@@ -253,11 +253,20 @@ local from remote, deliver and queue: `EmailSubmission/set` and the SMTP
 submission listener differ only in how the message arrived, and the rate limit
 belongs to the caller because each protocol counts and refuses differently.
 
-**What is advertised is what is implemented.** `maxSizeUpload` is 0 because
-there is no upload endpoint, and `Mailbox/changes` returns
-`cannotCalculateChanges` because nothing journals room creation. Both are how a
-client is told the truth rather than left to discover a 404 or quietly miss a
-new folder.
+**An uploaded blob is staging, not storage.** `quackmail_jmap_blobs` holds bytes
+a client has sent but not yet attached to anything, in its own id namespace
+marked by a leading `U` — every other blob id names bytes already in the message
+store, and an uploaded one has no message yet. `Email/set` *copies* the bytes
+into the message rather than referencing the row, because JMAP calls a blob
+temporary until an object references it: a message that pointed at one would
+lose its attachment the moment the staging row aged out. The row is scoped to
+the uploader, because a random id is not an access rule.
+
+**What is advertised is what is implemented.** `Mailbox/changes` returns
+`cannotCalculateChanges` because nothing journals room creation, and
+`eventSourceUrl` is empty because there is no push. Both are how a client is
+told the truth rather than left to quietly miss a new folder or open a stream
+that would never carry anything.
 
 ### JSON is ours, and what it refuses is the contract
 

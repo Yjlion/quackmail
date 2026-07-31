@@ -25,7 +25,8 @@ deliberately left out of them.
         they differ only in how the message arrived.
   - [x] `Mailbox/get|query|changes`, `Email/get|query|changes|set`,
         `Thread/get`, `Identity/get`, `EmailSubmission/set|get`, `Core/echo`,
-        the Session resource and blob download.
+        the Session resource, and blob upload and download — so a client can
+        attach something rather than only compose text.
   - [x] `Email/changes` reuses `RoomChangeToken`/`RoomChangesSince` from the DAV
         work — without the tombstones there would be no way to report a deleted
         message, and `/changes` would not be implementable at all.
@@ -33,12 +34,12 @@ deliberately left out of them.
         `EmailSubmission/set` charges the same `policy::CheckRate` quota the
         submission listener charges. A second door onto one mail path that
         skipped either would make the rule advisory.
-  - [x] Deliberately absent: the upload endpoint (`maxSizeUpload` is 0, which is
-        how a client is told not to try rather than left to find a 404),
-        `Mailbox/changes` (nothing journals room creation, so
-        `cannotCalculateChanges` is the honest answer), and the JMAP Calendars
-        and Contacts bindings — drafts nothing ships against, where CalDAV and
-        CardDAV are what a phone actually connects with.
+  - [x] Deliberately absent: `Mailbox/changes` (nothing journals room creation,
+        so `cannotCalculateChanges` is the honest answer), push over EventSource
+        (`eventSourceUrl` is empty, which stops a client opening a stream that
+        would never carry anything), and the JMAP Calendars and Contacts
+        bindings — drafts nothing ships against, where CalDAV and CardDAV are
+        what a phone actually connects with.
 
 - [x] **CalDAV and CardDAV** over the groupware rooms, on the existing HTTP and
       HTTPS listeners — not an extension of its own, because it is a second
@@ -502,8 +503,7 @@ deliberately left out of them.
 - XMPP, not implemented (Citadel does not have them either): MUC, offline
   storage, stored rosters/subscriptions, s2s.
 - IMAP depth: `IDLE`, `CONDSTORE`/`QRESYNC`, server-side sort/thread.
-- JMAP depth: the upload endpoint (and with it `Email/set` creates carrying new
-  attachments), `Email/import`, `SearchSnippet/get`, push over EventSource, and
+- JMAP depth: `Email/import`, `SearchSnippet/get`, push over EventSource, and
   `Email/query` sorts other than newest-first. `Thread/get` scans the account
   rather than an index, because a thread id is a function of the References
   header rather than a stored column — fine at BBS scale, wrong at mailbox
