@@ -442,7 +442,7 @@ void RegisterDavRoutes(std::vector<Route> &out) {
 	// redirect to come back regardless.
 	out.push_back({"*", "/.well-known/caldav", Role::Anon, WellKnown});
 	out.push_back({"*", "/.well-known/carddav", Role::Anon, WellKnown});
-	out.push_back({"*", "/dav/*", Role::Dav, DavHandler});
+	out.push_back({"*", "/dav/*", Role::Api, DavHandler});
 }
 
 } // namespace qmweb

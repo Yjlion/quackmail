@@ -38,6 +38,9 @@ if(NOT TARGET quackmail_core)
         # JSON, for JMAP. Written rather than vendored: the extension build has
         # no package manager, and DuckDB's bundled yyjson is not exposed to us.
         ${QUACKMAIL_CORE_DIR}/src/json.cpp
+        # Sending an authenticated user's mail: the SMTP submission listener and
+        # JMAP's EmailSubmission/set are one implementation of it.
+        ${QUACKMAIL_CORE_DIR}/src/submission.cpp
         ${QUACKMAIL_CORE_DIR}/src/server_controller.cpp
         ${QUACKMAIL_CORE_DIR}/src/server_controls.cpp
         ${QUACKMAIL_CORE_DIR}/src/worker.cpp

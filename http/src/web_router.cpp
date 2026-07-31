@@ -33,9 +33,11 @@ const std::vector<Route> &Routes() {
 		RegisterAdminPolicyRoutes(r);
 		RegisterAdminOpsRoutes(r);
 		RegisterAdminListRoutes(r);
-		// Last: /dav/ collides with no page above it, and a DAV client is a rare
-		// visitor next to a browser loading a page's assets.
+		// Last: neither /dav/ nor /jmap/ collides with a page above it, and a
+		// programmatic client is a rare visitor next to a browser loading a
+		// page's assets.
 		RegisterDavRoutes(r);
+		RegisterJmapRoutes(r);
 		return r;
 	}();
 	return table;
@@ -151,12 +153,12 @@ std::string SubmittedCsrf(const http::Request &req) {
 	return std::string();
 }
 
-// Authenticate a DAV client from its `Authorization: Basic` header.
+// Authenticate a programmatic client from its `Authorization: Basic` header.
 //
 // The same credential IMAP and POP3 take, checked the same way, with the same
-// per-address failure gate the login form uses — a DAV endpoint that skipped it
+// per-address failure gate the login form uses — an API endpoint that skipped it
 // would be a password oracle sitting beside a rate-limited login page. No
-// session row is created: a DAV request is self-contained, and minting a
+// session row is created: these requests are self-contained, and minting a
 // browser session per PROPFIND would fill the table for nothing.
 //
 // Cleartext needs no separate guard here. The qm_web_force_https check above
@@ -336,7 +338,7 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 		}
 		ctx.captures = captures;
 
-		if (route.role == Role::Dav) {
+		if (route.role == Role::Api) {
 			// A cookie session is honoured too, so the same URLs can be poked at
 			// from a signed-in browser. Anything else has to present Basic.
 			if (!ctx.Authed() && !BasicAuth(ctx)) {
@@ -362,7 +364,7 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 				return;
 			}
 		}
-		if (req.method == "POST" && route.role != Role::Dav) {
+		if (req.method == "POST" && route.role != Role::Api) {
 			if (!OriginAcceptable(ctx)) {
 				Forbidden(ctx, "This form was submitted from another site.");
 				return;

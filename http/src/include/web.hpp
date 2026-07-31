@@ -31,13 +31,13 @@ enum class Role {
 	Anon, // no session needed
 	User, // any signed-in user
 	Aide, // axlevel >= 6, plus the admin-area TLS and enable gates
-	// A programmatic client rather than a browser: CalDAV, CardDAV. Same
+	// A programmatic client rather than a browser: CalDAV, CardDAV, JMAP. Same
 	// credentials as IMAP, presented as HTTP Basic, and answered with 401 rather
 	// than a redirect to the login page. Exempt from CSRF, which a client that
 	// has never seen an HTML form cannot possibly satisfy — and does not need
 	// to, because Basic credentials are not ambient authority the way a cookie
 	// is, so there is nothing for a cross-site request to ride.
-	Dav,
+	Api,
 };
 
 struct Ctx {
@@ -99,6 +99,9 @@ void RegisterAdminListRoutes(std::vector<Route> &out);
 // CalDAV and CardDAV over the groupware rooms, plus the .well-known redirects
 // that let a client find them. Defined in dav_router.cpp.
 void RegisterDavRoutes(std::vector<Route> &out);
+// JMAP: the Session resource, the method-call endpoint and blob download.
+// Defined in jmap_session.cpp.
+void RegisterJmapRoutes(std::vector<Route> &out);
 
 // Handle one already-parsed request: resolve the session, apply the transport
 // and role gates, verify CSRF, dispatch. Always fills `resp`.

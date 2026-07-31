@@ -47,6 +47,10 @@ set(EXTENSION_SOURCES
     src/dav_propfind.cpp
     src/dav_report.cpp
     src/dav_objects.cpp
+    # JMAP, over the same rooms and messages IMAP serves.
+    src/jmap_session.cpp
+    src/jmap_mail.cpp
+    src/jmap_submission.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
