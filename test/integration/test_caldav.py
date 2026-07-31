@@ -457,7 +457,7 @@ def main():
         # ---- permissions --------------------------------------------------------
         # CanPost is the gate. Assert it against a real read-only room rather
         # than trusting that the DAV layer remembered to ask.
-        con.execute("CALL cit_room_add('Shared Diary', 0)")
+        con.execute("CALL cit_room_add('Shared Diary')")
         room = con.execute(
             "SELECT room_num FROM citadel_rooms WHERE display_name = 'Shared Diary'").fetchone()[0]
         con.execute("UPDATE citadel_rooms SET default_view = 3 WHERE room_num = ?", [room])
