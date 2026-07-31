@@ -103,7 +103,7 @@ def main():
     con.execute(f"CALL qm_user_add('{OTHER}', '{OTHER_PASSWORD}')")
     con.execute("CALL qm_config_set('qm_web_force_https', '0')")
     con.execute("CALL qm_config_set('c_fqdn', 'jmap.example.com')")
-    con.execute("CALL qm_domain_add('jmap.example.com')")
+    con.execute("SELECT ok FROM qm_domain_add('jmap.example.com', 'local')").fetchall()
     con.execute(f"CALL qm_http_start('{HOST}', {PORT})")
     con.execute(f"CALL qm_imap_start('{HOST}', {IMAP_PORT})")
 
@@ -462,7 +462,7 @@ def main():
         # ---- rate limiting ---------------------------------------------------------
         # The same quota the SMTP submission listener charges. A second door
         # onto one mail path that skipped it would make the limit advisory.
-        con.execute("CALL qm_ratelimit_set('" + USER + "', 1, 3600)")
+        con.execute(f"SELECT ok FROM qm_ratelimit_set('{USER}', 1, 3600, 100)").fetchall()
         res = j.one("Email/set", {"accountId": USER, "create": {"d9": {
             "mailboxIds": {drafts: True},
             "to": [{"email": f"{OTHER}@jmap.example.com"}],
