@@ -187,7 +187,7 @@ bool BasicAuth(Ctx &ctx) {
 		return false;
 	}
 	if (!quackmail::auth::Verify(ctx.con, user, pass)) {
-		quackmail::web::RecordLoginFailure(ctx.con, ctx.req.peer_ip);
+		quackmail::web::RecordLoginFailure(ctx.con, ctx.req.peer_ip, user);
 		return false;
 	}
 	quackmail::web::ClearLoginFailures(ctx.con, ctx.req.peer_ip);

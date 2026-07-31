@@ -299,14 +299,20 @@ std::string NameForEuid(const std::string &euid) {
 	static const char *kHex = "0123456789ABCDEF";
 	std::string out;
 	out.reserve(euid.size() + 8);
-	for (unsigned char c : euid) {
-		if (IsSafeNameByte(c)) {
+	for (size_t i = 0; i < euid.size(); i++) {
+		unsigned char c = (unsigned char)euid[i];
+		// A '.' is safe everywhere except at the front, where leaving it alone
+		// would let an euid of "." or ".." encode to itself — and those are the
+		// two segments NormalizePath rejects outright, so the resource would be
+		// addressable by no URL at all. Escaping only the leading one keeps
+		// "abc@example.com" readable while making that shape unreachable.
+		if (IsSafeNameByte(c) && !(c == '.' && i == 0)) {
 			out += (char)c;
-		} else {
-			out += '~';
-			out += kHex[c >> 4];
-			out += kHex[c & 0x0F];
+			continue;
 		}
+		out += '~';
+		out += kHex[c >> 4];
+		out += kHex[c & 0x0F];
 	}
 	return out;
 }
