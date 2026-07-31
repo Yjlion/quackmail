@@ -336,6 +336,28 @@ def main():
             "WHERE NOT EXISTS (SELECT 1 FROM citadel_rooms r WHERE r.room_num = s.room_num)"
         ).fetchone()[0] == 0, "subscribers were left pointing at a room that is gone"
 
+        # The cleanup has to happen on the *web* route too, which is the case
+        # where hook installation is least obvious: a browser session opens its
+        # own Connection inside the http extension, and if store::EnsureSchema
+        # has not run there KillRoom finds an empty hook registry and drops the
+        # room while these rows survive — silently, because nothing errors.
+        #
+        # A feed rather than a list, because the route above refuses to delete a
+        # list's room and so can never reach the hook. And note what this file
+        # does *not* load: quackmail_spool owns the feed worker, but the http
+        # extension has to install the hook by itself or this is broken in
+        # exactly the deployment a room is most likely to be deleted from.
+        con.execute(
+            "CALL qm_feed_add('roomfeed', 'rss', 'https://127.0.0.1:9/f.xml', 'Project X')"
+        )
+        con.execute(
+            "INSERT INTO quackmail_feed_seen (feed_id, uid) "
+            "SELECT id, 'guid-1' FROM quackmail_feeds WHERE name = 'roomfeed'"
+        )
+        assert con.execute(
+            "SELECT count(*) FROM quackmail_feeds WHERE name = 'roomfeed'"
+        ).fetchone()[0] == 1
+
         status, headers, _ = post(owner, settings + "/kill", {"confirm": "Project X"},
                                   csrf_from=settings)
         assert status == 303, f"deleting the room returned {status}"
@@ -343,6 +365,15 @@ def main():
             "SELECT count(*) FROM citadel_rooms WHERE room_num = ?", [room_num]
         ).fetchone()[0]
         assert gone == 0, "the room survived its own deletion"
+        assert con.execute(
+            "SELECT count(*) FROM quackmail_feeds WHERE name = 'roomfeed'"
+        ).fetchone()[0] == 0, "the feed outlived the room it pulls into (hook did not fire on the web route)"
+        # RemoveFeed cascades to the seen-uids, which is why the hook goes
+        # through it rather than deleting the feed row directly.
+        assert con.execute(
+            "SELECT count(*) FROM quackmail_feed_seen s "
+            "WHERE NOT EXISTS (SELECT 1 FROM quackmail_feeds f WHERE f.id = s.feed_id)"
+        ).fetchone()[0] == 0, "feed seen-uids were orphaned"
 
         # ---- the rooms that are not anybody's to delete -------------------
         #
