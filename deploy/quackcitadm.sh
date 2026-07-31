@@ -166,7 +166,9 @@ cmd_room() {
               else
                   q "SELECT * FROM cit_room_acl($(sql_str "$1"))"
               fi ;;
-        *) die "unknown room command '$action' (add|list|acl)" ;;
+        rights) need 2 "$@"
+              q "SELECT * FROM cit_room_rights($(sql_str "$1"), $(sql_str "$2"))" ;;
+        *) die "unknown room command '$action' (add|list|acl|rights)" ;;
     esac
 }
 
@@ -370,8 +372,12 @@ usage: quackcitadm.sh <object> <action> [arguments]
                    qm_web_origins, qm_web_admin_enabled (off by default),
                    qm_web_admin_require_tls
   room      add <name> | list | acl <room> [<identifier> <rights>]
+            rights <room> <user>
               RFC 4314 rights: lrswipkxtea. Granting "anyone" the p right opens
-              the room to mail at room_<name>@<fqdn>; no rights removes the entry
+              the room to mail at room_<name>@<fqdn>; no rights removes the entry.
+              Granting a user the a right makes them that room's administrator.
+              "rights" shows what one user may actually do, derived from the
+              room's own attributes unioned with the stored grants
   floor     add <name> | list
   list      list | create <room> [address] | set <room> <key> <value> | remove <room>
             subs <room> | subscribe <room> <address> [post|digest]

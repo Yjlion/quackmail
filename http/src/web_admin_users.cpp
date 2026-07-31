@@ -320,6 +320,18 @@ int64_t FlagsFromForm(Ctx &ctx) {
 	return flags;
 }
 
+// Every bit this form actually offers. Anything outside it has to be carried
+// over on a save: the list above does not cover QR_MAILBOX or the file-area
+// bits (QR_UPLOAD/QR_DOWNLOAD/QR_VISDIR), and a checkbox set that is not
+// exhaustive silently clears whatever it left out.
+int64_t EditableFlagMask() {
+	int64_t mask = 0;
+	for (auto &f : kRoomFlags) {
+		mask |= f.bit;
+	}
+	return mask;
+}
+
 void GetRooms(Ctx &ctx) {
 	int64_t editing = ctx.ParamInt("edit", -1);
 
@@ -455,8 +467,9 @@ void PostRoomEdit(Ctx &ctx) {
 	room.password = ctx.req.Form("password");
 	room.info = ctx.req.Form("info");
 	// A personal room keeps QR_MAILBOX whatever the form says, or it would stop
-	// being a mailbox the moment an aide saved this page.
-	room.qr_flags = FlagsFromForm(ctx) | (room.qr_flags & quackmail::citadel::QR_MAILBOX);
+	// being a mailbox the moment an aide saved this page — and so does every
+	// other bit this form has no checkbox for.
+	room.qr_flags = (room.qr_flags & ~EditableFlagMask()) | FlagsFromForm(ctx);
 	std::string err;
 	if (!quackmail::citadel::UpdateRoom(ctx.con, room, err)) {
 		BadRequest(ctx, err);
@@ -595,6 +608,7 @@ const ConfigKey kConfigKeys[] = {
     {"qm_rbl_reject", "Reject listed clients (1/0)"},
     {"qm_quarantine_room", "Quarantine folder"},
     {"qm_web_theme", "Default colour theme"},
+    {"qm_room_create_axlevel", "Access level that may create rooms (0-6)"},
     {"qm_room_mail", "Accept mail for room addresses (1/0)"},
     {"qm_subaddress_sep", "Subaddress separator"},
     {"qm_subaddress_create", "Create subaddressed folders on demand (1/0)"},
@@ -609,9 +623,18 @@ const ConfigKey kConfigKeys[] = {
 struct PrefField {
 	const char *name;
 	const char *label;
-	enum Kind { Text, Bool, Theme } kind;
+	enum Kind { Text, Bool, Theme, AxLevel } kind;
 	const char *help;
 };
+
+// Citadel's axdefs[] — the seven access levels, by their canonical names. A
+// level is a number on the wire and in citadel_users, but nobody remembers
+// which, and a setting that gates a capability must not turn on a typo.
+std::vector<std::pair<std::string, std::string>> AxLevelOptions() {
+	return {{"0", "0 — deleted"},       {"1", "1 — new user"},       {"2", "2 — problem user"},
+	        {"3", "3 — local user"},    {"4", "4 — network user"},   {"5", "5 — preferred user"},
+	        {"6", "6 — aide"}};
+}
 
 struct PrefGroup {
 	const char *title;
@@ -651,6 +674,9 @@ const PrefField kMailFields[] = {
 };
 
 const PrefField kRoomFields[] = {
+    {"qm_room_create_axlevel", "Access level that may create rooms", PrefField::AxLevel,
+     "Aide by default, so nothing changes until you lower it. Whoever creates a room administers it: "
+     "they set its name, its access list and whether it is listed at all."},
     {"qm_room_mail", "Accept mail for room addresses", PrefField::Bool,
      "Enables the room_<name>@ lookup. A room is still only reachable once its "
      "access list grants \"anyone\" the p right."},
@@ -686,6 +712,12 @@ void GetPrefsPage(Ctx &ctx) {
 				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
 				        Select(std::string("v_") + f.name, ThemeOptions(),
 				               value.empty() ? "auto" : value) +
+				        "</label>";
+				break;
+			case PrefField::AxLevel:
+				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
+				        Select(std::string("v_") + f.name, AxLevelOptions(),
+				               value.empty() ? std::to_string(quackmail::citadel::kAideAxLevel) : value) +
 				        "</label>";
 				break;
 			case PrefField::Text:

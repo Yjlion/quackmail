@@ -213,6 +213,11 @@ void GetBbsRoom(Ctx &ctx) {
 		body += FormStart(ctx, RoomHref(room, "/zap"), "inline") + Button("Forget this room", "sec") +
 		        FormEnd();
 	}
+	// Shown to whoever holds the RFC 4314 `a` right — an aide, or anyone an aide
+	// has delegated the room to. Personal folders are managed from Mail.
+	if (room.mailbox_owner == 0 && quackmail::citadel::CanAdminister(ctx.con, ctx.username, room)) {
+		body += Link(RoomHref(room, "/settings"), "Room settings", "btn sec");
+	}
 	body += "</div>";
 
 	if (!room.info.empty()) {

@@ -5,22 +5,63 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-**Bringing the web interface up to WebCit-level capability**, in four PRs.
-Phase 1 is done; the rest follow in order.
-
-- [ ] **Phase 4 — per-room management and self-serve rooms**
-  - [ ] `citadel::CanAdminister` riding on the RFC 4314 `a` right, so an aide
-        delegates room administration from any IMAP client with `SETACL`. No new
-        column, no QuackCit-only bit.
-  - [ ] `/bbs/room/:n/settings` — preferences, an ACL editor, mailing-list
-        config (reusing `listserv::SetField`), and feeds. Feed *creation* stays
-        aide-only: `fetch::Feed` stores a plaintext password and `RunFeed` dials
-        an arbitrary host, which for a non-aide is an SSRF primitive.
-  - [ ] `/bbs/new` gated on `qm_room_create_axlevel` (default 6, so nothing
-        changes until an operator lowers it), with a flag mask and a guard
-        against names colliding with the `0000000002.Mail` mailbox keyspace.
+Nothing. The four-PR web overhaul is complete; see the backlog below for what
+was deliberately left out of it.
 
 ## Shipped
+
+- [x] **Per-room management and self-serve rooms** (phase 4 of the web overhaul)
+  - [x] `citadel::CanAdminister` on the RFC 4314 `a` right, which
+        `EffectiveRights` already derives for an aide and for the owner of a
+        personal room. An aide delegates a room by granting it — from the web,
+        `quackcitadm.sh room acl`, or any IMAP client's `SETACL`. No new column,
+        no QuackCit-only bit, nothing only one protocol can see.
+  - [x] `http/src/web_rooms.cpp`: `/bbs/room/:n/settings` as a **`Role::User`**
+        route — preferences, an ACL editor with the rights legend, the room's
+        `room_<name>@` address, mailing-list presentation and membership (each
+        field through `listserv::SetField`, so a partial form cannot reset what
+        it does not show), the feeds pointed at the room, and deletion behind
+        typing the room's name.
+  - [x] two things stay aide-only, and the page says why: creating a **feed**
+        (`fetch::Feed` stores a plaintext password and `RunFeed` dials an
+        arbitrary host — an SSRF primitive with credential storage attached) and
+        turning a room into a **list** at all (that mints an inbound address and
+        a fan-out engine). A room administrator may poll a feed an aide already
+        aimed at their room, and *invite* a subscriber — by confirmation token,
+        never outright, so nobody signs up an address they do not read.
+  - [x] `/bbs/new` gated on `qm_room_create_axlevel`, default 6 so nothing
+        changes until an operator lowers it; an unparseable value reads as the
+        default rather than as 0. A restricted flag mask (no `QR_NETWORK`, no
+        file-area bits). The creator gets a full stored grant, which is what
+        makes them the administrator.
+  - [x] **private rooms became joinable.** `ListRooms` and `ResolveRoomNumFor`
+        hid every `QR_PRIVATE` room from every non-aide, consulting no ACL — so
+        a self-serve private room would have been invisible to the person who
+        had just created it. Both now honour a stored `l` grant, which is
+        exactly RFC 4314's lookup right.
+  - [x] **the mailbox keyspace is defended.** A public room's internal key *is*
+        its display name; a personal room's is `<usernum padded to 10>.<room>`.
+        A public room called `0000000002.Mail` squats the key user 2's Mail room
+        needs, and the loser fails on a unique constraint rather than on
+        anything a user could read. `IsReservedRoomName` refuses the shape in
+        `CreateRoom` **and** `UpdateRoom`, so a rename cannot reach it either.
+  - [x] the room-edit forms carry over flag bits they have no checkbox for. The
+        admin console's list omits `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR`, so
+        saving that page silently cleared them; a checkbox set that is not
+        exhaustive always does.
+  - [x] `KillRoom` refuses the Aide room, which `PostAideMessage` writes to
+        unconditionally — losing it breaks the server's own log channel rather
+        than merely removing a room. Personal folders are refused by the
+        settings page outright: renaming "Mail" would leave IMAP's INBOX and
+        every Sieve `fileinto` pointing at a room that no longer exists.
+  - [x] `cit_room_rights(room, user)` — the *derived* view, which
+        `cit_room_acl` cannot show, so the predicate the front-ends ask is
+        assertable in SQL. `quackcitadm.sh room rights` beside it.
+  - [x] `test/sql/roomadmin.test` and `test/integration/test_roomadmin.py`,
+        which is mostly negative: a member without `a` cannot save settings, a
+        delegate cannot drop their own `a`, `anyone` cannot hold `a`, a stranger
+        404s on a private room and its settings alike, a feed for another room
+        is not runnable, and a flag the form does not offer survives a save.
 
 - [x] **Rich mail and a Sieve rule builder** (phase 3 of the web overhaul)
   - [x] `core/src/mime_build.cpp` — one builder choosing the nesting
@@ -374,6 +415,12 @@ Phase 1 is done; the rest follow in order.
 
 ## Backlog
 
+- Web: the wiki view (`VIEW_WIKI`/`WIKIMD`), which needs versioning, a
+  name→euid resolver and a markdown renderer — deferred out of phase 2b and
+  still the largest single gap against WebCit.
+- Room administration, left out of phase 4 deliberately: `k` ("create rooms
+  under this one") is in the rights legend but nothing reads it, so a room
+  administrator cannot yet delegate *creation* the way they delegate access.
 - Telnet BBS, still to fill in from `citadel.rc`: file transfer (the
   `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR` room flags and the `.Read file` /
   `.Admin File` family), `C`hat, and help files.

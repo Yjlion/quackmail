@@ -680,7 +680,17 @@ std::vector<Room> ListRooms(Connection &con, const std::string &username, int64_
 	if (!is_aide) {
 		// Hide other people's private rooms from non-aides, but always show a
 		// user their own mailbox rooms (which are themselves flagged private).
-		sql += " AND ((r.qr_flags & 4) = 0 OR r.mailbox_owner = $1)";
+		sql += " AND ((r.qr_flags & 4) = 0 OR r.mailbox_owner = $1";
+		if (!username.empty()) {
+			// ...and show an invitation-only room to anyone the access list has
+			// actually invited. `l` is RFC 4314's lookup right — literally "this
+			// mailbox is visible to you" — so honouring it here is what makes a
+			// private room joinable by grant rather than only by an aide's
+			// intervention or by guessing its name.
+			sql += " OR EXISTS (SELECT 1 FROM citadel_room_acl a WHERE a.room_num = r.room_num "
+			       "AND lower(a.identifier) IN (lower($2), 'anyone') AND a.rights LIKE '%l%')";
+		}
+		sql += ")";
 	}
 	// A zapped room is one the user has forgotten: it drops out of every listing
 	// except the one that exists to show them.
@@ -738,8 +748,32 @@ std::vector<Room> ListRooms(Connection &con, const std::string &username, int64_
 	return out;
 }
 
+bool IsReservedRoomName(const std::string &display_name) {
+	// The shape MailboxRoomName builds: ten digits, a dot, then anything. Only
+	// the prefix matters — what follows is the personal room's own name.
+	if (display_name.size() < 12) {
+		return false;
+	}
+	for (size_t i = 0; i < 10; i++) {
+		if (!std::isdigit((unsigned char)display_name[i])) {
+			return false;
+		}
+	}
+	return display_name[10] == '.';
+}
+
 int64_t CreateRoom(Connection &con, const std::string &display_name, int64_t floor, int64_t qr_flags,
                    const std::string &password, int64_t mailbox_owner, std::string &err) {
+	if (display_name.empty()) {
+		err = "room name may not be empty";
+		return -1;
+	}
+	// Only public rooms are affected: a personal room's key is built from its
+	// owner's number, so its display name cannot collide with anything.
+	if (mailbox_owner == 0 && IsReservedRoomName(display_name)) {
+		err = "that name is reserved for personal mailboxes";
+		return -1;
+	}
 	auto num = ScalarP(con, "SELECT nextval('citadel_room_seq')", {});
 	if (num.IsNull()) {
 		err = "could not allocate room number";
@@ -766,6 +800,10 @@ bool UpdateRoom(Connection &con, const Room &room, std::string &err) {
 	}
 	if (room.display_name.empty()) {
 		err = "room name may not be empty";
+		return false;
+	}
+	if (existing.mailbox_owner == 0 && IsReservedRoomName(room.display_name)) {
+		err = "that name is reserved for personal mailboxes";
 		return false;
 	}
 	if (room.floor_num != existing.floor_num) {
@@ -797,6 +835,12 @@ bool UpdateRoom(Connection &con, const Room &room, std::string &err) {
 bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
 	if (room_num == kLobbyRoom) {
 		err = "cannot delete the Lobby";
+		return false;
+	}
+	if (room_num == kAideRoom) {
+		// PostAideMessage writes here unconditionally, so losing it would break
+		// the server's own log channel rather than just removing a room.
+		err = "cannot delete the Aide room";
 		return false;
 	}
 	ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1", {Value::BIGINT(room_num)});
@@ -1273,6 +1317,13 @@ bool CanPost(Connection &con, const std::string &username, const Room &room) {
 	std::string rights = EffectiveRights(con, username, room);
 	char needed = username.empty() ? 'p' : 'i';
 	return rights.find(needed) != std::string::npos;
+}
+
+bool CanAdminister(Connection &con, const std::string &username, const Room &room) {
+	if (username.empty()) {
+		return false; // an anonymous gateway never administers anything
+	}
+	return EffectiveRights(con, username, room).find('a') != std::string::npos;
 }
 
 int64_t ResolveMailRoom(Connection &con, const std::string &local_part) {

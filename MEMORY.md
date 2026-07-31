@@ -30,6 +30,7 @@ prefixes still say `quackmail`; the product is QuackCit.
 | 10 | Web overhaul phase 2a: bundled IANA tz database, vCard/iCalendar, `UpsertByEuid`, the contacts view | PR #25 |
 | 10 | Web overhaul phase 2b: shared content-line grammar, vNote, viewer time zone, calendar/tasks/notes/blog views | PR #26 |
 | 10 | Web overhaul phase 3: MIME builder, two HTML sanitizers, rich compose with cid:, Sieve rule builder | PR #27 |
+| 10 | Web overhaul phase 4: `CanAdminister` on the RFC 4314 `a` right, per-room settings, self-serve rooms | PR #28 |
 
 Phases 2 and 3 were validated byte-for-byte against the real Citadel server, and
 the **official `citadel` text client drives a full clean session** against
@@ -182,6 +183,46 @@ A room whose view has no renderer keeps rendering as a message board, which is
 always truthful — the objects really are messages. `?view=raw` forces that for
 any room, and you want it the first time a Contacts room contains something that
 is not a vCard.
+
+### Room administration is a right, not a role
+
+`citadel::CanAdminister` is `EffectiveRights(...).find('a')` and nothing else.
+That was the whole decision: a QuackCit-only "room owner" column would have been
+easier to write and invisible to every other protocol, whereas the RFC 4314 `a`
+right is already derived for aides and mailbox owners, already unioned with
+stored grants, and already readable and writable from any IMAP client with
+`GETACL`/`SETACL`. So delegating a room is one `SETACL` — from the web, from
+`quackcitadm.sh room acl`, or from Thunderbird — and every front-end agrees.
+
+Two consequences worth keeping in mind:
+
+- **`anyone` must never hold `a`.** That identifier covers callers who are not
+  signed in. `CanAdminister` refuses an empty username before it looks at rights
+  at all, and the web form refuses to store the grant, but the belt and the
+  braces are both deliberate.
+- **`l` had to start meaning something.** `ListRooms` hid every `QR_PRIVATE`
+  room from every non-aide without consulting the ACL, which was fine while only
+  aides made private rooms and became wrong the moment a user could. Honouring a
+  stored `l` grant is what turns "private" from *name-guessing* into
+  *invitation*, and it is what stops a self-serve private room being invisible
+  to the person who just created it.
+
+The line drawn for a delegate is capability-based, not hierarchical: they may do
+anything that stays inside their room, and nothing that reaches outward. Making
+a room into a mailing list mints an inbound address; creating a feed stores a
+password and dials an arbitrary host. Both stay with the operator. Running a
+feed an aide already aimed at the room, and inviting a subscriber by
+confirmation token, do not.
+
+### A public room's name is its primary key
+
+`citadel_rooms.name` is UNIQUE, and a public room's key *is* its display name
+while a personal room's is `MailboxRoomName(usernum, room)` —
+`"0000000002.Mail"`. So a public room by that literal name squats the key user 2
+needs, and `GetOrCreateUserRoom` then fails on the constraint with no way for the
+user to understand why. `IsReservedRoomName` refuses ten digits followed by a
+dot, in `CreateRoom` **and** `UpdateRoom` — a rename reaches the same keyspace,
+and guarding only creation would have looked complete.
 
 - **Greeting format.** The Citadel greeting must be `200 <node> Citadel server
   ready.` The pipe-delimited variant QuackCit used first was rejected outright by

@@ -27,6 +27,7 @@ set(EXTENSION_SOURCES
     src/web_assets.cpp
     src/web_auth.cpp
     src/web_bbs.cpp
+    src/web_rooms.cpp
     src/web_views.cpp
     src/web_contacts.cpp
     src/web_calendar.cpp

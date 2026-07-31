@@ -229,6 +229,13 @@ std::string FlashText(const std::string &slug) {
 	if (slug == "feed_failed") {
 		return "The feed could not be reached — see its status in the table.";
 	}
+	if (slug == "room_created") {
+		return "Room created. You administer it: the settings below decide who else can see it, read it "
+		       "and post to it.";
+	}
+	if (slug == "invited") {
+		return "Invitation sent. That address joins the list once somebody reading it follows the link.";
+	}
 	if (slug == "confirm_sent") {
 		// Deliberately says nothing about whether the list or the subscription
 		// exists: this page is anonymous, and a more helpful message would let
@@ -337,6 +344,9 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 
 	group("Rooms");
 	item("/bbs/", "All rooms", "bbs");
+	if (MayCreateRooms(ctx)) {
+		item("/bbs/new", "Create a room", "newroom");
+	}
 	item("/bbs/who", "Who is online", "who");
 	endgroup();
 
@@ -587,7 +597,12 @@ bool ResolveRoomNumFor(Ctx &ctx, int64_t room_num, Room &out) {
 		return false; // someone else's personal room; not even an aide browses those
 	}
 	if (!ctx.IsAide() && (out.qr_flags & quackmail::citadel::QR_PRIVATE) && out.mailbox_owner != usernum) {
-		return false;
+		// An invitation-only room is reachable by whoever the access list names,
+		// which is the same rule ListRooms applies — `l` is RFC 4314's lookup
+		// right. Without this a private room would be invisible even to the
+		// person who created it and holds every right on it.
+		return quackmail::citadel::EffectiveRights(ctx.con, ctx.username, out).find('l') !=
+		       std::string::npos;
 	}
 	return true;
 }

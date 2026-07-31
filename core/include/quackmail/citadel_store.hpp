@@ -337,6 +337,25 @@ std::vector<std::pair<std::string, std::string>> ListRights(duckdb::Connection &
 // new message must ask — resolving a room is not permission to write to it.
 bool CanPost(duckdb::Connection &con, const std::string &username, const Room &room);
 
+// May `username` change this room — its name, flags, view, access list? True on
+// the RFC 4314 `a` (administer) right, which EffectiveRights already derives for
+// an aide and for the owner of a personal room.
+//
+// Riding on `a` rather than a QuackCit-only column is the whole point: an aide
+// delegates a room by granting it, from this server's web console or from any
+// IMAP client's SETACL, and every front-end agrees about who holds it. There is
+// nothing new to store and nothing that only one protocol can see.
+bool CanAdminister(duckdb::Connection &con, const std::string &username, const Room &room);
+
+// True when `display_name` would collide with the personal-room keyspace.
+//
+// A public room's internal key *is* its display name, while a personal room's is
+// "<usernum zero-padded to 10>.<room>". So a public room called
+// "0000000002.Mail" squats the key user 2's Mail room needs, and whoever gets
+// there second silently fails. CreateRoom and UpdateRoom refuse the shape, which
+// matters most for self-serve creation but is wrong from any front-end.
+bool IsReservedRoomName(const std::string &display_name);
+
 // Resolve the local-part of a public room address ("room_the_lobby") to the
 // room it names. Returns -1 unless the room exists, is public (not a mailbox,
 // not QR_PRIVATE, not QR_PASSWORDED) *and* its ACL grants `p` to "anyone" —
