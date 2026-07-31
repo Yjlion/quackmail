@@ -179,3 +179,50 @@ query II
 SELECT ok, note FROM cit_room_add('Team');
 ----
 false	room already exists
+
+# ---- deleting a room -------------------------------------------------------
+#
+# What goes with it — a mailing list, a feed — is asserted where those live, in
+# test/sql/listserv.test and test/sql/feed.test. Here it is the room itself and
+# the two rooms that may never go.
+
+query II
+SELECT ok, note FROM cit_room_kill('Lobby');
+----
+false	cannot delete the Lobby
+
+# The Aide room is the server's own log channel: PostAideMessage writes to it
+# unconditionally, so deleting it would break logging rather than remove a room.
+query II
+SELECT ok, note FROM cit_room_kill('Aide');
+----
+false	cannot delete the Aide room
+
+query II
+SELECT ok, note FROM cit_room_kill('Nowhere');
+----
+false	no such public room
+
+# The room's access list goes with it, which is the row cit_room_acl reads.
+statement ok
+SELECT ok FROM cit_room_acl_set('Announcements', 'alice', 'lrswip');
+
+query I
+SELECT count(*) FROM cit_room_acl('Announcements');
+----
+1
+
+query II
+SELECT ok, note FROM cit_room_kill('Announcements');
+----
+true	room deleted
+
+query I
+SELECT count(*) FROM cit_room_acl('Announcements');
+----
+0
+
+query I
+SELECT count(*) FROM citadel_rooms WHERE display_name = 'Announcements';
+----
+0

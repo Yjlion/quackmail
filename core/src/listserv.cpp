@@ -308,6 +308,18 @@ void EnsureSchema(Connection &con) {
 			state       VARCHAR DEFAULT 'held'
 		)
 	)");
+
+	// A room can be deleted from the web console, the room settings page or the
+	// telnet .Admin family, and the list configured against it has to go with it
+	// whichever route it went by: a citadel_lists row outliving its room leaves
+	// ResolveAddress resolving the list's inbound address to a room_num that is
+	// no longer there, so mail keeps being accepted for nowhere. KillRoom cannot
+	// reach these tables itself (this file depends on citadel_store, not the
+	// reverse), so it calls back here instead.
+	citadel::RegisterRoomDeletedHook("listserv", [](Connection &con, int64_t room_num) {
+		std::string err;
+		RemoveList(con, room_num, err); // no list on the room is not an error
+	});
 }
 
 // ---------------------------------------------------------------------------

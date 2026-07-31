@@ -400,3 +400,36 @@ query I
 SELECT count(*) FROM qm_feeds();
 ----
 1
+
+# ---- deleting the target room takes the feed with it ----------------------
+#
+# A feed targets a room or a local user, never both, so a room-targeted feed
+# whose room has gone has nowhere left to put what it pulls — RunDue would keep
+# polling the far end every interval and throw the result away. fetch registers
+# a room-deleted hook for the same reason listserv does: citadel_store.cpp
+# cannot reach quackmail_feeds without depending on the layer above it.
+
+statement ok
+INSERT INTO quackmail_feed_seen (feed_id, uid, seen_at)
+SELECT id, 'g1', 1753660800 FROM quackmail_feeds WHERE name = 'example';
+
+query I
+SELECT count(*) FROM quackmail_feed_seen;
+----
+1
+
+query II
+SELECT ok, note FROM cit_room_kill('News');
+----
+true	room deleted
+
+# The feed row and its seen-uids both went; nothing is left to poll.
+query I
+SELECT count(*) FROM qm_feeds();
+----
+0
+
+query I
+SELECT count(*) FROM quackmail_feed_seen;
+----
+0

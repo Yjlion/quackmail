@@ -309,14 +309,54 @@ def main():
         assert status == 400, "a room was deleted without its name being typed"
         assert flags_of(con, room_num) is not None
 
-        # KillRoom cannot reach the list tables, so deleting a room that is
-        # still a list would leave its address resolving to nothing. The route
-        # refuses rather than doing half the job.
+        # KillRoom does take the list configuration with it now, so this refusal
+        # is about authority rather than about leaving half a list behind: the
+        # address a list stops accepting mail for is the site's, so unmaking one
+        # is an aide's call and not a room administrator's.
         con.execute("CALL qm_list_create('Project X', 'projectx')")
         status, _, body = post(owner, settings + "/kill", {"confirm": "Project X"},
                                csrf_from=settings)
         assert status == 400 and "projectx@" in body, f"a list's room was deletable: {status}"
+        assert con.execute(
+            "SELECT count(*) FROM citadel_lists WHERE room_num = ?", [room_num]
+        ).fetchone()[0] == 1, "the refused delete removed the list anyway"
         con.execute("CALL qm_list_remove('Project X')")
+
+        # What an aide gets instead: room and list go together, so no address is
+        # left accepting mail for a room that is not there.
+        con.execute("CALL cit_room_add('Doomed')")
+        con.execute("CALL qm_list_create('Doomed', 'doomed')")
+        con.execute("CALL qm_list_sub_add('Doomed', 'erin@example.com', 'post')")
+        con.execute("CALL cit_room_kill('Doomed')")
+        assert con.execute(
+            "SELECT count(*) FROM citadel_lists WHERE address = 'doomed'"
+        ).fetchone()[0] == 0, "the list survived the room it was configured against"
+        assert con.execute(
+            "SELECT count(*) FROM citadel_list_subs s "
+            "WHERE NOT EXISTS (SELECT 1 FROM citadel_rooms r WHERE r.room_num = s.room_num)"
+        ).fetchone()[0] == 0, "subscribers were left pointing at a room that is gone"
+
+        # The cleanup has to happen on the *web* route too, which is the case
+        # where hook installation is least obvious: a browser session opens its
+        # own Connection inside the http extension, and if store::EnsureSchema
+        # has not run there KillRoom finds an empty hook registry and drops the
+        # room while these rows survive — silently, because nothing errors.
+        #
+        # A feed rather than a list, because the route above refuses to delete a
+        # list's room and so can never reach the hook. And note what this file
+        # does *not* load: quackmail_spool owns the feed worker, but the http
+        # extension has to install the hook by itself or this is broken in
+        # exactly the deployment a room is most likely to be deleted from.
+        con.execute(
+            "CALL qm_feed_add('roomfeed', 'rss', 'https://127.0.0.1:9/f.xml', 'Project X')"
+        )
+        con.execute(
+            "INSERT INTO quackmail_feed_seen (feed_id, uid) "
+            "SELECT id, 'guid-1' FROM quackmail_feeds WHERE name = 'roomfeed'"
+        )
+        assert con.execute(
+            "SELECT count(*) FROM quackmail_feeds WHERE name = 'roomfeed'"
+        ).fetchone()[0] == 1
 
         status, headers, _ = post(owner, settings + "/kill", {"confirm": "Project X"},
                                   csrf_from=settings)
@@ -325,6 +365,15 @@ def main():
             "SELECT count(*) FROM citadel_rooms WHERE room_num = ?", [room_num]
         ).fetchone()[0]
         assert gone == 0, "the room survived its own deletion"
+        assert con.execute(
+            "SELECT count(*) FROM quackmail_feeds WHERE name = 'roomfeed'"
+        ).fetchone()[0] == 0, "the feed outlived the room it pulls into (hook did not fire on the web route)"
+        # RemoveFeed cascades to the seen-uids, which is why the hook goes
+        # through it rather than deleting the feed row directly.
+        assert con.execute(
+            "SELECT count(*) FROM quackmail_feed_seen s "
+            "WHERE NOT EXISTS (SELECT 1 FROM quackmail_feeds f WHERE f.id = s.feed_id)"
+        ).fetchone()[0] == 0, "feed seen-uids were orphaned"
 
         # ---- the rooms that are not anybody's to delete -------------------
         #

@@ -285,6 +285,26 @@ void EnsureSchema(Connection &con) {
 			PRIMARY KEY (feed_id, uid)
 		)
 	)");
+
+	// A feed targets a room or a local user, never both (SetFeed enforces it), so
+	// a room-targeted feed whose room has been deleted has nowhere left to put
+	// what it pulls — RunDue would go on polling the far end every interval and
+	// throwing the result away. The room going takes the feed with it. Same
+	// reason as listserv's hook: citadel_store cannot reach this table without
+	// depending on the layer above it, so it calls back here.
+	citadel::RegisterRoomDeletedHook("fetch", [](Connection &con, int64_t room_num) {
+		auto r = ExecP(con, "SELECT name FROM quackmail_feeds WHERE target_room = $1",
+		               {Value::BIGINT(room_num)});
+		if (!r) {
+			return;
+		}
+		auto &mat = r->Cast<MaterializedQueryResult>();
+		for (idx_t i = 0; i < mat.RowCount(); i++) {
+			std::string err;
+			// Through RemoveFeed so the seen-uid rows go too, in one place.
+			RemoveFeed(con, Str(mat.GetValue(0, i)), err);
+		}
+	});
 }
 
 std::vector<Feed> ListFeeds(Connection &con, bool enabled_only) {

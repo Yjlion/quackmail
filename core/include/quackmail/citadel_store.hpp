@@ -216,7 +216,32 @@ int64_t CreateRoom(duckdb::Connection &con, const std::string &display_name, int
 // Update the mutable attributes of an existing room (everything but room_num,
 // mailbox_owner and highest_msg). Renames the internal key to match.
 bool UpdateRoom(duckdb::Connection &con, const Room &room, std::string &err);
+// Deletes the room together with its message pointers, per-user state, access
+// list, and whatever the layers above have hung off it (see
+// RegisterRoomDeletedHook). Refuses the Lobby and the Aide room.
 bool KillRoom(duckdb::Connection &con, int64_t room_num, std::string &err);
+
+// ---- room deletion hooks -------------------------------------------------
+// Layers built on top of the room store keep per-room rows of their own: a
+// mailing list (`citadel_lists`) and a remote feed (`quackmail_feeds`) are both
+// keyed by room_num. Neither can be cleaned up from KillRoom directly —
+// listserv.cpp and fetch.cpp already include this header, so a call the other
+// way would close a cycle, and naming their tables here would be the same
+// coupling written backwards.
+//
+// So the dependency stays one-directional and the callback goes the other way:
+// each layer registers a cleanup from its own EnsureSchema, and KillRoom runs
+// the registered set before dropping the room. Adding a table keyed by room_num
+// means adding a hook beside it, not editing this file.
+//
+// The registry is process-local rather than a table, which is the one place
+// that is safe: it holds function pointers, not state another process could
+// need, and every route to KillRoom (a protocol handler, a table function init)
+// calls store::EnsureSchema first, so the hooks are installed before a room can
+// be deleted.
+using RoomDeletedHook = void (*)(duckdb::Connection &con, int64_t room_num);
+// Idempotent in `name`: EnsureSchema runs once per session, the hook installs once.
+void RegisterRoomDeletedHook(const std::string &name, RoomDeletedHook hook);
 // Get (creating if needed) a personal room owned by a user, identified by its
 // display name (e.g. "Mail", or a Sieve fileinto folder). Returns room_num.
 int64_t GetOrCreateUserRoom(duckdb::Connection &con, const std::string &username,
