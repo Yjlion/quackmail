@@ -5,8 +5,8 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-Nothing. CalDAV, CardDAV and JMAP all landed; see the backlog for what was
-deliberately left out of them.
+Nothing. **v0.6.0** shipped CalDAV, CardDAV and JMAP on the existing HTTP/HTTPS
+listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
@@ -68,10 +68,11 @@ deliberately left out of them.
         inbound message takes is untouched; removals left nothing behind at all,
         which is why a deletion was invisible to any token derived from the
         store.
-  - [x] `Role::Dav`: Basic against the same credential IMAP takes, through the
-        same `LoginAllowed` throttle the login form uses; 401 with a challenge
-        rather than a redirect to `/login`; no CSRF, which a client that has
-        never seen an HTML form cannot satisfy and does not need to.
+  - [x] `Role::Api` (named `Role::Dav` until JMAP reused it): Basic against the
+        same credential IMAP takes, through the same `LoginAllowed` throttle the
+        login form uses; 401 with a challenge rather than a redirect to
+        `/login`; no CSRF, which a client that has never seen an HTML form
+        cannot satisfy and does not need to.
   - [x] Deliberately absent: `LOCK`/`UNLOCK` (we advertise `DAV: 1` only —
         CalDAV's consistency story is ETags and `If-Match`, which is
         implemented), `MKCALENDAR`/`MKCOL` (creating a calendar means creating a
@@ -496,6 +497,36 @@ deliberately left out of them.
 
 ## Backlog
 
+The first three came out of building 0.6.0 and are the ones most likely to bite.
+
+- **Point a real JMAP client at `/jmap/`.** The DAV half was validated against
+  `caldav` 3.2.1 and vdirsyncer 0.20, and that is what caught a design error
+  (resource names were required to equal the object UID; vdirsyncer names them
+  with its own UUID) that `test_caldav.py` had been passing over the whole time.
+  JMAP has had no equivalent probe, so it rests entirely on assertions written
+  by the same person who chose the behaviour — the exact footing that already
+  proved wrong once. There is no widely-deployed JMAP client to point at it,
+  which is the problem rather than an excuse.
+- **DAV scheduling**, which a groupware server is expected to have and this one
+  does not: free-busy (`CALDAV:free-busy-query`, `schedule-outbox`), and iTIP/
+  iMIP so an invitation sent to an attendee arrives as mail and their reply
+  updates the event. Today an event with `ATTENDEE` properties is stored and
+  served faithfully and nothing else happens.
+- **`c_version` is stale on upgraded installs.** The seed is `INSERT OR IGNORE`,
+  so a database created before 0.6.0 keeps reporting whatever it was created
+  with — over the Citadel, NNTP, POP3 and telnet banners. The v0.6.0 notes tell
+  operators to run `quackcitadm.sh config set c_version`, which is a workaround
+  rather than a fix; `quackcit.sh start` could reconcile it.
+
+- `citadel_dav_names` rows leak when an object is deleted by something other
+  than DAV. The web UI's delete removes the message and the binding stays,
+  which is harmless (the name resolves to an euid that no longer exists, so it
+  404s correctly, and a re-PUT upserts) but unbounded until the room is killed.
+  A sweep beside `PruneTombstones` would do it.
+- DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
+  `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the
+  `calendar-query` filters past comp-name and time-range, and `expand` on a
+  recurring event. Notes rooms stay out: vNote is not a DAV resource type.
 - Web: the wiki view (`VIEW_WIKI`/`WIKIMD`), which needs versioning, a
   name→euid resolver and a markdown renderer — deferred out of phase 2b and
   still the largest single gap against WebCit.

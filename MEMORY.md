@@ -197,10 +197,10 @@ new msgnum and once as the tombstone for the one it displaced, which is why
 callers resolve the euid through `FindByEuid` rather than trusting `deleted`:
 still resolves means changed, no longer resolves means removed.
 
-**A DAV client authenticates with Basic and gets no session row.** `Role::Dav`
-is a fourth role rather than a field on `Route`, because a default member
-initializer would make `Route` a non-aggregate and break every one of the ~80
-`push_back({...})` calls. It answers 401 with a challenge instead of redirecting
+**A DAV client authenticates with Basic and gets no session row.** `Role::Api`
+(named `Role::Dav` until JMAP reused it) is a fourth role rather than a field on
+`Route`, because a default member initializer would make `Route` a non-aggregate
+and break every one of the ~80 `push_back({...})` calls. It answers 401 with a challenge instead of redirecting
 to `/login`, skips CSRF — a program that has never seen an HTML form cannot
 produce a token, and Basic credentials are not ambient authority the way a
 cookie is — and runs through the same `LoginAllowed` throttle, or the DAV
