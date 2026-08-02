@@ -11,3 +11,22 @@ __pycache__/
 .venv/
 test/certs/*.pem
 .cache/
+
+# ---- a server run from a git checkout --------------------------------------
+# deploy/quackcit.sh detects the checkout layout and defaults QUACKCIT_STATE_DIR,
+# QUACKCIT_LOG_DIR and QUACKCIT_RUN_DIR all to the repo root, so starting the
+# server drops its database, logs and runtime files straight into the tree.
+# These names are the defaults in deploy/quackcit_common.sh; keep the two in
+# step if one of them moves.
+#
+# initial-credentials is the one that matters: it holds the generated admin
+# password from a first start, and the file itself says to delete it.
+quackcit.duckdb
+quackcit.duckdb.wal
+quackcit.log
+quackcit.err
+quackcit.pid
+control.fifo
+initial-credentials
+startup.sql
+tls/
