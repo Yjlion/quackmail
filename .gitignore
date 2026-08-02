@@ -26,7 +26,16 @@ quackcit.duckdb.wal
 quackcit.log
 quackcit.err
 quackcit.pid
-control.fifo
 initial-credentials
 startup.sql
+ready
 tls/
+# Named pipes, which git does not track anyway — listed so the set matches
+# what a start actually creates rather than only what git would have noticed.
+control.fifo
+log.fifo
+
+# `make test` runs DuckDB's unittest binary, which makes this beside the repo.
+# Empty today, so git says nothing; it stops being invisible the moment a test
+# leaves a file in it.
+duckdb_unittest_tempdir/
