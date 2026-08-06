@@ -1682,6 +1682,12 @@ void PruneTombstones(Connection &con, int64_t older_than_seconds) {
 	ExecP(con, "DELETE FROM citadel_room_tombstones WHERE deleted_at < $1", {Value::BIGINT(cutoff)});
 }
 
+void PruneDavNames(Connection &con) {
+	con.Query("DELETE FROM citadel_dav_names d WHERE NOT EXISTS ("
+	          "  SELECT 1 FROM citadel_room_msgs rm JOIN citadel_messages m ON m.msgnum = rm.msgnum"
+	          "  WHERE rm.room_num = d.room_num AND m.euid = d.euid)");
+}
+
 int64_t FindByEuid(Connection &con, int64_t room_num, const std::string &euid) {
 	if (euid.empty()) {
 		return -1;

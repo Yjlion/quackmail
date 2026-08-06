@@ -469,6 +469,13 @@ std::vector<RoomChange> RoomChangesSince(duckdb::Connection &con, int64_t room_n
 // the sync-collection spec requires of an expired token.
 void PruneTombstones(duckdb::Connection &con, int64_t older_than_seconds);
 
+// Drop citadel_dav_names rows whose euid no longer resolves to a message in
+// their room — left behind because only the DAV DELETE handler unbinds a
+// name; every other delete path (web UI, telnet, native Citadel) removes the
+// message and never learns the binding existed. Not time-windowed like
+// PruneTombstones: a row is either orphaned or it isn't.
+void PruneDavNames(duckdb::Connection &con);
+
 // ---- per-user string preferences ----------------------------------------
 // The US_* bit field holds the boolean BBS toggles; this holds anything with a
 // value. An unset preference returns `dflt`, which is how "follow the site

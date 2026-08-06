@@ -12,6 +12,7 @@ Run after `make` so the loadable extensions exist under build/release/extension.
 """
 import imaplib
 import os
+import re
 import ssl
 import time
 
@@ -122,6 +123,42 @@ def main():
         assert M.search(None, "SEEN")[1] == [b"1"], "SEEN search"
         assert M.search(None, "UNSEEN")[1] == [b""], "UNSEEN search"
 
+        # A native (format 0) message has no header block at all in msg.raw —
+        # SEARCH has to match against the same RenderRfc822 view FETCH already
+        # renders, not the stored bytes, or FROM/SUBJECT can never match and
+        # LARGER/SMALLER disagree with the RFC822.SIZE FETCH reports.
+        con.execute(
+            """
+            INSERT INTO citadel_messages (msgnum, author, recipient, msgtime, subject, format_type, raw)
+            VALUES (nextval('citadel_msg_seq'), 'alice', 'imapuser', epoch(now())::BIGINT,
+                    'Native Probe', 0, 'the native body')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO citadel_room_msgs (room_num, msgnum)
+            SELECT r.room_num, (SELECT max(msgnum) FROM citadel_messages)
+            FROM citadel_rooms r
+            JOIN citadel_users u ON u.usernum = r.mailbox_owner
+            WHERE u.username = 'imapuser' AND r.display_name = 'Mail'
+            """
+        )
+        M.select("INBOX")
+        typ, data = M.search(None, "SUBJECT", "Native")
+        assert typ == "OK" and data[0], f"SUBJECT search missed a native message: {data}"
+        native_seq = data[0].split()[0]
+        typ, data = M.search(None, "FROM", "alice")
+        assert typ == "OK" and native_seq in data[0].split(), f"FROM search missed a native message: {data}"
+
+        typ, data = M.fetch(native_seq, "(RFC822.SIZE)")
+        assert typ == "OK", data
+        m = re.search(rb"RFC822\.SIZE (\d+)", data[0])
+        assert m, data
+        size = int(m.group(1))
+        assert native_seq in M.search(None, "LARGER", str(size - 1))[1][0].split(), "LARGER missed the rendered size"
+        assert native_seq not in M.search(None, "LARGER", str(size))[1][0].split(), "LARGER matched its own size"
+        assert native_seq in M.search(None, "SMALLER", str(size + 1))[1][0].split(), "SMALLER missed the rendered size"
+
         # CREATE a folder and COPY the message into it.
         assert M.create("INBOX/Archive")[0] == "OK"
         assert M.copy("1", "INBOX/Archive")[0] == "OK"
@@ -198,12 +235,12 @@ def main():
         con.execute("CALL qm_imap_stop()").fetchall()
         con.execute("CALL qm_imaps_stop()").fetchall()
 
-    # Verify the append persisted into the Citadel message store.
+    # Verify the append and the seeded native message both persisted.
     n = con.execute("SELECT count(*) FROM citadel_messages").fetchone()[0]
-    assert n == 1, f"expected 1 stored message, got {n}"
+    assert n == 2, f"expected 2 stored messages, got {n}"
 
     print("PASS: IMAP STARTTLS/AUTH, IMAPS implicit TLS, default folder set, "
-          "STATUS, APPEND, SEARCH, COPY, RFC 4314 ACLs")
+          "STATUS, APPEND, SEARCH (incl. native-message rendering), COPY, RFC 4314 ACLs")
 
 
 if __name__ == "__main__":

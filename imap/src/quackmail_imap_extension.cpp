@@ -568,7 +568,8 @@ std::vector<std::string> SearchTokens(const std::string &s) {
 // field substrings, BODY/TEXT, SIZE, sequence/UID sets, NOT, ALL). Unknown keys
 // are skipped conservatively (treated as matching) so clients still function.
 bool SearchMatch(Connection &con, const std::string &user, size_t idx1, int64_t uid,
-                 const std::vector<int64_t> &uids, const std::vector<std::string> &toks, size_t &pos) {
+                 const std::vector<int64_t> &uids, const std::vector<std::string> &toks, size_t &pos,
+                 const std::string &node) {
 	auto has_flag = [&](const char *f) {
 		auto fl = LoadFlags(con, uid, user);
 		return std::find(fl.begin(), fl.end(), std::string(f)) != fl.end();
@@ -582,8 +583,21 @@ bool SearchMatch(Connection &con, const std::string &user, size_t idx1, int64_t 
 		}
 		return msg;
 	};
+	// The same RFC822 view FETCH serves, not the stored bytes: for a native
+	// message msg.raw has no header block at all, so FROM/SUBJECT/HEADER could
+	// never match and LARGER/SMALLER disagreed with the RFC822.SIZE FETCH
+	// already reports for the same message.
+	bool rendered = false;
+	std::string rfc822;
+	auto render = [&]() -> std::string & {
+		if (!rendered) {
+			rfc822 = citadel::RenderRfc822(load(), node);
+			rendered = true;
+		}
+		return rfc822;
+	};
 	auto header_has = [&](const std::string &field, const std::string &needle) {
-		auto p = mime::Parse(load().raw);
+		auto p = mime::Parse(render());
 		std::string want = util::Upper(field), nl = util::Upper(needle);
 		for (auto &h : p.headers) {
 			if (util::Upper(h.first) == want && util::Upper(h.second).find(nl) != std::string::npos) {
@@ -633,13 +647,13 @@ bool SearchMatch(Connection &con, const std::string &user, size_t idx1, int64_t 
 			pos += 3;
 		} else if (k == "BODY" || k == "TEXT") {
 			m = pos + 1 < toks.size() &&
-			    util::Upper(load().raw).find(util::Upper(toks[pos + 1])) != std::string::npos;
+			    util::Upper(render()).find(util::Upper(toks[pos + 1])) != std::string::npos;
 			pos += 2;
 		} else if (k == "LARGER") {
-			m = pos + 1 < toks.size() && (int64_t)load().raw.size() > std::atoll(toks[pos + 1].c_str());
+			m = pos + 1 < toks.size() && (int64_t)render().size() > std::atoll(toks[pos + 1].c_str());
 			pos += 2;
 		} else if (k == "SMALLER") {
-			m = pos + 1 < toks.size() && (int64_t)load().raw.size() < std::atoll(toks[pos + 1].c_str());
+			m = pos + 1 < toks.size() && (int64_t)render().size() < std::atoll(toks[pos + 1].c_str());
 			pos += 2;
 		} else if (!k.empty() && (isdigit((unsigned char)k[0]) || k == "*")) {
 			m = in_set(toks[pos], false); // bare sequence set
@@ -925,10 +939,11 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 				stream.WriteLine(tag + " NO no mailbox selected");
 			} else {
 				auto toks = SearchTokens(crit);
+				std::string node = citadel::GetConfig(con, "c_nodename", "quackcit");
 				std::string hits;
 				for (size_t i = 0; i < s.uids.size(); i++) {
 					size_t pos = 0;
-					if (SearchMatch(con, s.user, i + 1, s.uids[i], s.uids, toks, pos)) {
+					if (SearchMatch(con, s.user, i + 1, s.uids[i], s.uids, toks, pos, node)) {
 						hits += (hits.empty() ? "" : " ") + std::to_string(is_uid ? s.uids[i] : (int64_t)(i + 1));
 					}
 				}

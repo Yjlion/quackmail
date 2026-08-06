@@ -313,13 +313,17 @@ seed_site() {
     _probe=$(adm_exec tsv "SELECT count(*) FROM qm_status();
 SELECT coalesce((SELECT value FROM citadel_config WHERE name = 'c_fqdn'), ''),
        (SELECT count(*) FROM citadel_config WHERE name = 'qm_web_force_https'),
-       (SELECT count(*) FROM quackmail_users)" 2>/dev/null) || return 0
+       (SELECT count(*) FROM quackmail_users),
+       coalesce((SELECT value FROM citadel_config WHERE name = 'c_version'), ''),
+       (SELECT version FROM qm_version())" 2>/dev/null) || return 0
     _probe=$(printf '%s\n' "$_probe" | tail -n 1)
-    # Three fields or nothing happened: never guess at a half-read probe.
-    [ "$(printf '%s' "$_probe" | awk -F'\t' '{print NF}')" = 3 ] || return 0
+    # Five fields or nothing happened: never guess at a half-read probe.
+    [ "$(printf '%s' "$_probe" | awk -F'\t' '{print NF}')" = 5 ] || return 0
     _cur_fqdn=$(printf '%s' "$_probe" | cut -f1 | tr -d ' \r')
     _has_force_https=$(printf '%s' "$_probe" | cut -f2 | tr -d ' \r')
     _user_count=$(printf '%s' "$_probe" | cut -f3 | tr -d ' \r')
+    _cur_version=$(printf '%s' "$_probe" | cut -f4 | tr -d '\r')
+    _want_version_seed=$(printf '%s' "$_probe" | cut -f5 | tr -d '\r')
 
     # Initialized here, not in the functions below: each one may return before
     # setting its own, and seed_report reads all of them under `set -u`.
@@ -329,8 +333,10 @@ SELECT coalesce((SELECT value FROM citadel_config WHERE name = 'c_fqdn'), ''),
     _generated=0
     _seeded_web=0
     _want_fqdn=
+    _want_version=
     seed_fqdn
     seed_web_defaults
+    seed_version
     seed_users
     [ -n "$_sql" ] || return 0
     adm_exec tsv "$_sql" >/dev/null || die "could not seed the database"
@@ -371,6 +377,19 @@ seed_web_defaults() {
     _seeded_web=1
     _sql="$_sql
 SELECT ok FROM qm_config_set('qm_web_force_https', '0');"
+}
+
+# c_version is seeded with INSERT OR IGNORE (core/src/citadel_store.cpp), so an
+# install created before a later release keeps reporting whatever version it
+# was created with — over the Citadel, NNTP, POP3 and telnet banners — until
+# something overwrites it. Unlike c_fqdn there is no operator customization to
+# preserve here, so unlike seed_fqdn this reconciles unconditionally whenever
+# the stored value disagrees with what the running extension actually is.
+seed_version() {
+    [ "$_cur_version" != "$_want_version_seed" ] || return 0
+    _want_version=$_want_version_seed
+    _sql="$_sql
+SELECT ok FROM qm_config_set('c_version', $(sql_str "$_want_version"));"
 }
 
 # The listener extensions provide no idempotent seed, and a table function's
@@ -418,6 +437,8 @@ seed_report() {
         say notice web "web interface serves plaintext — set qm_web_force_https to 1 once you have a certificate clients trust"
     [ -z "$_want_fqdn" ] ||
         say notice fqdn "site name (c_fqdn) set to $_want_fqdn"
+    [ -z "$_want_version" ] ||
+        say notice version "c_version reconciled to $_want_version"
     [ -n "$_names" ] || return 0
 
     if [ "$_generated" = 1 ]; then
