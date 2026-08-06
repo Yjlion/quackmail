@@ -228,6 +228,11 @@ std::string RoomHref(const quackmail::citadel::Room &room, const std::string &su
 std::string RenderMessage(Ctx &ctx, const quackmail::citadel::Room &room,
                           const quackmail::citadel::Message &msg);
 
+// The signed-in user's personal rooms — the folders a move may target and the
+// mailbox view lists. Defined in web_mailbox.cpp and shared with the message
+// read pane, so the two cannot disagree about what counts as a folder.
+std::vector<quackmail::citadel::Room> MailFolders(Ctx &ctx);
+
 // Strip scripting out of a sender-supplied text/html part. Defence in depth
 // only — the actual boundary is the sandboxed frame it is served into and that
 // route's own `default-src 'none'` policy. Defined in web_mail.cpp.

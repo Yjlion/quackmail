@@ -10,6 +10,30 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **The mail folder view**, and with it the two endpoints that had no way in.
+  - [x] `http/src/web_mailbox.cpp` renders `VIEW_MAILBOX`/`VIEW_DRAFTS`, which
+        every folder `EnsureUserRooms` provisions is. Until now they fell
+        through to the message-board renderer, so *the* webmail listing was
+        Subject / From / Date with no action anywhere on the page.
+  - [x] `/mail/move` and `/mail/flag` are reachable at last. Both handlers were
+        written, registered and correct, and nothing rendered a form that
+        posted to either — a message could not be filed or flagged from a
+        browser at all. They now take a selection (`FormAll("msgnum")`) rather
+        than one number, and `SelectedIn` runs every element through
+        `LoadMessageIn`, so a bulk action cannot become an IDOR by smuggling
+        somebody else's message number into the list.
+  - [x] One `<form>` with a `formaction` per button, so the bulk actions are
+        HTML rather than script. The select-all is the only scripted part and
+        is hidden by CSS until `qc.js` sets `data-js` — a control that did
+        nothing without script would be a lie rather than an enhancement.
+  - [x] Read state is `\Seen`, not the Citadel last-read pointer: a high-water
+        mark cannot express "this one, not that one". Opening a message in a
+        folder sets it, and it is the row IMAP already shares.
+  - [x] `flag` + `on` became one `set` field (`seen`/`unseen`/`flagged`/
+        `unflagged`) because an HTML button contributes exactly one name and
+        value, and the buttons share a form. Free to change: nothing could
+        reach the old contract.
+
 - [x] **Message search in the web front-end** (`/search`, plus a box in the page
       header and "Search this room" on a room's toolbar).
   - [x] `http/src/web_search.cpp`. The room set **is** the access control: it
@@ -557,22 +581,9 @@ The first two came out of building 0.6.0 and are the ones most likely to bite.
   updates the event. Today an event with `ATTENDEE` properties is stored and
   served faithfully and nothing else happens.
 
-Four gaps in the web front-end, found while building search and ranked by how
-much they cost someone using it. The first is the odd one: the work is already
-written and simply has no way in.
+Two gaps left in the web front-end from the review that produced search and the
+mailbox view.
 
-- **`/mail/move` and `/mail/flag` are dead endpoints.** Both handlers exist
-  (`web_mail.cpp`), both are registered, and **nothing in the module renders a
-  form that posts to either** — so a message cannot be filed into a folder or
-  flagged from a browser, even though `PostFlag` writes the `citadel_msg_flags`
-  rows IMAP reads. Either give them a front-end or delete them; a route that
-  cannot be reached is worse than one that does not exist, because it reads as
-  a working feature.
-- **Mail folders render as a plain BBS list.** `web_views.cpp` sends
-  `VIEW_MAILBOX` and `VIEW_DRAFTS` to `kBoardView`: Subject / From / Date, no
-  multi-select, no per-row action, no flag or attachment column. A real mailbox
-  view is what would give the two endpoints above their forms, and it is the
-  one place the web interface is visibly behind the mail clients it serves.
 - **Sidebar unread counts are styled but never emitted.** `qc.css` carries
   `.sidebar .count` and a comment describing the unread count riding along on
   the right of a room or folder link; `SidebarFor` emits no counts, no mail

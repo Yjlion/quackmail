@@ -372,6 +372,19 @@ clients see each other in the who-list and can page one another.
   quota is checked first, the message is DKIM-signed once, local recipients are
   delivered and remote ones queued, and a copy is filed into Sent Items.
 
+  A folder is a `VIEW_MAILBOX` room and renders as a mailbox rather than a
+  message board: a checkbox per row, flag and attachment columns, size, and a
+  bulk bar that files, flags, marks read or deletes **whatever is ticked**. It
+  is one `<form>` with a `formaction` per button — plain HTML, so selecting
+  three messages and deleting them works with JavaScript off. The only scripted
+  part is the select-all checkbox, which stays hidden until `qc.js` marks the
+  document rather than sitting there doing nothing.
+
+  Read state in a folder is the IMAP `\Seen` flag, not the Citadel last-read
+  pointer the message board uses: a pointer is a high-water mark and cannot say
+  "this one, not that one". Opening a message sets it, and it is the same
+  `citadel_msg_flags` row a desktop client reads, so the two agree.
+
   Composing offers **formatted text**, producing a `multipart/alternative` with
   both halves so a recipient on a text-only client, or reading over Citadel or
   POP3, still gets something readable. A pasted or dropped image becomes a real

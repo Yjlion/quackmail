@@ -193,6 +193,12 @@ std::string FlashText(const std::string &slug) {
 	if (slug == "marked") {
 		return "Marked as read.";
 	}
+	if (slug == "flagged") {
+		return "Flag updated.";
+	}
+	if (slug == "nothing") {
+		return "Nothing was selected, so nothing happened.";
+	}
 	if (slug == "revoked") {
 		return "Session revoked.";
 	}

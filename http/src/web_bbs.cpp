@@ -283,6 +283,36 @@ void GetBbsMessage(Ctx &ctx) {
 		body += Link("/mail/compose" + q + "reply=" + num, "Reply", "btn sec");
 		body += Link("/mail/compose" + q + "reply=" + num + "&all=1", "Reply all", "btn sec");
 		body += Link("/mail/compose" + q + "forward=" + num, "Forward", "btn sec");
+
+		// Which way the flag button toggles depends on where the flag is now.
+		bool flagged = false;
+		if (auto fr = Exec(ctx.con,
+		                   "SELECT 1 FROM citadel_msg_flags WHERE msgnum = $1 AND username = $2 "
+		                   "AND flag = $3",
+		                   {Value::BIGINT(msg.msgnum), Value(ctx.username), Value("\\Flagged")})) {
+			flagged = fr->Cast<MaterializedQueryResult>().RowCount() > 0;
+		}
+		std::string here = RoomHref(room, "/msg/" + num);
+		body += FormStart(ctx, "/mail/flag", "inline") + Hidden("room", std::to_string(room.room_num)) +
+		        Hidden("msgnum", num) + Hidden("back", here) +
+		        "<button class=\"btn sec\" name=\"set\" value=\"" +
+		        A(flagged ? "unflagged" : "flagged") + "\">" + T(flagged ? "Clear flag" : "Flag") +
+		        "</button>" + FormEnd();
+
+		// Filing it somewhere else. The same endpoint the folder listing's bulk
+		// move posts to, with one message selected instead of several.
+		std::vector<std::pair<std::string, std::string>> folders;
+		for (auto &f : MailFolders(ctx)) {
+			if (f.room_num != room.room_num) {
+				folders.push_back({f.display_name, f.display_name});
+			}
+		}
+		if (!folders.empty()) {
+			body += FormStart(ctx, "/mail/move", "inline") +
+			        Hidden("room", std::to_string(room.room_num)) + Hidden("msgnum", num) +
+			        Select("folder", folders, "") + Button("Move", "sec") + FormEnd();
+		}
+
 		body += FormStart(ctx, "/mail/delete", "inline") + Hidden("room", std::to_string(room.room_num)) +
 		        Hidden("msgnum", num) +
 		        Button(room.display_name == "Trash" ? "Delete permanently" : "Move to Trash", "danger") +
@@ -301,6 +331,17 @@ void GetBbsMessage(Ctx &ctx) {
 	auto stats = quackmail::citadel::GetRoomStats(ctx.con, ctx.username, room.room_num);
 	if (msg.msgnum > stats.last_read) {
 		quackmail::citadel::SetLastRead(ctx.con, ctx.username, room.room_num, msg.msgnum);
+	}
+	// In a mail folder, reading also sets \Seen. The folder listing shows that
+	// rather than the Citadel last-read pointer — a pointer is a high-water mark
+	// and cannot say "this one, not that one" — and it is the same flag IMAP
+	// shares, so opening a message here marks it read in a desktop client too.
+	if (room.mailbox_owner > 0) {
+		Exec(ctx.con,
+		     "INSERT INTO citadel_msg_flags (msgnum, username, flag) "
+		     "SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM citadel_msg_flags "
+		     "WHERE msgnum = $1 AND username = $2 AND flag = $3)",
+		     {Value::BIGINT(msg.msgnum), Value(ctx.username), Value("\\Seen")});
 	}
 
 	std::string subject = DecodeHeader(msg.subject);

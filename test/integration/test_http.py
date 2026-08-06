@@ -561,6 +561,134 @@ def main():
         assert "zorblat bulk 0" in second, "the oldest match is not on the last page"
         assert "zorblat bulk 0" not in first, "the same row appeared on both pages"
 
+        # ---- the mail folder view -------------------------------------------
+        # Every folder EnsureUserRooms provisions is a VIEW_MAILBOX room, so
+        # this is the listing all of them render.
+        status, _, page = request(op, f"{BASE}/bbs/room/{mail_room}")
+        assert status == 200, f"the mail folder returned {status}"
+        assert 'name="msgnum"' in page, "the folder listing has no per-message checkbox"
+        assert 'formaction="/mail/flag"' in page, "the bulk bar does not reach /mail/flag"
+        assert 'name="folder"' in page, "the bulk bar offers no move target"
+        # The select-all only works with script, so it is hidden until qc.js
+        # marks the document rather than sitting there doing nothing.
+        assert "jsonly" in page, "the select-all is not gated on script"
+        tok = csrf_of(page)
+
+        def in_room(room_num, msgnum):
+            return con.execute(
+                "SELECT count(*) FROM citadel_room_msgs WHERE room_num = ? AND msgnum = ?",
+                [room_num, msgnum],
+            ).fetchone()[0]
+
+        def folder(name):
+            return con.execute(
+                "SELECT r.room_num FROM citadel_rooms r JOIN citadel_users u "
+                "ON u.usernum = r.mailbox_owner WHERE u.username = 'webuser' "
+                "AND r.display_name = ?",
+                [name],
+            ).fetchone()[0]
+
+        def flag_count(msgnum, flag):
+            return con.execute(
+                "SELECT count(*) FROM citadel_msg_flags WHERE username = 'webuser' "
+                "AND msgnum = ? AND flag = ?",
+                [msgnum, flag],
+            ).fetchone()[0]
+
+        bulk_a = deliver(con, "webuser", "bulk fixture a", "aaa", fmt=0)
+        bulk_b = deliver(con, "webuser", "bulk fixture b", "bbb", fmt=0)
+
+        # One request, two messages: the whole point of the view.
+        status, _, _ = request(
+            op,
+            BASE + "/mail/flag",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_a)),
+             ("msgnum", str(bulk_b)), ("set", "flagged")],
+        )
+        assert status == 303, f"bulk flag returned {status}"
+        assert flag_count(bulk_a, "\\Flagged") == 1 and flag_count(bulk_b, "\\Flagged") == 1, (
+            "bulk flag did not reach both messages"
+        )
+        status, _, _ = request(
+            op,
+            BASE + "/mail/flag",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_a)),
+             ("msgnum", str(bulk_b)), ("set", "unflagged")],
+        )
+        assert status == 303
+        assert flag_count(bulk_a, "\\Flagged") == 0, "the flag did not clear"
+
+        # A selection is not a way past the ownership check. otheruser's message
+        # rides along in the list and must simply be dropped.
+        status, _, _ = request(
+            op,
+            BASE + "/mail/flag",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_a)),
+             ("msgnum", str(secret_num)), ("set", "flagged")],
+        )
+        assert status == 303
+        assert flag_count(secret_num, "\\Flagged") == 0, (
+            "a bulk action touched a message the caller may not read"
+        )
+        assert flag_count(bulk_a, "\\Flagged") == 1, "the rest of the selection was dropped too"
+
+        # Move, and then delete-into-Trash.
+        status, _, _ = request(
+            op,
+            BASE + "/mail/move",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_a)),
+             ("folder", "Sent Items")],
+        )
+        assert status == 303, f"bulk move returned {status}"
+        assert in_room(folder("Sent Items"), bulk_a) == 1, "the message did not arrive"
+        assert in_room(mail_room, bulk_a) == 0, "the message is still in the source folder"
+
+        status, _, _ = request(
+            op,
+            BASE + "/mail/delete",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_b))],
+        )
+        assert status == 303, f"bulk delete returned {status}"
+        assert in_room(folder("Trash"), bulk_b) == 1, "delete did not file into Trash"
+
+        # An empty selection changes nothing and says so.
+        status, headers, _ = request(
+            op, BASE + "/mail/delete", [("_csrf", tok), ("room", str(mail_room))]
+        )
+        assert status == 303
+        assert "ok=nothing" in headers.get("Location", ""), headers.get("Location", "")
+
+        # `back` is where the listing asks to be returned to, so it is a path we
+        # built — never somewhere a form field can point a browser.
+        bulk_c = deliver(con, "webuser", "bulk fixture c", "ccc", fmt=0)
+        status, headers, _ = request(
+            op,
+            BASE + "/mail/flag",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_c)),
+             ("set", "flagged"), ("back", "https://evil.example/")],
+        )
+        assert status == 303
+        loc = headers.get("Location", "")
+        assert "evil.example" not in loc, "a mail action redirected to a foreign host"
+        assert loc.startswith(f"/bbs/room/{mail_room}"), loc
+
+        # Reading a message in a folder sets \Seen, which is what the listing
+        # shows as read — the Citadel last-read pointer is a high-water mark and
+        # cannot say "this one, not that one".
+        bulk_d = deliver(con, "webuser", "read me", "ddd", fmt=0)
+        assert flag_count(bulk_d, "\\Seen") == 0
+        status, _, page = request(op, f"{BASE}/bbs/room/{mail_room}/msg/{bulk_d}")
+        assert status == 200
+        assert flag_count(bulk_d, "\\Seen") == 1, "reading in a mail folder did not set \\Seen"
+        # And the read pane reaches both endpoints for a single message.
+        assert 'action="/mail/flag"' in page, "the read pane offers no flag control"
+        assert 'action="/mail/move"' in page, "the read pane offers no move control"
+
+        # A public room is still a message board, not a mailbox.
+        status, _, page = request(op, f"{BASE}/bbs/room/0")
+        assert status == 200
+        assert 'formaction="/mail/flag"' not in page, "the Lobby rendered as a mail folder"
+
         # ---- CSRF is per session -----------------------------------------
         admin_op, _ = sign_in(BASE, "admin", "adminpw")
         _, _, admin_page = request(admin_op, f"{BASE}/bbs/room/0/compose")
