@@ -89,6 +89,9 @@ void RegisterBbsRoutes(std::vector<Route> &out);
 // citadel::CanAdminister rather than on the Aide role — see web_rooms.cpp.
 void RegisterRoomAdminRoutes(std::vector<Route> &out);
 void RegisterMailRoutes(std::vector<Route> &out);
+// Message search across every room the caller can read. Defined in
+// web_search.cpp.
+void RegisterSearchRoutes(std::vector<Route> &out);
 void RegisterPrefsRoutes(std::vector<Route> &out);
 void RegisterAdminUserRoutes(std::vector<Route> &out);
 void RegisterAdminPolicyRoutes(std::vector<Route> &out);
@@ -224,6 +227,18 @@ bool MayCreateRooms(const Ctx &ctx);
 std::string RoomHref(const quackmail::citadel::Room &room, const std::string &suffix = "");
 std::string RenderMessage(Ctx &ctx, const quackmail::citadel::Room &room,
                           const quackmail::citadel::Message &msg);
+
+// The signed-in user's mail folders — what a move may target, what the sidebar
+// lists. Personal rooms minus the groupware four, in Citadel's provisioning
+// order. Defined in web_mailbox.cpp and shared with the read pane and the
+// sidebar, so no two of them can disagree about what a folder is.
+std::vector<quackmail::citadel::Room> MailFolders(const Ctx &ctx);
+// The same filter over a listing already in hand, for a caller that has one.
+std::vector<quackmail::citadel::Room>
+MailFoldersFrom(const std::vector<quackmail::citadel::Room> &rooms);
+// Messages without \Seen, one count per room, in a single query. This is what a
+// mail folder means by unread — the same flag the listing bolds a row on.
+std::vector<int64_t> UnseenCounts(const Ctx &ctx, const std::vector<int64_t> &room_nums);
 
 // Strip scripting out of a sender-supplied text/html part. Defence in depth
 // only — the actual boundary is the sandboxed frame it is served into and that

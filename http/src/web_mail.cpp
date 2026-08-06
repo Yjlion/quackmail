@@ -685,16 +685,44 @@ void PostSend(Ctx &ctx) {
 
 // ---- filing --------------------------------------------------------------
 
+// The selected messages, as numbers this user is actually allowed to act on in
+// `room`. LoadMessageIn is the ownership check — skipping it on even one
+// element of the list would make a bulk action an IDOR with extra steps — so a
+// number the caller may not touch is dropped rather than refused, and the rest
+// of the selection still goes through.
+std::vector<int64_t> SelectedIn(Ctx &ctx, const Room &room) {
+	std::vector<int64_t> out;
+	for (auto &raw : ctx.req.FormAll("msgnum")) {
+		int64_t msgnum = (int64_t)std::strtoll(raw.c_str(), nullptr, 10);
+		Message msg;
+		if (msgnum > 0 && LoadMessageIn(ctx, room, msgnum, msg)) {
+			out.push_back(msgnum);
+		}
+	}
+	return out;
+}
+
+// Where a mail action should land afterwards. The listing sends the page it was
+// on so a bulk action does not throw the reader back to the top; anything else
+// falls back to the folder. Only ever a path we built — never a value that
+// could send a browser off-site.
+std::string MailBackTo(Ctx &ctx, const Room &room) {
+	std::string back = ctx.req.Form("back");
+	if (!back.empty() && back.rfind("/bbs/room/", 0) == 0 && back.find("//") == std::string::npos) {
+		return back;
+	}
+	return RoomHref(room);
+}
+
 void PostMove(Ctx &ctx) {
 	Room from;
 	if (!ResolveRoomNumFor(ctx, ctx.FormInt("room", -1), from)) {
 		NotFound(ctx);
 		return;
 	}
-	int64_t msgnum = ctx.FormInt("msgnum", 0);
-	Message msg;
-	if (!LoadMessageIn(ctx, from, msgnum, msg)) {
-		NotFound(ctx);
+	std::vector<int64_t> selected = SelectedIn(ctx, from);
+	if (selected.empty()) {
+		RedirectTo(ctx, MailBackTo(ctx, from), "nothing");
 		return;
 	}
 	Room target;
@@ -704,11 +732,14 @@ void PostMove(Ctx &ctx) {
 		return;
 	}
 	std::string err;
-	if (!quackmail::citadel::MoveMessage(ctx.con, from.room_num, target.room_num, msgnum, false, err)) {
-		ErrorPage(ctx, 500, "Could not move", err);
-		return;
+	for (auto msgnum : selected) {
+		if (!quackmail::citadel::MoveMessage(ctx.con, from.room_num, target.room_num, msgnum, false,
+		                                     err)) {
+			ErrorPage(ctx, 500, "Could not move", err);
+			return;
+		}
 	}
-	RedirectTo(ctx, RoomHref(from), "moved");
+	RedirectTo(ctx, MailBackTo(ctx, from), "moved");
 }
 
 void PostTrash(Ctx &ctx) {
@@ -717,26 +748,31 @@ void PostTrash(Ctx &ctx) {
 		NotFound(ctx);
 		return;
 	}
-	int64_t msgnum = ctx.FormInt("msgnum", 0);
-	Message msg;
-	if (!LoadMessageIn(ctx, from, msgnum, msg)) {
-		NotFound(ctx);
+	std::vector<int64_t> selected = SelectedIn(ctx, from);
+	if (selected.empty()) {
+		RedirectTo(ctx, MailBackTo(ctx, from), "nothing");
 		return;
 	}
 	Room trash;
 	std::string err;
 	// From anywhere else, "delete" files it into Trash; from Trash itself it
-	// really is gone.
-	if (from.display_name != "Trash" && ResolveRoomFor(ctx, "Trash", trash) && trash.mailbox_owner > 0) {
-		if (!quackmail::citadel::MoveMessage(ctx.con, from.room_num, trash.room_num, msgnum, false, err)) {
-			ErrorPage(ctx, 500, "Could not move to Trash", err);
+	// really is gone. Decided once for the whole selection, so a bulk delete
+	// cannot half-file and half-destroy.
+	bool to_trash =
+	    from.display_name != "Trash" && ResolveRoomFor(ctx, "Trash", trash) && trash.mailbox_owner > 0;
+	for (auto msgnum : selected) {
+		if (to_trash) {
+			if (!quackmail::citadel::MoveMessage(ctx.con, from.room_num, trash.room_num, msgnum, false,
+			                                     err)) {
+				ErrorPage(ctx, 500, "Could not move to Trash", err);
+				return;
+			}
+		} else if (!quackmail::citadel::DeleteMessage(ctx.con, from.room_num, msgnum, err)) {
+			ErrorPage(ctx, 500, "Could not delete", err);
 			return;
 		}
-	} else if (!quackmail::citadel::DeleteMessage(ctx.con, from.room_num, msgnum, err)) {
-		ErrorPage(ctx, 500, "Could not delete", err);
-		return;
 	}
-	RedirectTo(ctx, RoomHref(from), "deleted");
+	RedirectTo(ctx, MailBackTo(ctx, from), "deleted");
 }
 
 void PostFlag(Ctx &ctx) {
@@ -745,23 +781,33 @@ void PostFlag(Ctx &ctx) {
 		NotFound(ctx);
 		return;
 	}
-	int64_t msgnum = ctx.FormInt("msgnum", 0);
-	Message msg;
-	if (!LoadMessageIn(ctx, room, msgnum, msg)) {
-		NotFound(ctx);
+	std::vector<int64_t> selected = SelectedIn(ctx, room);
+	if (selected.empty()) {
+		RedirectTo(ctx, MailBackTo(ctx, room), "nothing");
 		return;
 	}
+	// One field rather than a flag name and an on/off pair, because the buttons
+	// that submit this are in a shared form and an HTML button contributes
+	// exactly one name and value.
+	std::string set = ctx.req.Form("set");
+	bool on = set == "seen" || set == "flagged";
+	bool is_seen = set == "seen" || set == "unseen";
+	if (!on && set != "unseen" && set != "unflagged") {
+		BadRequest(ctx, "That is not something a message can be marked.");
+		return;
+	}
+	std::string flag = is_seen ? "\\Seen" : "\\Flagged";
 	// citadel_msg_flags is the same table IMAP reads, so a flag set here shows
 	// up in a desktop mail client.
-	std::string flag = ctx.req.Form("flag") == "seen" ? "\\Seen" : "\\Flagged";
-	bool on = ctx.req.Form("on") == "1";
 	const char *sql = on ? "INSERT INTO citadel_msg_flags (msgnum, username, flag) "
 	                       "SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM citadel_msg_flags "
 	                       "WHERE msgnum = $1 AND username = $2 AND flag = $3)"
 	                     : "DELETE FROM citadel_msg_flags WHERE msgnum = $1 AND username = $2 "
 	                       "AND flag = $3";
-	Exec(ctx.con, sql, {Value::BIGINT(msgnum), Value(ctx.username), Value(flag)});
-	RedirectTo(ctx, RoomHref(room, "/msg/" + std::to_string(msgnum)));
+	for (auto msgnum : selected) {
+		Exec(ctx.con, sql, {Value::BIGINT(msgnum), Value(ctx.username), Value(flag)});
+	}
+	RedirectTo(ctx, MailBackTo(ctx, room), is_seen ? "marked" : "flagged");
 }
 
 } // namespace

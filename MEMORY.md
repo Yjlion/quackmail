@@ -43,6 +43,49 @@ been passing over; its JMAP half has no equivalent probe.
 
 ## Decisions worth remembering
 
+### A bulk action validates every element, not the request
+
+`/mail/move`, `/mail/delete` and `/mail/flag` take a *selection* —
+`FormAll("msgnum")` — and `SelectedIn` (`web_mail.cpp`) runs every element
+through `LoadMessageIn` before anything acts on it. Checking the room once and
+then trusting the list would make a bulk action an IDOR with extra steps: the
+room is the caller's, so the request looks legitimate, and the numbers ride in
+beside it. A number the caller may not touch is dropped and the rest of the
+selection still goes through, which is what makes the honest case unsurprising.
+
+These three were **written, registered and unreachable** for two releases: no
+page rendered a form that posted to them, so mail could not be filed or flagged
+from a browser at all. That is why `web_mailbox.cpp` exists. A route with no way
+in is worse than a missing one — it reads as a working feature in the route
+table and in the README.
+
+The bulk bar is one `<form>` with a `formaction` per button rather than script,
+so it works with JavaScript off like everything else here; the select-all is the
+one scripted control and is hidden by CSS until `qc.js` sets `data-js`. `flag` +
+`on` collapsed into a single `set` field for the same reason — an HTML button
+contributes exactly one name and value, and these buttons share a form.
+
+### Search resolves rooms, never room numbers
+
+`/search` (`http/src/web_search.cpp`) never puts a client-supplied room number
+into a query. It enumerates the caller's rooms through `citadel::ListRooms` and
+`RoomUnlocked` — the same helpers the room list and `RequireUnlocked` use — and
+searches inside that set; a `room=` parameter naming anything outside it is
+dropped rather than narrowed to. The room set **is** the access control, so
+every visibility rule the rest of the front-end enforces (private rooms, zapped
+rooms, another user's mailbox, a passworded room this session has not unlocked)
+holds here for free rather than being re-derived. Re-deriving a permission is
+how the read-only flag stopped applying to a front-end once before.
+
+The two match paths exist because `subject` and `author` are columns and a body
+is not. Headers are one statement over the whole store. Message text has to
+decode each candidate through `citadel::BodyText`, because a `format_type = 4`
+message keeps its text base64-encoded inside `raw` — a `contains()` over the
+column would match transfer encoding and miss the words. That path is therefore
+bounded by `qm_web_search_scan` and loads **one message at a time**: selecting
+every candidate's `raw` in one query would materialize every attachment in the
+scan at once, which the row count does not show.
+
 ### Groupware objects are ordinary messages, keyed by euid
 
 A contact or event is a `format_type = 4` message wrapping one `text/vcard` or

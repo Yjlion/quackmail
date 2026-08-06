@@ -45,6 +45,18 @@ header.top .who {
   display: flex; gap: var(--s2); align-items: baseline;
 }
 
+/* The search box in the header. `margin-left:auto` on .who still pushes the
+   name to the right, so this sits between the two. */
+header.top .topsearch { margin: 0; }
+header.top .topsearch input { width: 14rem; max-width: 40vw; }
+
+/* A label that only a screen reader sees. The header box is identified by its
+   placeholder visually, which is not an accessible name. */
+.vh {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
 /* The menu button is a <label> for a hidden checkbox: the sidebar collapses on
    a phone with no script at all. */
 .navbtn {
@@ -109,6 +121,21 @@ tr.unread td { font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tbody tr:hover td { background: var(--panel); }
 .wrap { overflow-x: auto; }
+
+/* The mail folder listing: a narrow column for the checkbox and one for each
+   single-glyph marker, so the subject keeps the width. */
+th.pick, td.pick { width: 1.6rem; padding-right: 0; }
+th.mark, td.mark { width: 1.4rem; padding-left: .2rem; padding-right: .2rem; text-align: center; }
+th.mark { font-size: .9em; }
+
+/* Shown only once qc.js has marked the document. A select-all that did nothing
+   without script would be a lie rather than an enhancement — see qc.js. */
+.jsonly { display: none; }
+html[data-js="1"] .jsonly { display: inline; }
+
+/* The bulk action bar under the folder listing. */
+.actions.bulk { gap: var(--s1) var(--s2); }
+.actions.bulk .btn { padding: .25rem .6rem; font-size: .9em; }
 
 /* Long message lists: let the browser skip laying out what is offscreen. */
 .longlist { content-visibility: auto; contain-intrinsic-size: auto 800px; }
@@ -211,6 +238,18 @@ dl.rights dd { margin: 0; color: var(--muted); }
   gap: .4rem .9rem;
 }
 .pager { display: flex; gap: var(--s3); align-items: baseline; margin: var(--s2) 0; }
+/* The same row above a message, moving between messages rather than pages. */
+.pager.msgnav { margin-top: 0; }
+
+/* The search page's own form: the fields sit in a row where there is room for
+   one and stack on a phone, which is what a wrapping flex line already does. */
+.searchform {
+  display: flex; flex-wrap: wrap; gap: 0 var(--s3); align-items: flex-end;
+  padding: var(--s3); background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--r1);
+}
+.searchform .field { margin: .3rem 0; }
+.searchform .actions { margin: .3rem 0; }
 .login { max-width: 22rem; margin: 3rem auto; }
 
 /* Cards, for the admin overview and the Sieve rule builder. */

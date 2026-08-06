@@ -4,6 +4,7 @@
 #include "quackmail/mime.hpp"
 #include "quackmail/tz.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -193,6 +194,12 @@ std::string FlashText(const std::string &slug) {
 	if (slug == "marked") {
 		return "Marked as read.";
 	}
+	if (slug == "flagged") {
+		return "Flag updated.";
+	}
+	if (slug == "nothing") {
+		return "Nothing was selected, so nothing happened.";
+	}
 	if (slug == "revoked") {
 		return "Session revoked.";
 	}
@@ -304,36 +311,80 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	};
 	auto endgroup = [&]() { out += "</div>"; };
 
+	// A room's own link, with its unread count riding along on the right — the
+	// `.count` span the stylesheet has always described and nothing emitted.
+	// Marked current by room number, so the folder you are reading is the one
+	// highlighted rather than the section it belongs to.
+	std::string room_key;
+	auto room_link = [&](const Room &room, const std::string &label, int64_t unread) {
+		std::string href = "/bbs/room/" + std::to_string(room.room_num);
+		std::string key = "room:" + std::to_string(room.room_num);
+		std::string extra = (active == key) ? " aria-current=\"page\"" : "";
+		if (!extra.empty()) {
+			room_key = key;
+		}
+		out += "<a href=\"" + A(href) + "\"" + extra + "><span>" + T(label) + "</span>";
+		if (unread > 0) {
+			out += "<span class=\"count\">" + std::to_string(unread) + "</span>";
+		}
+		out += "</a>";
+	};
+
+	// One listing for the whole sidebar. This replaces the four FindUserRoom
+	// lookups the groupware group used to cost — those rooms are personal rooms
+	// and are already in here — so the counts below arrive for fewer queries
+	// than the sidebar ran before them, not more.
+	auto rooms = quackmail::citadel::ListRooms(ctx.con, ctx.username, -1, "all");
+
+	static const char *kGroupwareRooms[] = {"Calendar", "Contacts", "Tasks", "Notes"};
+
+	// One definition of "a mail folder", shared with the move targets and the
+	// listing itself — see MailFoldersFrom.
+	std::vector<Room> folders = MailFoldersFrom(rooms);
+
 	group("Mail");
-	item("/mail/", "Inbox", "mail");
 	item("/mail/compose", "Compose", "compose");
+	{
+		std::vector<int64_t> nums;
+		for (auto &f : folders) {
+			nums.push_back(f.room_num);
+		}
+		// \Seen, not the last-read pointer: this has to be the same count the
+		// folder's own listing shows in bold, and a high-water mark cannot skip
+		// a message somebody left unread behind one they opened.
+		auto unseen = UnseenCounts(ctx, nums);
+		for (size_t i = 0; i < folders.size(); i++) {
+			// "Mail" is what the store calls it and "Inbox" is what a person
+			// does. The other folders are already named the way they read.
+			std::string label = folders[i].display_name == "Mail" ? "Inbox" : folders[i].display_name;
+			room_link(folders[i], label, unseen[i]);
+		}
+	}
+	item("/mail/", "All folders", "mail");
 	endgroup();
 
 	// The user's own groupware rooms, linked by number because that is how rooms
-	// are addressed. EnsureUserRooms provisions these at first login, so they
-	// exist for anyone signed in; a room that somehow does not is simply omitted
-	// rather than linked to a 404.
+	// are addressed. EnsureUserRooms provisions these at first login; one that
+	// somehow does not exist is simply omitted rather than linked to a 404.
 	{
 		std::string groupware;
-		struct Personal {
-			const char *room;
-			const char *label;
-			const char *key;
-		};
-		static const Personal kPersonal[] = {
-		    {"Calendar", "Calendar", "calendar"},
-		    {"Contacts", "Contacts", "contacts"},
-		    {"Tasks", "Tasks", "tasks"},
-		    {"Notes", "Notes", "notes"},
-		};
-		for (auto &p : kPersonal) {
-			int64_t num = quackmail::citadel::FindUserRoom(ctx.con, ctx.username, p.room);
-			if (num < 0) {
-				continue;
+		static const char *kKeys[] = {"calendar", "contacts", "tasks", "notes"};
+		for (size_t g = 0; g < 4; g++) {
+			for (auto &r : rooms) {
+				if (r.mailbox_owner == 0 || r.display_name != kGroupwareRooms[g]) {
+					continue;
+				}
+				std::string href = "/bbs/room/" + std::to_string(r.room_num);
+				std::string key = "room:" + std::to_string(r.room_num);
+				bool current = active == kKeys[g] || active == key;
+				if (current) {
+					room_key = key;
+				}
+				groupware += "<a href=\"" + A(href) + "\"" +
+				             (current ? " aria-current=\"page\"" : "") + "><span>" +
+				             T(r.display_name) + "</span></a>";
+				break;
 			}
-			std::string href = "/bbs/room/" + std::to_string(num);
-			std::string extra = (active == p.key) ? " aria-current=\"page\"" : "";
-			groupware += "<a href=\"" + A(href) + "\"" + extra + "><span>" + T(p.label) + "</span></a>";
 		}
 		if (!groupware.empty()) {
 			group("Groupware");
@@ -343,7 +394,51 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	}
 
 	group("Rooms");
-	item("/bbs/", "All rooms", "bbs");
+	{
+		// Rooms with something new in them, most unread first. Capped, because
+		// this is rendered on every page: `qm_web_sidebar_rooms` is the ceiling
+		// and 0 turns the listing — and the query behind it — off entirely.
+		int64_t limit = (int64_t)std::strtoll(ConfigStr(ctx.con, "qm_web_sidebar_rooms", "10").c_str(),
+		                                      nullptr, 10);
+		std::vector<std::pair<Room, int64_t>> unread;
+		if (limit > 0) {
+			std::vector<Room> public_rooms;
+			std::vector<int64_t> nums;
+			for (auto &r : rooms) {
+				if (r.mailbox_owner == 0) {
+					public_rooms.push_back(r);
+					nums.push_back(r.room_num);
+				}
+			}
+			auto stats = quackmail::citadel::RoomStatsBulk(ctx.con, ctx.username, nums);
+			for (size_t i = 0; i < public_rooms.size(); i++) {
+				if (stats[i].new_count > 0) {
+					unread.push_back({public_rooms[i], stats[i].new_count});
+				}
+			}
+			std::sort(unread.begin(), unread.end(),
+			          [](const std::pair<Room, int64_t> &a, const std::pair<Room, int64_t> &b) {
+				          return a.second > b.second;
+			          });
+			if ((int64_t)unread.size() > limit) {
+				unread.resize((size_t)limit);
+			}
+		}
+		// "All rooms" also stands in for a room that is not itself listed, so a
+		// room page never leaves the whole sidebar unmarked.
+		bool in_a_room = active.rfind("room:", 0) == 0;
+		bool listed = false;
+		for (auto &u : unread) {
+			listed = listed || active == "room:" + std::to_string(u.first.room_num);
+		}
+		std::string extra =
+		    (active == "bbs" || (in_a_room && !listed && room_key.empty())) ? " aria-current=\"page\"" : "";
+		out += "<a href=\"/bbs/\"" + extra + "><span>All rooms</span></a>";
+		for (auto &u : unread) {
+			room_link(u.first, u.first.display_name, u.second);
+		}
+	}
+	item("/search", "Search", "search");
 	if (MayCreateRooms(ctx)) {
 		item("/bbs/new", "Create a room", "newroom");
 	}
@@ -507,6 +602,16 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	}
 	page += "<span class=\"brand\">" + T(node) + "</span>";
 	if (ctx.Authed()) {
+		// A GET form, so it carries no CSRF token and needs none — and a search
+		// stays linkable and bookmarkable, which a POST would take away. It is
+		// the one control that belongs on every page rather than in the sidebar:
+		// finding a message is not a section of the site.
+		page += "<form method=\"get\" action=\"/search\" class=\"topsearch\" role=\"search\">";
+		page += "<label class=\"vh\" for=\"topq\">Search messages</label>";
+		page += "<input id=\"topq\" type=\"search\" name=\"q\" value=\"" +
+		        A(ctx.req.path == "/search" ? ctx.req.Param("q") : std::string()) +
+		        "\" placeholder=\"Search\">";
+		page += "</form>";
 		page += "<span class=\"who\">" + T(ctx.username);
 		page += FormStart(ctx, "/logout", "inline") + Button("Sign out", "sec") + FormEnd();
 		page += "</span>";
