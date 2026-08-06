@@ -239,11 +239,81 @@ void Index(Ctx &ctx, const Room &room) {
 
 } // namespace
 
-std::vector<Room> MailFolders(Ctx &ctx) {
+std::vector<Room> MailFoldersFrom(const std::vector<Room> &rooms) {
+	// The groupware rooms are personal rooms too, and they are emphatically not
+	// mail folders: every message in one is a format_type 4 object the calendar
+	// or address book parses, so filing a letter into Calendar would put
+	// something there that the view has to skip and the owner cannot see.
+	static const char *kNotFolders[] = {"Calendar", "Contacts", "Tasks", "Notes"};
+	// Citadel's own provisioning order first, so the four a person expects lead
+	// the list; anything else they have — a Sieve fileinto target — follows.
+	static const char *kOrder[] = {"Mail", "Sent Items", "Drafts", "Trash"};
+
 	std::vector<Room> out;
-	for (auto &room : quackmail::citadel::ListRooms(ctx.con, ctx.username, -1, "all")) {
-		if (room.mailbox_owner != 0) {
-			out.push_back(room);
+	for (auto *want : kOrder) {
+		for (auto &r : rooms) {
+			if (r.mailbox_owner != 0 && r.display_name == want) {
+				out.push_back(r);
+			}
+		}
+	}
+	for (auto &r : rooms) {
+		if (r.mailbox_owner == 0) {
+			continue;
+		}
+		bool skip = false;
+		for (auto *g : kNotFolders) {
+			skip = skip || r.display_name == g;
+		}
+		for (auto &f : out) {
+			skip = skip || f.room_num == r.room_num;
+		}
+		if (!skip) {
+			out.push_back(r);
+		}
+	}
+	return out;
+}
+
+std::vector<Room> MailFolders(const Ctx &ctx) {
+	return MailFoldersFrom(quackmail::citadel::ListRooms(ctx.con, ctx.username, -1, "all"));
+}
+
+std::vector<int64_t> UnseenCounts(const Ctx &ctx, const std::vector<int64_t> &room_nums) {
+	// What a mail folder means by unread, for the sidebar — the same \Seen the
+	// listing bolds a row on. Counting with the Citadel last-read pointer here
+	// instead would let the two disagree the moment somebody reads anything but
+	// the newest message, because a high-water mark cannot skip.
+	std::vector<int64_t> out(room_nums.size(), 0);
+	if (room_nums.empty()) {
+		return out;
+	}
+	std::string list;
+	for (auto n : room_nums) {
+		if (!list.empty()) {
+			list += ",";
+		}
+		list += std::to_string(n);
+	}
+	auto r = Exec(ctx.con,
+	              "SELECT rm.room_num, count(*) FROM citadel_room_msgs rm "
+	              "WHERE rm.room_num IN (" +
+	                  list +
+	                  ") AND NOT EXISTS (SELECT 1 FROM citadel_msg_flags f "
+	                  "WHERE f.msgnum = rm.msgnum AND f.username = $1 AND f.flag = $2) "
+	                  "GROUP BY rm.room_num",
+	              {Value(ctx.username), Value("\\Seen")});
+	if (!r) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		int64_t num = mat.GetValue(0, i).GetValue<int64_t>();
+		int64_t n = mat.GetValue(1, i).GetValue<int64_t>();
+		for (size_t j = 0; j < room_nums.size(); j++) {
+			if (room_nums[j] == num) {
+				out[j] = n;
+			}
 		}
 	}
 	return out;

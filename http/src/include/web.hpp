@@ -228,10 +228,17 @@ std::string RoomHref(const quackmail::citadel::Room &room, const std::string &su
 std::string RenderMessage(Ctx &ctx, const quackmail::citadel::Room &room,
                           const quackmail::citadel::Message &msg);
 
-// The signed-in user's personal rooms — the folders a move may target and the
-// mailbox view lists. Defined in web_mailbox.cpp and shared with the message
-// read pane, so the two cannot disagree about what counts as a folder.
-std::vector<quackmail::citadel::Room> MailFolders(Ctx &ctx);
+// The signed-in user's mail folders — what a move may target, what the sidebar
+// lists. Personal rooms minus the groupware four, in Citadel's provisioning
+// order. Defined in web_mailbox.cpp and shared with the read pane and the
+// sidebar, so no two of them can disagree about what a folder is.
+std::vector<quackmail::citadel::Room> MailFolders(const Ctx &ctx);
+// The same filter over a listing already in hand, for a caller that has one.
+std::vector<quackmail::citadel::Room>
+MailFoldersFrom(const std::vector<quackmail::citadel::Room> &rooms);
+// Messages without \Seen, one count per room, in a single query. This is what a
+// mail folder means by unread — the same flag the listing bolds a row on.
+std::vector<int64_t> UnseenCounts(const Ctx &ctx, const std::vector<int64_t> &room_nums);
 
 // Strip scripting out of a sender-supplied text/html part. Defence in depth
 // only — the actual boundary is the sandboxed frame it is served into and that

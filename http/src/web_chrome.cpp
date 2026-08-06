@@ -337,41 +337,10 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	auto rooms = quackmail::citadel::ListRooms(ctx.con, ctx.username, -1, "all");
 
 	static const char *kGroupwareRooms[] = {"Calendar", "Contacts", "Tasks", "Notes"};
-	auto is_groupware = [](const std::string &name) {
-		for (auto *g : kGroupwareRooms) {
-			if (name == g) {
-				return true;
-			}
-		}
-		return false;
-	};
 
-	// Mail folders: the user's personal rooms that are not the groupware four.
-	// Ordered the way Citadel provisions them, with anything else — a Sieve
-	// fileinto target, say — after.
-	std::vector<Room> folders;
-	{
-		static const char *kOrder[] = {"Mail", "Sent Items", "Drafts", "Trash"};
-		for (auto *want : kOrder) {
-			for (auto &r : rooms) {
-				if (r.mailbox_owner != 0 && r.display_name == want) {
-					folders.push_back(r);
-				}
-			}
-		}
-		for (auto &r : rooms) {
-			if (r.mailbox_owner == 0 || is_groupware(r.display_name)) {
-				continue;
-			}
-			bool known = false;
-			for (auto &f : folders) {
-				known = known || f.room_num == r.room_num;
-			}
-			if (!known) {
-				folders.push_back(r);
-			}
-		}
-	}
+	// One definition of "a mail folder", shared with the move targets and the
+	// listing itself — see MailFoldersFrom.
+	std::vector<Room> folders = MailFoldersFrom(rooms);
 
 	group("Mail");
 	item("/mail/compose", "Compose", "compose");
@@ -380,12 +349,15 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 		for (auto &f : folders) {
 			nums.push_back(f.room_num);
 		}
-		auto stats = quackmail::citadel::RoomStatsBulk(ctx.con, ctx.username, nums);
+		// \Seen, not the last-read pointer: this has to be the same count the
+		// folder's own listing shows in bold, and a high-water mark cannot skip
+		// a message somebody left unread behind one they opened.
+		auto unseen = UnseenCounts(ctx, nums);
 		for (size_t i = 0; i < folders.size(); i++) {
 			// "Mail" is what the store calls it and "Inbox" is what a person
 			// does. The other folders are already named the way they read.
 			std::string label = folders[i].display_name == "Mail" ? "Inbox" : folders[i].display_name;
-			room_link(folders[i], label, stats[i].new_count);
+			room_link(folders[i], label, unseen[i]);
 		}
 	}
 	item("/mail/", "All folders", "mail");

@@ -694,11 +694,14 @@ def main():
         # emitted until now.
         # Something new to count: the sections above read the inbox down.
         deliver(con, "webuser", "sidebar fixture", "unread", fmt=0)
+        # A folder's count is \Seen, the same thing its listing bolds a row on —
+        # not the Citadel last-read pointer, which cannot skip a message left
+        # unread behind one that was opened.
         unread_before = con.execute(
             "SELECT count(*) FROM citadel_room_msgs rm WHERE rm.room_num = ? "
-            "AND rm.msgnum > coalesce((SELECT last_read FROM citadel_room_state "
-            "WHERE username = 'webuser' AND room_num = ?), 0)",
-            [mail_room, mail_room],
+            "AND NOT EXISTS (SELECT 1 FROM citadel_msg_flags f WHERE f.msgnum = rm.msgnum "
+            "AND f.username = 'webuser' AND f.flag = '\\Seen')",
+            [mail_room],
         ).fetchone()[0]
         assert unread_before > 0, "the fixture left nothing unread to count"
 
@@ -717,12 +720,18 @@ def main():
         assert m, "the inbox link carries no count"
         assert int(m.group(1)) == unread_before, f"count {m.group(1)} != {unread_before} unread"
 
-        # Reading the folder marks it read, and the count goes away rather than
-        # going stale.
-        request(op, f"{BASE}/bbs/room/{mail_room}", None)
+        # Mark-all-read clears it. In a folder that has to set \Seen as well as
+        # the pointer, or the button would move a number the sidebar does not
+        # read and appear to do nothing.
         _, _, page = request(
             op, f"{BASE}/bbs/room/{mail_room}/markread", {"_csrf": tok}
         )
+        assert con.execute(
+            "SELECT count(*) FROM citadel_room_msgs rm WHERE rm.room_num = ? "
+            "AND NOT EXISTS (SELECT 1 FROM citadel_msg_flags f WHERE f.msgnum = rm.msgnum "
+            "AND f.username = 'webuser' AND f.flag = '\\Seen')",
+            [mail_room],
+        ).fetchone()[0] == 0, "mark-all-read left messages unseen in a mail folder"
         _, _, page = request(op, f"{BASE}/prefs")
         m = re.search(
             r'href="/bbs/room/%d"[^>]*><span>Inbox</span><span class="count">' % mail_room, page

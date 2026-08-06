@@ -514,6 +514,17 @@ void PostBbsMarkRead(Ctx &ctx) {
 	}
 	auto stats = quackmail::citadel::GetRoomStats(ctx.con, ctx.username, room.room_num);
 	quackmail::citadel::SetLastRead(ctx.con, ctx.username, room.room_num, stats.highest);
+	// A mail folder counts unread by \Seen, so moving the pointer alone would
+	// leave every row bold and the sidebar count untouched — the button would
+	// look broken in the one place it is most used.
+	if (room.mailbox_owner > 0) {
+		Exec(ctx.con,
+		     "INSERT INTO citadel_msg_flags (msgnum, username, flag) "
+		     "SELECT rm.msgnum, $1, $2 FROM citadel_room_msgs rm WHERE rm.room_num = $3 "
+		     "AND NOT EXISTS (SELECT 1 FROM citadel_msg_flags f WHERE f.msgnum = rm.msgnum "
+		     "AND f.username = $1 AND f.flag = $2)",
+		     {Value(ctx.username), Value("\\Seen"), Value::BIGINT(room.room_num)});
+	}
 	RedirectTo(ctx, RoomHref(room), "marked");
 }
 
