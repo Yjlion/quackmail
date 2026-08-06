@@ -89,6 +89,9 @@ void RegisterBbsRoutes(std::vector<Route> &out);
 // citadel::CanAdminister rather than on the Aide role — see web_rooms.cpp.
 void RegisterRoomAdminRoutes(std::vector<Route> &out);
 void RegisterMailRoutes(std::vector<Route> &out);
+// Message search across every room the caller can read. Defined in
+// web_search.cpp.
+void RegisterSearchRoutes(std::vector<Route> &out);
 void RegisterPrefsRoutes(std::vector<Route> &out);
 void RegisterAdminUserRoutes(std::vector<Route> &out);
 void RegisterAdminPolicyRoutes(std::vector<Route> &out);

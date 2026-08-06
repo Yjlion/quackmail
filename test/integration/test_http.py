@@ -11,6 +11,7 @@ Requires: pip install duckdb==1.5.4
 Run after `make release` so the loadable extensions exist under
 build/release/extension.
 """
+import base64
 import hashlib
 import http.cookiejar
 import os
@@ -448,6 +449,117 @@ def main():
             "ON rm.msgnum = m.msgnum WHERE rm.room_num = 0 AND m.subject = 'from the web'"
         ).fetchone()[0]
         assert got == 1, "the post did not land in the Lobby"
+
+        # ---- search ---------------------------------------------------------
+        # Three fixtures, each proving a different thing: a term that lives only
+        # in a subject, one that lives only inside a base64 body, and one in a
+        # room the searcher must never be shown.
+        deliver(con, "webuser", "quarterly zorblat report", "nothing to see here", fmt=0)
+        body_only = (
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "Content-Transfer-Encoding: base64\r\n"
+            "\r\n" + base64.b64encode(b"the codeword is fnordium, buried in the body").decode() + "\r\n"
+        )
+        deliver(con, "webuser", "an innocuous subject", body_only, fmt=4)
+        deliver(con, "otheruser", "zorblat belongs to otheruser", "private", fmt=0)
+
+        def search(params):
+            return request(op, BASE + "/search?" + urllib.parse.urlencode(params))
+
+        status, headers, _ = request(opener(), BASE + "/search?q=zorblat")
+        assert status == 303 and "/login" in headers.get("Location", ""), "search is not behind login"
+
+        status, _, page = search({"q": "zorblat"})
+        assert status == 200, f"search returned {status}"
+        assert "quarterly zorblat report" in page, "a subject match was not found"
+        # The whole point of resolving the room set through ListRooms: another
+        # user's mailbox holds the same term and must never surface.
+        assert "belongs to otheruser" not in page, "search crossed into another user's mailbox"
+
+        # The field selector really selects. The sender of every fixture is
+        # sender@example.com, so the two directions are distinguishable.
+        status, _, page = search({"q": "zorblat", "in": "from"})
+        assert "quarterly zorblat report" not in page, "in=from matched a subject"
+        status, _, page = search({"q": "sender@example.com", "in": "from"})
+        assert "quarterly zorblat report" in page, "in=from did not match the sender"
+
+        # The body case. `fnordium` appears nowhere but inside a base64-encoded
+        # part, so finding it proves citadel::BodyText is decoding the message
+        # rather than anything matching the stored bytes.
+        status, _, page = search({"q": "fnordium"})
+        assert "an innocuous subject" not in page, "a body-only word matched as a subject"
+        status, _, page = search({"q": "fnordium", "in": "body"})
+        assert "an innocuous subject" in page, "message text was not searched"
+
+        # Scoping to one room, and a room number the caller may not read.
+        status, _, page = search({"q": "zorblat", "room": str(mail_room)})
+        assert "quarterly zorblat report" in page, "scoping to a readable room lost the match"
+        status, _, page = search({"q": "zorblat", "room": str(other_room)})
+        assert "belongs to otheruser" not in page, "an unreadable room was accepted as a search scope"
+
+        # A window that closed before any fixture was delivered.
+        status, _, page = search({"q": "zorblat", "since": "2000-01-01", "until": "2000-01-02"})
+        assert "quarterly zorblat report" not in page, "the date bounds were not applied"
+        assert "Nothing matched" in page
+
+        # A term full of things that mean something to LIKE and to HTML. It must
+        # match nothing, break nothing, and come back escaped.
+        status, _, page = search({"q": "100%_" + XSS})
+        assert status == 200, f"a term with metacharacters returned {status}"
+        assert "<script>alert(1)" not in page, "the search term was reflected unescaped"
+        assert "Nothing matched" in page, "a LIKE metacharacter was treated as a wildcard"
+
+        # A passworded room is not searchable until this session has unlocked
+        # it — the same rule RequireUnlocked applies one room at a time.
+        con.execute("CALL cit_room_add('Vault')")
+        vault = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'Vault'"
+        ).fetchone()[0]
+        con.execute(
+            "UPDATE citadel_rooms SET qr_flags = qr_flags | 8, password = 'letmein' "
+            "WHERE room_num = ?",
+            [vault],
+        )
+        con.execute(
+            "INSERT INTO citadel_messages (msgnum, author, msgtime, subject, format_type, raw) "
+            "VALUES (nextval('citadel_msg_seq'), 'keeper', epoch(now())::BIGINT, "
+            "'zorblat in the vault', 0, 'body')"
+        )
+        con.execute(
+            "INSERT INTO citadel_room_msgs (room_num, msgnum) "
+            "SELECT ?, max(msgnum) FROM citadel_messages",
+            [vault],
+        )
+
+        status, _, page = search({"q": "zorblat"})
+        assert "in the vault" not in page, "a locked room's subjects leaked into search"
+
+        _, _, vault_page = request(op, f"{BASE}/bbs/room/{vault}")
+        status, _, _ = request(
+            op,
+            f"{BASE}/bbs/room/{vault}/unlock",
+            {"_csrf": csrf_of(vault_page), "password": "letmein", "next": f"/bbs/room/{vault}"},
+        )
+        assert status == 303, f"unlocking the room returned {status}"
+        status, _, page = search({"q": "zorblat"})
+        assert "in the vault" in page, "an unlocked room is still not searched"
+
+        # Two matches fit one page, so there is no pager to render.
+        status, _, page = search({"q": "zorblat", "n": "5"})
+        assert "quarterly zorblat report" in page and "in the vault" in page, "both matches on one page"
+        assert "Page 1 of" not in page, "a single page rendered a pager"
+
+        # Push past the smallest page size the handler will accept and the pager
+        # appears, with different rows on each page.
+        for i in range(6):
+            deliver(con, "webuser", f"zorblat bulk {i}", "filler", fmt=0)
+        status, _, first = search({"q": "zorblat", "n": "5", "p": "1"})
+        assert "Page 1 of 2" in first, "eight matches at five per page is not two pages"
+        status, _, second = search({"q": "zorblat", "n": "5", "p": "2"})
+        assert "Page 2 of 2" in second
+        assert "zorblat bulk 0" in second, "the oldest match is not on the last page"
+        assert "zorblat bulk 0" not in first, "the same row appeared on both pages"
 
         # ---- CSRF is per session -----------------------------------------
         admin_op, _ = sign_in(BASE, "admin", "adminpw")

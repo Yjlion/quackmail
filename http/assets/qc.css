@@ -45,6 +45,18 @@ header.top .who {
   display: flex; gap: var(--s2); align-items: baseline;
 }
 
+/* The search box in the header. `margin-left:auto` on .who still pushes the
+   name to the right, so this sits between the two. */
+header.top .topsearch { margin: 0; }
+header.top .topsearch input { width: 14rem; max-width: 40vw; }
+
+/* A label that only a screen reader sees. The header box is identified by its
+   placeholder visually, which is not an accessible name. */
+.vh {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
 /* The menu button is a <label> for a hidden checkbox: the sidebar collapses on
    a phone with no script at all. */
 .navbtn {
@@ -211,6 +223,16 @@ dl.rights dd { margin: 0; color: var(--muted); }
   gap: .4rem .9rem;
 }
 .pager { display: flex; gap: var(--s3); align-items: baseline; margin: var(--s2) 0; }
+
+/* The search page's own form: the fields sit in a row where there is room for
+   one and stack on a phone, which is what a wrapping flex line already does. */
+.searchform {
+  display: flex; flex-wrap: wrap; gap: 0 var(--s3); align-items: flex-end;
+  padding: var(--s3); background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--r1);
+}
+.searchform .field { margin: .3rem 0; }
+.searchform .actions { margin: .3rem 0; }
 .login { max-width: 22rem; margin: 3rem auto; }
 
 /* Cards, for the admin overview and the Sieve rule builder. */

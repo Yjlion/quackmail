@@ -344,6 +344,7 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 
 	group("Rooms");
 	item("/bbs/", "All rooms", "bbs");
+	item("/search", "Search", "search");
 	if (MayCreateRooms(ctx)) {
 		item("/bbs/new", "Create a room", "newroom");
 	}
@@ -507,6 +508,16 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	}
 	page += "<span class=\"brand\">" + T(node) + "</span>";
 	if (ctx.Authed()) {
+		// A GET form, so it carries no CSRF token and needs none — and a search
+		// stays linkable and bookmarkable, which a POST would take away. It is
+		// the one control that belongs on every page rather than in the sidebar:
+		// finding a message is not a section of the site.
+		page += "<form method=\"get\" action=\"/search\" class=\"topsearch\" role=\"search\">";
+		page += "<label class=\"vh\" for=\"topq\">Search messages</label>";
+		page += "<input id=\"topq\" type=\"search\" name=\"q\" value=\"" +
+		        A(ctx.req.path == "/search" ? ctx.req.Param("q") : std::string()) +
+		        "\" placeholder=\"Search\">";
+		page += "</form>";
 		page += "<span class=\"who\">" + T(ctx.username);
 		page += FormStart(ctx, "/logout", "inline") + Button("Sign out", "sec") + FormEnd();
 		page += "</span>";

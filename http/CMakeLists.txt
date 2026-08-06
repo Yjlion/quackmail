@@ -35,6 +35,7 @@ set(EXTENSION_SOURCES
     src/web_notes.cpp
     src/web_blog.cpp
     src/web_mail.cpp
+    src/web_search.cpp
     src/web_prefs.cpp
     src/web_admin_users.cpp
     src/web_admin_policy.cpp

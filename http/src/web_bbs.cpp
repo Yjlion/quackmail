@@ -207,6 +207,7 @@ void GetBbsRoom(Ctx &ctx) {
 	if (!(room.qr_flags & quackmail::citadel::QR_READONLY)) {
 		body += Link(RoomHref(room, "/compose"), "Post a message", "btn sec");
 	}
+	body += Link("/search?room=" + std::to_string(room.room_num), "Search this room", "btn sec");
 	body += FormStart(ctx, RoomHref(room, "/markread"), "inline") + Button("Mark all read", "sec") +
 	        FormEnd();
 	if (room.room_num != quackmail::citadel::kLobbyRoom && room.mailbox_owner == 0) {
