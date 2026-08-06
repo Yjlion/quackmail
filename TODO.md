@@ -10,6 +10,27 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **Three bugs squashed from the 0.6.0 backlog.**
+  - [x] `c_version` no longer sticks at whatever an install was created with.
+        `deploy/quackcit.sh`'s `seed_site()` gained a `seed_version()` sibling
+        to `seed_fqdn()`: every `quackcit.sh start` now compares the stored
+        `c_version` against `qm_version()`'s and reconciles through
+        `qm_config_set` when they differ, so the documented manual
+        `quackcitadm.sh config set c_version` workaround is no longer needed.
+  - [x] `citadel_dav_names` rows no longer leak past a non-DAV delete.
+        `citadel::PruneDavNames` — an unconditional anti-join delete beside
+        `PruneTombstones`, since a binding is either orphaned or it isn't,
+        with no cutoff to tune — runs from the same best-effort housekeeping
+        `web_router.cpp` already rolls the dice on for tombstones and JMAP
+        blobs.
+  - [x] IMAP `SEARCH` renders native (format 0) messages through
+        `citadel::RenderRfc822` before matching, same as `FETCH` already did.
+        `SearchMatch` read `msg.raw` directly, which has no header block for a
+        native message at all — `FROM`/`TO`/`SUBJECT`/`HEADER` could never
+        match one, and `LARGER`/`SMALLER` disagreed with the `RFC822.SIZE`
+        `FETCH` reports for the same message. `test_imap.py` now seeds a
+        native message and asserts both.
+
 - [x] **JMAP Core + Mail** (RFC 8620 + RFC 8621) at `/jmap/`, on the same two
       listeners, over the same rooms and messages IMAP serves.
   - [x] `core/json.{hpp,cpp}` — written rather than vendored, because the
@@ -497,7 +518,7 @@ listeners; the backlog below leads with what that work left open.
 
 ## Backlog
 
-The first three came out of building 0.6.0 and are the ones most likely to bite.
+The first two came out of building 0.6.0 and are the ones most likely to bite.
 
 - **Point a real JMAP client at `/jmap/`.** The DAV half was validated against
   `caldav` 3.2.1 and vdirsyncer 0.20, and that is what caught a design error
@@ -512,17 +533,7 @@ The first three came out of building 0.6.0 and are the ones most likely to bite.
   iMIP so an invitation sent to an attendee arrives as mail and their reply
   updates the event. Today an event with `ATTENDEE` properties is stored and
   served faithfully and nothing else happens.
-- **`c_version` is stale on upgraded installs.** The seed is `INSERT OR IGNORE`,
-  so a database created before 0.6.0 keeps reporting whatever it was created
-  with — over the Citadel, NNTP, POP3 and telnet banners. The v0.6.0 notes tell
-  operators to run `quackcitadm.sh config set c_version`, which is a workaround
-  rather than a fix; `quackcit.sh start` could reconcile it.
 
-- `citadel_dav_names` rows leak when an object is deleted by something other
-  than DAV. The web UI's delete removes the message and the binding stays,
-  which is harmless (the name resolves to an euid that no longer exists, so it
-  404s correctly, and a re-PUT upserts) but unbounded until the room is killed.
-  A sweep beside `PruneTombstones` would do it.
 - DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
   `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the
   `calendar-query` filters past comp-name and time-range, and `expand` on a
@@ -544,8 +555,6 @@ The first three came out of building 0.6.0 and are the ones most likely to bite.
   rather than an index, because a thread id is a function of the References
   header rather than a stored column — fine at BBS scale, wrong at mailbox
   scale.
-- IMAP still serves `msg.raw` directly for native (format 0) messages; it should
-  use `citadel::RenderRfc822` like POP3 and NNTP now do.
 - Citadel breadth: `CONF`/config verbs, `EXPI` message expiry, address books /
   vCard rooms, the Citadel network mesh (inter-node replication, and with it the
   NNTP peer-feed verbs `IHAVE`/`CHECK`/`TAKETHIS`).

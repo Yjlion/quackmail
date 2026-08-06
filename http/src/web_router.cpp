@@ -328,6 +328,9 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 			if (hours > 0) {
 				PruneBlobs(con, hours * 3600);
 			}
+			// citadel_dav_names rows left behind by a delete that did not go
+			// through the DAV DELETE handler (which unbinds its own name).
+			quackmail::citadel::PruneDavNames(con);
 		}
 	}
 
