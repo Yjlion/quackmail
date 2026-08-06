@@ -387,6 +387,21 @@ clients see each other in the who-list and can page one another.
   read, forgetting a room, the who-list and instant messages. A post made here
   is an ordinary `format_type = 0` Citadel message, so it reads back over the
   native protocol, telnet, NNTP, IMAP and POP3.
+- **Search** at `/search`, and from the box in the page header. Subject and
+  sender are matched across every room the caller can read; message text is a
+  second mode, because a body is not a column — a `format_type = 4` message
+  keeps its text base64-encoded inside `raw`, so matching it means decoding each
+  candidate through the same `citadel::BodyText` the other front-ends use. That
+  path is bounded by `qm_web_search_scan` (default 2000 messages, newest first)
+  and the page says when it hit the bound rather than passing off a partial
+  answer as a complete one.
+
+  The room set *is* the access control: search enumerates rooms through the same
+  helper the room list uses, so a private room stays invisible, a forgotten room
+  stays forgotten, another user's mailbox is never reachable, and a passworded
+  room is not searched until that session has unlocked it. A `room=` parameter
+  naming a room outside that set is not a scope — it is ignored, never a query
+  against that room.
 - **Room views.** A room's Citadel `default_view` decides how it renders:
 
   | View | What you get |

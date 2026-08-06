@@ -10,6 +10,29 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **Message search in the web front-end** (`/search`, plus a box in the page
+      header and "Search this room" on a room's toolbar).
+  - [x] `http/src/web_search.cpp`. The room set **is** the access control: it
+        enumerates rooms through `citadel::ListRooms` and `RoomUnlocked` — the
+        same helpers the pages use — and searches inside that set, so a `room=`
+        parameter naming anything outside it is ignored rather than turned into
+        a query. Private rooms stay invisible, zapped rooms stay forgotten,
+        another user's mailbox is unreachable, and a passworded room is not
+        searched until that session has unlocked it.
+  - [x] Two match paths, because `subject` and `author` are columns and a body
+        is not. Headers are one prepared statement over the whole store, using
+        `contains(lower(...), $1)` rather than `LIKE` so a term holding `%` or
+        `_` needs no escaping. Message text decodes each candidate through
+        `citadel::BodyText` — a `contains()` over `raw` would match transfer
+        encoding and header noise while missing every base64 body — and is
+        bounded by `qm_web_search_scan` (default 2000), with the page saying so
+        when it hits the bound.
+  - [x] `test/integration/test_http.py`: a subject-only term, a term that
+        exists only inside a base64 part (which is what proves `BodyText` is
+        being used), another user's mailbox holding the same term and never
+        appearing, a locked room before and after `/unlock`, room scoping,
+        date bounds, paging, and a term full of LIKE and HTML metacharacters.
+
 - [x] **Three bugs squashed from the 0.6.0 backlog.**
   - [x] `c_version` no longer sticks at whatever an install was created with.
         `deploy/quackcit.sh`'s `seed_site()` gained a `seed_version()` sibling
@@ -533,6 +556,31 @@ The first two came out of building 0.6.0 and are the ones most likely to bite.
   iMIP so an invitation sent to an attendee arrives as mail and their reply
   updates the event. Today an event with `ATTENDEE` properties is stored and
   served faithfully and nothing else happens.
+
+Four gaps in the web front-end, found while building search and ranked by how
+much they cost someone using it. The first is the odd one: the work is already
+written and simply has no way in.
+
+- **`/mail/move` and `/mail/flag` are dead endpoints.** Both handlers exist
+  (`web_mail.cpp`), both are registered, and **nothing in the module renders a
+  form that posts to either** — so a message cannot be filed into a folder or
+  flagged from a browser, even though `PostFlag` writes the `citadel_msg_flags`
+  rows IMAP reads. Either give them a front-end or delete them; a route that
+  cannot be reached is worse than one that does not exist, because it reads as
+  a working feature.
+- **Mail folders render as a plain BBS list.** `web_views.cpp` sends
+  `VIEW_MAILBOX` and `VIEW_DRAFTS` to `kBoardView`: Subject / From / Date, no
+  multi-select, no per-row action, no flag or attachment column. A real mailbox
+  view is what would give the two endpoints above their forms, and it is the
+  one place the web interface is visibly behind the mail clients it serves.
+- **Sidebar unread counts are styled but never emitted.** `qc.css` carries
+  `.sidebar .count` and a comment describing the unread count riding along on
+  the right of a room or folder link; `SidebarFor` emits no counts, no mail
+  folders past "Inbox", and no rooms. `citadel::RoomStatsBulk` already returns
+  exactly what it would need, in one query.
+- **No message-to-message navigation**: prev / next / next-unread on a message
+  page, so reading a room is a flow rather than a round trip through the list
+  for every message. The BBS shell has had this since it was a BBS.
 
 - DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
   `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the
