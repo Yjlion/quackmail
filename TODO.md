@@ -10,6 +10,28 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **The sidebar counts what is unread, and a message page moves.** The last
+      two gaps from the web review.
+  - [x] `SidebarFor` emits the `.count` span `qc.css` had described since the
+        sidebar was written and nothing ever produced, for every mail folder and
+        for the rooms with something new in them. It costs *fewer* queries than
+        before: one `ListRooms` plus one or two `RoomStatsBulk` calls, replacing
+        the four `FindUserRoom` lookups the groupware links used to make, since
+        those rooms are in the same listing.
+  - [x] `qm_web_sidebar_rooms` (default 10) caps the room half, most unread
+        first, and 0 drops it and its query. The sidebar renders on every page,
+        so the ceiling is the point. Folder counts are a handful of personal
+        rooms and are not gated.
+  - [x] `PageOpts::active` gained a `room:<num>` form, so the folder or room
+        being read is what gets `aria-current`, with "All rooms" as the fallback
+        for one the sidebar does not list — no room page is ever unmarked.
+  - [x] Newer / Older / Next unread above every message (`NavHtml`), each a
+        bounded min/max over the `(room_num, msgnum)` primary key rather than
+        `RoomMessages`: reading one message should not cost a listing of ten
+        thousand. "Next unread" means what the room's own listing means —
+        `\Seen` in a mail folder, the last-read pointer on a board — and is
+        suppressed when it would point where "Newer" already does.
+
 - [x] **The mail folder view**, and with it the two endpoints that had no way in.
   - [x] `http/src/web_mailbox.cpp` renders `VIEW_MAILBOX`/`VIEW_DRAFTS`, which
         every folder `EnsureUserRooms` provisions is. Until now they fell
@@ -580,18 +602,6 @@ The first two came out of building 0.6.0 and are the ones most likely to bite.
   iMIP so an invitation sent to an attendee arrives as mail and their reply
   updates the event. Today an event with `ATTENDEE` properties is stored and
   served faithfully and nothing else happens.
-
-Two gaps left in the web front-end from the review that produced search and the
-mailbox view.
-
-- **Sidebar unread counts are styled but never emitted.** `qc.css` carries
-  `.sidebar .count` and a comment describing the unread count riding along on
-  the right of a room or folder link; `SidebarFor` emits no counts, no mail
-  folders past "Inbox", and no rooms. `citadel::RoomStatsBulk` already returns
-  exactly what it would need, in one query.
-- **No message-to-message navigation**: prev / next / next-unread on a message
-  page, so reading a room is a flow rather than a round trip through the list
-  for every message. The BBS shell has had this since it was a BBS.
 
 - DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
   `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the

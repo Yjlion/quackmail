@@ -28,7 +28,9 @@ int64_t CapNum(const Ctx &ctx, size_t i) {
 // list without every handler having to know about layout.
 PageOpts RoomPage(const Room &room) {
 	PageOpts opts;
-	opts.active = "bbs";
+	// By number, so the sidebar highlights this room when it lists it and falls
+	// back to "All rooms" when it does not.
+	opts.active = "room:" + std::to_string(room.room_num);
 	opts.view = (int)room.default_view;
 	opts.wide = true;
 	return opts;
@@ -256,6 +258,66 @@ void GetBbsRoom(Ctx &ctx) {
 	Render(ctx, room.display_name, body, RoomPage(room));
 }
 
+// Move between messages without going back through the list.
+//
+// Three bounded lookups rather than RoomMessages, which returns every message
+// number in the room: reading one message should not cost a listing of ten
+// thousand. Each is a min/max over the (room_num, msgnum) primary key.
+//
+// "Unread" is what the room's own listing means by it — \Seen in a mail folder,
+// the last-read pointer on a board — so the link agrees with the bold rows the
+// reader just came from.
+std::string NavHtml(Ctx &ctx, const Room &room, const Message &msg, const RoomStats &stats) {
+	auto scalar = [&](const std::string &sql, vector<Value> params) -> int64_t {
+		auto r = Exec(ctx.con, sql, std::move(params));
+		if (!r) {
+			return 0;
+		}
+		auto &mat = r->Cast<MaterializedQueryResult>();
+		if (mat.RowCount() < 1) {
+			return 0;
+		}
+		Value v = mat.GetValue(0, 0);
+		return v.IsNull() ? 0 : v.GetValue<int64_t>();
+	};
+
+	int64_t room_num = room.room_num;
+	int64_t newer = scalar("SELECT min(msgnum) FROM citadel_room_msgs WHERE room_num = $1 AND msgnum > $2",
+	                       {Value::BIGINT(room_num), Value::BIGINT(msg.msgnum)});
+	int64_t older = scalar("SELECT max(msgnum) FROM citadel_room_msgs WHERE room_num = $1 AND msgnum < $2",
+	                       {Value::BIGINT(room_num), Value::BIGINT(msg.msgnum)});
+	int64_t unread = 0;
+	if (room.mailbox_owner > 0) {
+		unread = scalar("SELECT min(m.msgnum) FROM citadel_room_msgs m WHERE m.room_num = $1 "
+		                "AND m.msgnum > $2 AND NOT EXISTS (SELECT 1 FROM citadel_msg_flags f "
+		                "WHERE f.msgnum = m.msgnum AND f.username = $3 AND f.flag = $4)",
+		                {Value::BIGINT(room_num), Value::BIGINT(msg.msgnum), Value(ctx.username),
+		                 Value("\\Seen")});
+	} else {
+		unread = scalar("SELECT min(msgnum) FROM citadel_room_msgs WHERE room_num = $1 AND msgnum > $2",
+		                {Value::BIGINT(room_num), Value::BIGINT(stats.last_read)});
+	}
+
+	// Newest-first is the order the listing is in, so "Newer" is the higher
+	// message number and belongs on the left, beside the pager's own wording.
+	std::string out = "<div class=\"pager msgnav\">";
+	if (newer > 0) {
+		out += Link(RoomHref(room, "/msg/" + std::to_string(newer)), "Newer");
+	}
+	if (older > 0) {
+		out += Link(RoomHref(room, "/msg/" + std::to_string(older)), "Older");
+	}
+	// Suppressed when it would point where "Newer" already does: two links to
+	// one message is noise.
+	if (unread > 0 && unread != newer) {
+		out += Link(RoomHref(room, "/msg/" + std::to_string(unread)), "Next unread");
+	}
+	if (newer == 0 && older == 0) {
+		return std::string(); // the only message in the room
+	}
+	return out + "</div>";
+}
+
 void GetBbsMessage(Ctx &ctx) {
 	Room room;
 	if (!ResolveRoomNumFor(ctx, CapNum(ctx, 0), room)) {
@@ -271,7 +333,28 @@ void GetBbsMessage(Ctx &ctx) {
 		return;
 	}
 
+	// Reading advances the pointer, but never backwards. Done before the page is
+	// built, so the "next unread" link below is computed against the state this
+	// read leaves behind rather than the one it found.
+	auto stats = quackmail::citadel::GetRoomStats(ctx.con, ctx.username, room.room_num);
+	if (msg.msgnum > stats.last_read) {
+		quackmail::citadel::SetLastRead(ctx.con, ctx.username, room.room_num, msg.msgnum);
+		stats.last_read = msg.msgnum;
+	}
+	// In a mail folder, reading also sets \Seen. The folder listing shows that
+	// rather than the Citadel last-read pointer — a pointer is a high-water mark
+	// and cannot say "this one, not that one" — and it is the same flag IMAP
+	// shares, so opening a message here marks it read in a desktop client too.
+	if (room.mailbox_owner > 0) {
+		Exec(ctx.con,
+		     "INSERT INTO citadel_msg_flags (msgnum, username, flag) "
+		     "SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM citadel_msg_flags "
+		     "WHERE msgnum = $1 AND username = $2 AND flag = $3)",
+		     {Value::BIGINT(msg.msgnum), Value(ctx.username), Value("\\Seen")});
+	}
+
 	std::string body = "<p>" + Link(RoomHref(room), "Back to " + room.display_name) + "</p>";
+	body += RawHtml(NavHtml(ctx, room, msg, stats));
 	body += RenderMessage(ctx, room, msg);
 
 	std::string num = std::to_string(msg.msgnum);
@@ -326,23 +409,6 @@ void GetBbsMessage(Ctx &ctx) {
 	}
 	body += Link(RoomHref(room, "/msg/" + num + "/source"), "View source", "btn sec");
 	body += "</div>";
-
-	// Reading advances the pointer, but never backwards.
-	auto stats = quackmail::citadel::GetRoomStats(ctx.con, ctx.username, room.room_num);
-	if (msg.msgnum > stats.last_read) {
-		quackmail::citadel::SetLastRead(ctx.con, ctx.username, room.room_num, msg.msgnum);
-	}
-	// In a mail folder, reading also sets \Seen. The folder listing shows that
-	// rather than the Citadel last-read pointer — a pointer is a high-water mark
-	// and cannot say "this one, not that one" — and it is the same flag IMAP
-	// shares, so opening a message here marks it read in a desktop client too.
-	if (room.mailbox_owner > 0) {
-		Exec(ctx.con,
-		     "INSERT INTO citadel_msg_flags (msgnum, username, flag) "
-		     "SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM citadel_msg_flags "
-		     "WHERE msgnum = $1 AND username = $2 AND flag = $3)",
-		     {Value::BIGINT(msg.msgnum), Value(ctx.username), Value("\\Seen")});
-	}
 
 	std::string subject = DecodeHeader(msg.subject);
 	Render(ctx, subject.empty() ? std::string("(no subject)") : subject, body, RoomPage(room));

@@ -400,6 +400,19 @@ clients see each other in the who-list and can page one another.
   read, forgetting a room, the who-list and instant messages. A post made here
   is an ordinary `format_type = 0` Citadel message, so it reads back over the
   native protocol, telnet, NNTP, IMAP and POP3.
+- **The sidebar** carries unread counts: every mail folder, and the rooms with
+  something new in them, most unread first. It is one room listing plus one or
+  two `RoomStatsBulk` calls — fewer queries than the four `FindUserRoom` lookups
+  it used to make for the groupware links, which now come out of the same
+  listing. `qm_web_sidebar_rooms` (default 10) caps the room half and 0 turns it
+  and its query off; folder counts are a handful of personal rooms and always
+  shown. A room page marks that room current, falling back to *All rooms* for
+  one the sidebar does not list.
+- **Reading is a flow**, not a round trip through the list: *Newer*, *Older* and
+  *Next unread* sit above every message. Each is a bounded min/max over the
+  `(room_num, msgnum)` key rather than a listing of the room, and *next unread*
+  means what that room's own listing means — `\Seen` in a mail folder, the
+  last-read pointer on a board.
 - **Search** at `/search`, and from the box in the page header. Subject and
   sender are matched across every room the caller can read; message text is a
   second mode, because a body is not a column — a `format_type = 4` message

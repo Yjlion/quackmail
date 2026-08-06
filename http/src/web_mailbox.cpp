@@ -146,7 +146,8 @@ void Index(Ctx &ctx, const Room &room) {
 	toolbar += "</div>";
 
 	PageOpts opts;
-	opts.active = "mail";
+	// The sidebar lists every folder, so mark this one rather than the section.
+	opts.active = "room:" + std::to_string(room.room_num);
 	opts.view = (int)room.default_view;
 	opts.wide = true;
 	opts.toolbar = toolbar;

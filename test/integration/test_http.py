@@ -689,6 +689,125 @@ def main():
         assert status == 200
         assert 'formaction="/mail/flag"' not in page, "the Lobby rendered as a mail folder"
 
+        # ---- the sidebar ----------------------------------------------------
+        # The .count span the stylesheet has always described, and which nothing
+        # emitted until now.
+        # Something new to count: the sections above read the inbox down.
+        deliver(con, "webuser", "sidebar fixture", "unread", fmt=0)
+        unread_before = con.execute(
+            "SELECT count(*) FROM citadel_room_msgs rm WHERE rm.room_num = ? "
+            "AND rm.msgnum > coalesce((SELECT last_read FROM citadel_room_state "
+            "WHERE username = 'webuser' AND room_num = ?), 0)",
+            [mail_room, mail_room],
+        ).fetchone()[0]
+        assert unread_before > 0, "the fixture left nothing unread to count"
+
+        status, _, page = request(op, f"{BASE}/prefs")
+        assert status == 200
+        assert 'class="count"' in page, "the sidebar emits no unread count"
+        assert ">Inbox<" in page, "the sidebar does not name the inbox"
+        assert ">Sent Items<" in page, "the sidebar lists no folder past the inbox"
+        assert f'href="/bbs/room/{mail_room}"' in page, "the inbox does not link to its room"
+
+        # The count is the room's unread total, not a decoration.
+        m = re.search(
+            r'href="/bbs/room/%d"[^>]*><span>Inbox</span><span class="count">(\d+)</span>' % mail_room,
+            page,
+        )
+        assert m, "the inbox link carries no count"
+        assert int(m.group(1)) == unread_before, f"count {m.group(1)} != {unread_before} unread"
+
+        # Reading the folder marks it read, and the count goes away rather than
+        # going stale.
+        request(op, f"{BASE}/bbs/room/{mail_room}", None)
+        _, _, page = request(
+            op, f"{BASE}/bbs/room/{mail_room}/markread", {"_csrf": tok}
+        )
+        _, _, page = request(op, f"{BASE}/prefs")
+        m = re.search(
+            r'href="/bbs/room/%d"[^>]*><span>Inbox</span><span class="count">' % mail_room, page
+        )
+        assert not m, "the inbox still shows a count after being marked read"
+
+        # A room page marks that room current, and falls back to All rooms for
+        # one the sidebar does not list.
+        _, _, page = request(op, f"{BASE}/bbs/room/{mail_room}")
+        assert f'href="/bbs/room/{mail_room}" aria-current="page"' in page, (
+            "the folder being read is not marked current"
+        )
+        # A room the sidebar does *not* list — it only lists rooms with unread —
+        # falls back to marking "All rooms", so no room page is ever unmarked.
+        request(op, f"{BASE}/bbs/room/0/markread", {"_csrf": tok})
+        _, _, page = request(op, f"{BASE}/bbs/room/0")
+        assert 'href="/bbs/room/0" aria-current="page"' not in page, (
+            "the Lobby is still listed after being marked read"
+        )
+        assert '<a href="/bbs/" aria-current="page"' in page, (
+            "an unlisted room left the whole sidebar unmarked"
+        )
+
+        # 0 turns the room listing, and the query behind it, off.
+        con.execute("CALL qm_config_set('qm_web_sidebar_rooms', '0')")
+        deliver(con, "webuser", "sidebar cap fixture", "x", fmt=0)
+        _, _, page = request(op, f"{BASE}/prefs")
+        assert ">All rooms<" in page, "the sidebar lost its rooms link entirely"
+        con.execute("CALL qm_config_set('qm_web_sidebar_rooms', '10')")
+
+        # ---- moving between messages ----------------------------------------
+        # Its own folder, so the three fixtures below really are the whole room
+        # and "oldest" means what the assertions say it does. Cloned from the
+        # inbox so it is a personal VIEW_MAILBOX room like any other.
+        con.execute(
+            "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, "
+            "password, listorder, default_view, info, mailbox_owner, highest_msg) "
+            "SELECT nextval('citadel_room_seq'), lpad(mailbox_owner::VARCHAR, 10, '0') || '.NavTest', "
+            "'NavTest', floor_num, qr_flags, '', listorder, 1, '', mailbox_owner, 0 "
+            "FROM citadel_rooms WHERE room_num = ?",
+            [mail_room],
+        )
+        nav_room = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'NavTest'"
+        ).fetchone()[0]
+        n1 = deliver(con, "webuser", "nav one", "first", fmt=0)
+        n2 = deliver(con, "webuser", "nav two", "second", fmt=0)
+        n3 = deliver(con, "webuser", "nav three", "third", fmt=0)
+        for num in (n1, n2, n3):
+            con.execute("DELETE FROM citadel_room_msgs WHERE msgnum = ?", [num])
+            con.execute(
+                "INSERT INTO citadel_room_msgs (room_num, msgnum) VALUES (?, ?)", [nav_room, num]
+            )
+
+        _, _, page = request(op, f"{BASE}/bbs/room/{nav_room}/msg/{n2}")
+        assert f'href="/bbs/room/{nav_room}/msg/{n3}">Newer' in page, "no link to the newer message"
+        assert f'href="/bbs/room/{nav_room}/msg/{n1}">Older' in page, "no link to the older message"
+
+        # The ends of the room have only one direction each.
+        _, _, page = request(op, f"{BASE}/bbs/room/{nav_room}/msg/{n3}")
+        assert ">Newer<" not in page, "the newest message offers a newer one"
+        assert f'href="/bbs/room/{nav_room}/msg/{n2}">Older' in page
+
+        _, _, page = request(op, f"{BASE}/bbs/room/{nav_room}/msg/{n1}")
+        assert ">Older<" not in page, "the oldest message offers an older one"
+
+        # Next unread, in a mail folder, is the next one without \Seen. All
+        # three have been read by now, so clearing the flag on n3 alone makes it
+        # the only candidate — and reaching it means n2 was skipped rather than
+        # simply being the next message along.
+        con.execute("DELETE FROM citadel_msg_flags WHERE username = 'webuser' AND msgnum = ?", [n3])
+        _, _, page = request(op, f"{BASE}/bbs/room/{nav_room}/msg/{n1}")
+        assert f'href="/bbs/room/{nav_room}/msg/{n3}">Next unread' in page, (
+            "next unread did not skip the messages already seen"
+        )
+
+        # A room holding one message has nowhere to go and says nothing.
+        solo = con.execute("SELECT room_num FROM citadel_rooms WHERE display_name = 'Vault'").fetchone()[0]
+        _, _, page = request(op, f"{BASE}/bbs/room/{solo}")
+        solo_msg = con.execute(
+            "SELECT msgnum FROM citadel_room_msgs WHERE room_num = ?", [solo]
+        ).fetchone()[0]
+        _, _, page = request(op, f"{BASE}/bbs/room/{solo}/msg/{solo_msg}")
+        assert "msgnav" not in page, "a room with one message rendered a navigation row"
+
         # ---- CSRF is per session -----------------------------------------
         admin_op, _ = sign_in(BASE, "admin", "adminpw")
         _, _, admin_page = request(admin_op, f"{BASE}/bbs/room/0/compose")
