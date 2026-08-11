@@ -28,8 +28,8 @@ for what's next.
 
 ## Build and test
 
-Extensions are **Linux-only** (POSIX sockets, system OpenSSL). Build on
-`debian.lan`, not on the Windows checkout.
+Extensions are **Linux-only** (POSIX sockets, system OpenSSL). Build on a Linux
+checkout, not on the Windows one.
 
 ```bash
 GEN=ninja make release     # artifacts: build/release/extension/<name>/<name>.duckdb_extension
@@ -37,14 +37,23 @@ make test                  # sqllogictest
 python3 test/integration/test_<protocol>.py
 ```
 
-On `debian.lan` the toolchain is user-local in `~/venv` and RAM is tight:
+The integration tests import the `duckdb` Python module; a few want extras
+(`jmapc` for `test_jmap_client.py`, which skips itself without it). Keep them in
+a virtualenv — `~/venv` is the convention:
 
 ```bash
-cd ~/quackmail && git fetch origin && git reset --hard origin/<branch>
-PATH=~/venv/bin:$PATH GEN=ninja CMAKE_BUILD_PARALLEL_LEVEL=2 make release
+python3 -m venv ~/venv && ~/venv/bin/pip install 'duckdb==1.5.4' jmapc
 ```
 
-The first DuckDB build takes ~20 minutes; incremental rebuilds are fast.
+RAM, not cores, is the constraint on the DuckDB build. Cap it:
+
+```bash
+GEN=ninja CMAKE_BUILD_PARALLEL_LEVEL=2 make release
+```
+
+The first DuckDB build takes ~20–40 minutes; incremental rebuilds are fast,
+**except** that anything under `core/` is compiled into all twelve extensions,
+so touching `core/src/*.cpp` or a header they share is a twelve-way rebuild.
 
 ## Adding a listener
 
@@ -167,16 +176,28 @@ asserts, instead of sleeping past a poll interval.
 
 ## The parity oracle
 
-`debian.lan` runs a **real Citadel Groupware server** used as the parity oracle,
-and carries the **full Citadel source at `/root/citadel`** (read it with sudo —
-`citadel/server/modules/<proto>/` for protocol servers, `textclient/` for the
-BBS client). Source is the spec; live probes are the acceptance test.
+A **real Citadel Groupware server** is the oracle. Source is the spec; live
+probes are the acceptance test.
 
-Ports: oracle owns 504, 25/465/587, 110/995, 143/993, 119/563, 5222, 80/443.
-QuackCit runs beside it on dev ports (citadel 5040, smtp 2525, submission
-2587, submissions 2465, pop3 1110, pop3s 1995, imap 1143, imaps 1993). Details, including SSH
-access and the `LD_PRELOAD` trick for the official client, are in
-[MEMORY.md](MEMORY.md).
+Get one anywhere with docker — this is the default:
+
+```bash
+docker run -d --name citadel -p 10504:504 -p 10025:25 -p 10110:110 \
+  -p 10143:143 -p 10119:119 -p 10522:5222 -p 10080:80 \
+  -v citadel-data:/citadel-data citadeldotorg/citadel
+docker exec citadel /usr/local/citadel/sendcommand -h/citadel-data 'AGUP admin'
+```
+
+Real port + 10000, so nothing collides with QuackCit's dev ports (citadel 5040,
+smtp 2525, submission 2587, submissions 2465, pop3 1110, pop3s 1995, imap 1143,
+imaps 1993, xmpp 15222) or with the integration tests. `admin`/`citadel` exists
+already; `sendcommand` needs `-h/citadel-data` or it looks in the wrong place.
+
+`debian.lan` runs the same server on the standard ports and carries the **full
+Citadel source at `/root/citadel`** (read it with sudo —
+`citadel/server/modules/<proto>/` for protocol servers, `textclient/` for the
+BBS client). The container has no source tree. Details for both, including the
+`LD_PRELOAD` trick for the official client, are in [MEMORY.md](MEMORY.md).
 
 The box is a disposable test machine: restarting Citadel and creating test
 rooms/users on it is fine and expected when exercising admin features.

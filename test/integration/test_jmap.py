@@ -41,6 +41,7 @@ HOST = "127.0.0.1"
 PORT = 18098
 IMAP_PORT = 11438
 BASE = f"http://{HOST}:{PORT}"
+FQDN = "jmap.example.com"
 
 USER = "jmapuser"
 PASSWORD = "secret"
@@ -102,7 +103,7 @@ def main():
     con.execute(f"CALL qm_user_add('{USER}', '{PASSWORD}')")
     con.execute(f"CALL qm_user_add('{OTHER}', '{OTHER_PASSWORD}')")
     con.execute("CALL qm_config_set('qm_web_force_https', '0')")
-    con.execute("CALL qm_config_set('c_fqdn', 'jmap.example.com')")
+    con.execute(f"CALL qm_config_set('c_fqdn', '{FQDN}')")
     con.execute("SELECT ok FROM qm_domain_add('jmap.example.com', 'local')").fetchall()
     con.execute(f"CALL qm_http_start('{HOST}', {PORT})")
     con.execute(f"CALL qm_imap_start('{HOST}', {IMAP_PORT})")
@@ -123,11 +124,33 @@ def main():
         assert SUBMIT in s["capabilities"]
         assert s["username"] == USER
         assert USER in s["accounts"], f"accounts does not name this user: {list(s['accounts'])}"
+        # A client may read any of the three, so all three are named.
         assert s["primaryAccounts"][MAIL] == USER
-        assert s["apiUrl"] == "/jmap/api"
+        assert s["primaryAccounts"][CORE] == USER, s["primaryAccounts"]
+        assert s["primaryAccounts"][SUBMIT] == USER
+        # Absolute URLs, built from the authority the client actually reached us
+        # on. A client calls these verbatim rather than resolving them against
+        # the request URI the way it resolves a DAV href, so a path is not a URL
+        # here — and c_fqdn ("jmap.example.com" above) cannot supply the port.
+        base = f"http://{HOST}:{PORT}"
+        assert s["apiUrl"] == base + "/jmap/api", s["apiUrl"]
         assert s["capabilities"][CORE]["maxSizeUpload"] > 0, \
             "maxSizeUpload is 0, so a client will never try to attach anything"
-        assert s["uploadUrl"] == "/jmap/upload/{accountId}", s["uploadUrl"]
+        assert s["uploadUrl"] == base + "/jmap/upload/{accountId}", s["uploadUrl"]
+        assert s["downloadUrl"].startswith(base + "/jmap/download/"), s["downloadUrl"]
+
+        # The authority comes from the Host header, so what a client may put in
+        # it is the whole question. Anything that is not host[:port] is refused
+        # rather than trimmed, and the fall-back is the configured identity: a
+        # header cannot smuggle a path, a userinfo `@`, or a second URL in.
+        for hostile in ("evil.example.com/path", "evil.example.com:80@real",
+                        "evil example.com", "evil.example.com\tx"):
+            status, _, body = j.raw("GET", "/.well-known/jmap", None, {"Host": hostile})
+            if status != 200:
+                continue  # the request reader rejected it outright, which is fine
+            got = json.loads(body)["apiUrl"]
+            assert got == f"http://{FQDN}/jmap/api", \
+                f"Host {hostile!r} reached apiUrl as {got!r}"
         # There is no push, and saying so stops a client opening a stream that
         # would never carry anything.
         assert s["eventSourceUrl"] == ""

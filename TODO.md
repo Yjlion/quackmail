@@ -10,6 +10,41 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **A real JMAP client was pointed at `/jmap/`, and it could not use it.**
+      The client is [`jmapc`](https://github.com/smkent/jmapc) 0.3.0 — chosen
+      because nobody here wrote it, which was the whole point of the backlog
+      item. It found what assertions written by the same person who chose the
+      behaviour could not.
+  - [x] **`apiUrl`, `uploadUrl` and `downloadUrl` were site-relative paths.**
+        A DAV href is a path the client resolves against the request URI, and
+        `dav.hpp` says so deliberately; RFC 8620's Session URLs are called
+        *verbatim*. `requests` refuses `"/jmap/api"` with "No scheme supplied",
+        so a client parsed the Session resource and then failed on its first
+        method call, its first upload and its first download alike. `/jmap/`
+        was unusable to any client that does not silently `urljoin`, and
+        `test_jmap.py` was asserting the broken value.
+  - [x] `qmweb::SelfBaseUrl` builds the origin from the authority the client
+        reached us on, because `c_fqdn` carries no port and would describe
+        every server not on 80/443 wrongly. The `Host` header is validated to
+        `host[:port]` and falls back to `c_fqdn` otherwise. This is the one
+        place that does derive a URL from `Host`, against the rule the HTTPS
+        redirect follows, and the comment says why the rule does not transfer:
+        a `Location` is followed and cacheable, where these go back to the
+        authenticated client that just sent the header, in a `no-store`
+        response, for it to call us on. `qm_web_base_url` overrides.
+  - [x] `primaryAccounts` named `mail` and `submission` but not `core`. jmapc
+        reads `core` first; a client may read any of the three.
+  - [x] `test/integration/test_jmap_client.py` — the probe kept as a test, so
+        the next regression is caught by somebody else's deserializer rather
+        than by ours. It skips itself when `jmapc` is not installed.
+        `test_jmap.py` gains the hostile-`Host` cases, which are the half a
+        client library cannot exercise.
+  - [x] Everything else jmapc touched worked unchanged: session discovery,
+        `Core/echo`, `Mailbox/get` with roles, `Email/set`/`query`/`get`
+        round-tripping through its models, `Identity/get`, blob upload and
+        download, and the per-account scoping on a blob. Verified against a
+        real `deploy/quackcit.sh start` instance as well as the harness.
+
 - [x] **The `k` right delegates room creation.** Left out of phase 4
       deliberately: `k` ("create rooms under this one") was in the rights
       legend but nothing read it, so a room administrator could delegate
@@ -544,21 +579,27 @@ listeners; the backlog below leads with what that work left open.
 
 ## Backlog
 
-The first two came out of building 0.6.0 and are the ones most likely to bite.
+The first came out of building 0.6.0 and is the one most likely to bite.
 
-- **Point a real JMAP client at `/jmap/`.** The DAV half was validated against
-  `caldav` 3.2.1 and vdirsyncer 0.20, and that is what caught a design error
-  (resource names were required to equal the object UID; vdirsyncer names them
-  with its own UUID) that `test_caldav.py` had been passing over the whole time.
-  JMAP has had no equivalent probe, so it rests entirely on assertions written
-  by the same person who chose the behaviour — the exact footing that already
-  proved wrong once. There is no widely-deployed JMAP client to point at it,
-  which is the problem rather than an excuse.
 - **DAV scheduling**, which a groupware server is expected to have and this one
   does not: free-busy (`CALDAV:free-busy-query`, `schedule-outbox`), and iTIP/
   iMIP so an invitation sent to an attendee arrives as mail and their reply
   updates the event. Today an event with `ATTENDEE` properties is stored and
-  served faithfully and nothing else happens.
+  served faithfully and nothing else happens. What it will run into:
+  `ical::Item` keeps `ORGANIZER` as a flat string and `ATTENDEE` as bare
+  CAL-ADDRESS values with the parameters dropped, so a `PARTSTAT` round-trips
+  only through the `Component` tree and a REPLY handler must work on that;
+  nothing models `VFREEBUSY` or writes `METHOD`, though `ical::Parse`/`Emit`
+  are generic over component names so both are additions rather than parser
+  changes; `ParseDavPath` has no room for a schedule inbox/outbox and
+  `DavHandler` has no `POST` branch; `free-busy-query` has to be added to
+  `supported-report-set` or clients never attempt it; and `LocalDeliver` has
+  no content-type dispatch at all — it parses headers and never builds the
+  part tree — so noticing an inbound `text/calendar; method=` part is a new
+  hook whose position relative to `sieve::Evaluate` is a real decision.
+  `submission::Send` is quota-agnostic by contract, so an iMIP sender must
+  charge `policy::CheckRate`/`RecordSend` itself the way `jmap_submission.cpp`
+  does.
 
 - DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
   `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the

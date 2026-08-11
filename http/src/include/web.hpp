@@ -107,6 +107,16 @@ void RegisterJmapRoutes(std::vector<Route> &out);
 // and role gates, verify CSRF, dispatch. Always fills `resp`.
 void Dispatch(Connection &con, const http::Request &req, http::Response &resp);
 
+// "https://host:port" — this server's own origin, with no trailing slash.
+//
+// Almost nothing needs it: an href in a page or a DAV multistatus is a *path*,
+// which a client resolves against the request URI, and emitting a path is how
+// we stay out of the business of guessing our own scheme and host. The
+// exception is a URL a client consumes verbatim rather than resolving, which is
+// what RFC 8620's Session resource hands out — there a path is simply not a
+// URL, and every JMAP client fails on it. `qm_web_base_url` overrides.
+std::string SelfBaseUrl(Ctx &ctx);
+
 // Run a parameterized statement; nullptr on error. Params are taken **by
 // value** on purpose: PreparedStatement::Execute binds a non-const reference,
 // so a brace list at the call site would not compile against it directly.

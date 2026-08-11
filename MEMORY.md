@@ -588,7 +588,46 @@ and guarding only creation would have looked complete.
   prints. Neither file rotates, and `errlog_delta`'s absolute offsets are why
   adding rotation is not free.
 
+## The parity oracle in docker (portable, and what to use by default)
+
+The oracle does not need a dedicated box. `citadeldotorg/citadel` is the same
+server, and running it beside a checkout is how any Linux machine gets one:
+
+```sh
+docker run -d --name citadel --restart unless-stopped \
+  -p 10504:504 -p 10025:25 -p 10110:110 -p 10143:143 -p 10119:119 \
+  -p 10993:993 -p 10995:995 -p 10465:465 -p 10587:587 -p 10563:563 \
+  -p 10522:5222 -p 10080:80 -p 10443:443 \
+  -v citadel-data:/citadel-data citadeldotorg/citadel
+```
+
+- Host ports are the real ones **plus 10000**, which keeps every QuackCit dev
+  port and every integration-test port free. `5222` becomes `10522` rather than
+  `15222`, because `15222` is QuackCit's dev XMPP port.
+- Verified live: the greetings match what this file already recorded from
+  `debian.lan` — POP3 `+OK Citadel POP3 server ready.`, NNTP `200 <node> NNTP
+  Citadel server is not finished yet`, IMAP advertising `ACL` and `METADATA`.
+  Server build 17855350.
+- **Administering it**: the data directory is `/citadel-data`, not the compiled
+  default, so `sendcommand` needs to be told:
+  `docker exec citadel /usr/local/citadel/sendcommand -h/citadel-data 'AGUP admin'`.
+  It is on the PATH only by full path (`/usr/local/citadel/sendcommand`).
+- The image ships **`admin`/`citadel`** already created at axlevel 6. Add
+  `leo`/`leo` with `CREU leo|leo|4` to reproduce the 1:1 diffing pair this file
+  describes below.
+- The **text client** is at `/usr/local/bin/citadel` inside the container. The
+  container has **no source tree** — read the source from citadel.org or a
+  checkout when the spec matters.
+- The container is disposable: `docker rm -f citadel && docker volume rm
+  citadel-data` resets it completely, which is cheaper than restoring a box.
+
+Nothing else about parity changes — the protocol facts below were probed
+against the same server and still hold.
+
 ## The test box: debian.lan
+
+Historical, and still accurate if you have it. The docker oracle above replaces
+the parity half of it on a machine that cannot reach this host.
 
 - SSH: `ssh -i ~/.ssh/quackcit_dev leo@debian.lan` (config alias `quackcit`).
   `leo` has working sudo (an old `NOPASSED` sudoers typo was fixed on

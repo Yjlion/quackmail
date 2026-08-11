@@ -484,6 +484,18 @@ being reachable at all.
   listed in `qm_web_trusted_proxies` — `X-Forwarded-Proto` is honoured only from
   a peer on that list. Sessions are pinned to the transport they were minted
   over either way, so nothing is laundered between the two listeners.
+
+  One thing does build a URL from the `Host` header, and the difference is
+  worth stating rather than leaving as an apparent inconsistency: JMAP's
+  Session resource (`apiUrl`, `uploadUrl`, `downloadUrl`). A client calls those
+  verbatim instead of resolving them against the request the way it resolves a
+  DAV href, so a path is not a URL there — and `c_fqdn` carries no port, which
+  would describe every server not on 80/443 wrongly. A `Location` is followed
+  by a browser and can be cached; these go back to the authenticated client
+  that just sent the header, on the same connection, in a `no-store` response,
+  for that client to call us on. The header is still validated to
+  `host[:port]` and falls back to `c_fqdn` otherwise, and `qm_web_base_url`
+  overrides the whole thing for a reverse proxy that rewrites `Host`.
 - **Form origins are unrestricted until you restrict them** — *relaxed by
   default*. `qm_web_origins` is a comma-separated list of host globs allowed to
   submit forms; while it is empty, any origin may. This server is reached by
@@ -860,7 +872,20 @@ python3 test/integration/test_smtp_in.py     # MX: recipient validation, domains
 python3 test/integration/test_smtp_policy.py # outbound DKIM signing + per-user rate limiting
 python3 test/integration/test_lmtp.py        # LMTP per-recipient replies, no spam checks
 python3 test/integration/test_managesieve.py # ManageSieve round trip, then the filter routes delivery
+
+pip install jmapc                            # optional; the test below skips itself without it
+python3 test/integration/test_jmap_client.py # JMAP driven by a third-party client library
 ```
+
+Most integration tests assert the wire format this server produces, which
+cannot catch a format that is self-consistently wrong. `test_caldav.py` passed
+for months while real clients could not sync, because resource names were
+required to equal the object UID and vdirsyncer names them itself.
+`test_jmap_client.py` is the answer to that class of bug for JMAP: every
+request goes through `jmapc`'s own models, so a response shape somebody else's
+deserializer rejects fails without anyone having thought to assert it. It found
+that all three Session URLs were relative paths, which made `/jmap/` unusable
+to any real client.
 
 The DKIM tests run entirely offline: `dkim::Verify` takes an injectable key
 lookup, and `policy::DkimKeyLookup` resolves locally stored keys before falling
