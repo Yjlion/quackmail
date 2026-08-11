@@ -24,6 +24,7 @@
 #include "quackmail/html_sanitize.hpp"
 #include "quackmail/http.hpp"
 #include "quackmail/ical.hpp"
+#include "quackmail/itip.hpp"
 #include "quackmail/json.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
@@ -1826,6 +1827,100 @@ void IcalFreebusyScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	    });
 }
 
+// ---- iTIP ----------------------------------------------------------------
+//
+// Scheduling is where the rules are easy to state and easy to get subtly
+// wrong — a CANCEL that does not bump SEQUENCE is dropped by every client, a
+// REPLY that carries the other attendees reads as answering on their behalf,
+// and a stale REPLY that overwrites a newer answer loses information nobody
+// can recover. All of it is a pure function of the calendar text, so all of it
+// is pinned here rather than behind a mail server.
+
+// qm_itip_request(ics) / qm_itip_cancel(ics)
+void ItipRequestScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t text, ValidityMask &mask, idx_t idx) {
+		    std::string out = quackmail::itip::BuildRequest(text.GetString());
+		    if (out.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+void ItipCancelScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t text, ValidityMask &mask, idx_t idx) {
+		    std::string out = quackmail::itip::BuildCancel(text.GetString());
+		    if (out.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_itip_reply(ics, attendee, partstat) -> the REPLY that attendee sends.
+void ItipReplyScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, string_t, string_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t text, string_t who, string_t partstat, ValidityMask &mask, idx_t idx) {
+		    std::string out =
+		        quackmail::itip::BuildReply(text.GetString(), who.GetString(), partstat.GetString());
+		    if (out.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_itip_apply_reply(stored, reply) -> the organizer's copy with the PARTSTAT
+// folded in, or NULL when the reply changes nothing. NULL is the interesting
+// answer here: a stale or unrelated reply must not silently rewrite an event.
+void ItipApplyReplyScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t stored, string_t reply, ValidityMask &mask, idx_t idx) {
+		    std::string out;
+		    if (!quackmail::itip::ApplyReply(stored.GetString(), reply.GetString(), out)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_itip_recipients(ics, organizer) -> who gets told, comma separated.
+void ItipRecipientsScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, string_t org, ValidityMask &, idx_t) {
+		    std::string out;
+		    for (const auto &r : quackmail::itip::Recipients(text.GetString(), org.GetString())) {
+			    out += out.empty() ? "" : ",";
+			    out += r;
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_itip_method(raw_message) -> the METHOD of its text/calendar part, or NULL
+// when the message carries no scheduling content at all.
+void ItipMethodScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t raw, ValidityMask &mask, idx_t idx) {
+		    std::string method;
+		    std::string part = quackmail::itip::CalendarPart(raw.GetString(), method);
+		    if (part.empty()) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, method);
+	    });
+}
+
 // qm_ical_set_summary(text, summary) -> the calendar with the first item's
 // SUMMARY changed, everything else untouched.
 //
@@ -2108,6 +2203,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_ical_expand_count", {V, I, I}, I, IcalExpandCountScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_expand_starts", {V, I, I}, V, IcalExpandStartsScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_freebusy", {V, I, I}, V, IcalFreebusyScalar));
+	loader.RegisterFunction(ScalarFunction("qm_itip_request", {V}, V, ItipRequestScalar));
+	loader.RegisterFunction(ScalarFunction("qm_itip_cancel", {V}, V, ItipCancelScalar));
+	loader.RegisterFunction(ScalarFunction("qm_itip_reply", {V, V, V}, V, ItipReplyScalar));
+	loader.RegisterFunction(ScalarFunction("qm_itip_apply_reply", {V, V}, V, ItipApplyReplyScalar));
+	loader.RegisterFunction(ScalarFunction("qm_itip_recipients", {V, V}, V, ItipRecipientsScalar));
+	loader.RegisterFunction(ScalarFunction("qm_itip_method", {V}, V, ItipMethodScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_set_summary", {V, V}, V, IcalSetSummaryScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_vtimezone", {V, I, I}, V, IcalVtimezoneScalar));
 

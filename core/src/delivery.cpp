@@ -1,6 +1,7 @@
 #include "quackmail/delivery.hpp"
 
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/itip.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mime.hpp"
 #include "quackmail/sieve.hpp"
@@ -29,6 +30,11 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
                   const std::string &body, const Options &opts, Outcome &out) {
 	out = Outcome();
 	auto parsed = mime::Parse(body);
+
+	// Recipients this message is actually being kept for, which is not the same
+	// as `rcpts`: a Sieve reject or discard drops one. Only these get the
+	// scheduling side effect below.
+	std::vector<std::string> kept;
 
 	// Resolve the delivery rooms across all recipients (deduplicated: one stored
 	// message is pointed into every destination room).
@@ -73,6 +79,7 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 		// to keep suspect mail out of the inbox even if a rule would file it there.
 		if (!opts.folder_override.empty()) {
 			add_room(citadel::GetOrCreateUserRoom(con, user, opts.folder_override));
+			kept.push_back(user);
 			continue;
 		}
 
@@ -80,6 +87,7 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 		if (script.empty()) {
 			int64_t sub = detail_room();
 			add_room(sub >= 0 ? sub : citadel::GetOrCreateMailRoom(con, user));
+			kept.push_back(user);
 			continue;
 		}
 
@@ -96,6 +104,7 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 			out.discarded.push_back(rcpt);
 			continue;
 		}
+		kept.push_back(user);
 
 		for (const auto &action : result.actions) {
 			switch (action.type) {
@@ -155,6 +164,27 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 
 	out.msgnum = citadel::InsertMessage(con, msg, rooms, out.err);
 	out.ok = out.msgnum >= 0;
+
+	// The one place inbound mail is looked at by content type rather than by
+	// address. It sits here, *after* the filters have had their say, on purpose:
+	// a user who wrote `discard` for a sender meant it, and quietly acting on a
+	// scheduling message they told us to throw away would make the rule a lie.
+	// A message that was kept, though, has a calendar effect that should not
+	// depend on which folder a rule filed it in.
+	//
+	// The guard is the cheap substring check inside CalendarPart: almost no mail
+	// is a scheduling message, and building the MIME part tree for every inbound
+	// message to discover that would be a tax on the whole delivery path.
+	if (out.ok && !kept.empty()) {
+		std::string method;
+		std::string ics = itip::CalendarPart(body, method);
+		if (!ics.empty() && !method.empty()) {
+			for (const auto &user : kept) {
+				std::string sched_err;
+				itip::Receive(con, user, ics, method, sched_err);
+			}
+		}
+	}
 	return out.ok;
 }
 

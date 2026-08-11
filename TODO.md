@@ -10,6 +10,62 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **iTIP/iMIP** (RFC 5546 + 6047) — an invitation sent to an attendee now
+      arrives as mail, and their reply updates the event. Until this, an event
+      with `ATTENDEE` properties was stored and served faithfully and nothing
+      else happened.
+  - [x] `core/itip.{hpp,cpp}`. Everything except the two functions that need
+        site config is a **pure function of the calendar text**, so the rules
+        that fail *silently* against a real client are pinned in
+        `test/sql/itip.test` with no mail server: a `CANCEL` that does not bump
+        `SEQUENCE` is dropped as a stale duplicate and the meeting never leaves
+        the attendee's calendar; a `REPLY` must carry only the replying
+        attendee, because what the others said is not theirs to report; a
+        delayed `REPLY` to `SEQUENCE:1` must not overwrite an answer given to
+        `SEQUENCE:2`; and the organizer must not be mailed their own
+        invitation.
+  - [x] **Only the organizer sends.** `IsOrganizer` gates `Notify` before
+        anything is built, and requires the ORGANIZER's local part to *be* the
+        acting user on a domain this site hosts — checking only the domain
+        would let anyone with an account organize as anyone else. Without this,
+        an attendee saving their own copy of a shared event would mail
+        everybody, and every calendar would become a mailing list.
+  - [x] `Notify` charges `policy::CheckRate`/`RecordSend` itself.
+        `submission::Send` is quota-agnostic by contract, so a scheduling path
+        that skipped it would be a third door onto the mail path with the limit
+        switched off.
+  - [x] `DavPut` sends the REQUEST after the save, best effort — the object
+        *is* stored, and failing the PUT because a recipient's MX is down would
+        tell the client the event was never created. `DavDelete` sends the
+        CANCEL *before* the delete, because it is built from the stored bytes
+        and there are none afterwards.
+  - [x] **The first content-type hook on the delivery path.**
+        `deliver::LocalDeliver` parsed headers and never built the part tree;
+        it now looks for a `text/calendar` part carrying a `METHOD`. It sits
+        *after* Sieve has ruled, and only for recipients who actually kept the
+        message: a user who wrote `discard` for a sender meant it, and acting
+        on a scheduling message they told us to throw away would make the rule
+        a lie. A message that *was* kept gets the calendar effect whichever
+        folder it landed in. The guard is a substring check, because almost no
+        mail is a scheduling message and building the part tree for every
+        inbound message would be a tax on the whole path.
+  - [x] Inbound: REPLY folds the PARTSTAT into the organizer's stored copy,
+        REQUEST files the event onto the attendee's Calendar *in addition to*
+        delivering the mail, CANCEL marks the stored copy `STATUS:CANCELLED`
+        rather than deleting it — a meeting that vanishes without trace is
+        indistinguishable from one that was never there.
+  - [x] `citadel::WrapObject`/`ObjectBody` lifted out of `http/src/web_views.cpp`
+        into core, which now has one implementation. Inbound iTIP writes
+        calendar objects into the rooms CalDAV and the web UI read, and a
+        second spelling of that wrapper would leave one of them unable to read
+        what another wrote.
+  - [x] Still absent, deliberately: RFC 6638's scheduling collections
+        (`schedule-inbox-URL`, `schedule-outbox-URL`, `POST` to the outbox) and
+        with them the `calendar-auto-schedule` compliance token, which stays
+        off the `DAV:` header until they exist. iMIP is what makes this
+        interoperate with servers that are not this one; auto-schedule is a
+        convenience for clients that already speak to us.
+
 - [x] **CalDAV free/busy** (`CALDAV:free-busy-query`, RFC 4791 §7.10) — the
       first half of DAV scheduling, and the half that stands on its own: it
       needs no mail, no scheduling collections and no new compliance class.
@@ -616,24 +672,18 @@ listeners; the backlog below leads with what that work left open.
 
 The first came out of building 0.6.0 and is the one most likely to bite.
 
-- **DAV scheduling, the rest of it.** `free-busy-query` shipped (above); what
-  is left is iTIP/iMIP — an invitation sent to an attendee arriving as mail,
-  and their reply updating the event — plus RFC 6638's scheduling collections
-  (`schedule-inbox-URL`, `schedule-outbox-URL`, a `POST` to the outbox, and the
-  `calendar-auto-schedule` compliance token, which stays off the `DAV:` header
-  until they exist). Today an event with `ATTENDEE` properties is stored and
-  served faithfully and nothing else happens. What it will run into:
-  `ical::Item` keeps `ORGANIZER` as a flat string and `ATTENDEE` as bare
-  CAL-ADDRESS values with the parameters dropped, so a `PARTSTAT` round-trips
-  only through the `Component` tree and a REPLY handler must work on that
-  rather than on `Item`; `ParseDavPath` has no room for a schedule inbox or
-  outbox and `DavHandler` has no `POST` branch; and `LocalDeliver` has no
-  content-type dispatch at all — it parses headers and never builds the part
-  tree — so noticing an inbound `text/calendar; method=` part is a new hook
-  whose position relative to `sieve::Evaluate` is a real decision.
-  `submission::Send` is quota-agnostic by contract, so an iMIP sender must
-  charge `policy::CheckRate`/`RecordSend` itself the way `jmap_submission.cpp`
-  does. `EmitFreeBusy` already writes a `METHOD`, so that much of iTIP exists.
+- **RFC 6638 auto-scheduling**, the last of DAV scheduling: the
+  `schedule-inbox-URL` / `schedule-outbox-URL` collections, a `POST` to the
+  outbox (which is how a client asks for somebody else's free/busy over iTIP
+  rather than through the `free-busy-query` REPORT), `schedule-default-
+  calendar-URL`, the `CALDAV:schedule-send` / `schedule-deliver` privileges,
+  and the `calendar-auto-schedule` compliance token — which stays off the
+  `DAV:` header until all of that exists, because advertising it is a promise
+  clients act on. `ParseDavPath` has no room for the two new collections and
+  `DavHandler` has no `POST` branch, so both are the first work. iMIP already
+  ships (above), which is the half that interoperates with servers other than
+  this one; this is the half that is a convenience for clients already talking
+  to us.
 
 - DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
   `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the

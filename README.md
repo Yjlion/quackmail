@@ -872,6 +872,7 @@ python3 test/integration/test_smtp_in.py     # MX: recipient validation, domains
 python3 test/integration/test_smtp_policy.py # outbound DKIM signing + per-user rate limiting
 python3 test/integration/test_lmtp.py        # LMTP per-recipient replies, no spam checks
 python3 test/integration/test_managesieve.py # ManageSieve round trip, then the filter routes delivery
+python3 test/integration/test_itip.py        # scheduling: PUT mails an invitation, a reply updates the event
 
 pip install jmapc                            # optional; the test below skips itself without it
 python3 test/integration/test_jmap_client.py # JMAP driven by a third-party client library
