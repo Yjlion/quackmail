@@ -145,10 +145,7 @@ const RightDoc kRightDocs[] = {
     {'w', "set message flags"},
     {'i', "post a message"},
     {'p', "post by e-mail, without signing in"},
-    // `k` is stored and reported over IMAP, but nothing in this server acts on
-    // it yet. Listing it without saying so would be the page claiming a
-    // capability the grant does not actually confer.
-    {'k', "create rooms under this one — stored, but nothing acts on it yet"},
+    {'k', "create rooms on this room's floor, from /bbs/new"},
     {'x', "delete the room"},
     {'t', "delete a message"},
     {'e', "expunge deleted messages"},
@@ -688,15 +685,72 @@ void PostRoomFeedRun(Ctx &ctx) {
 
 // ---- self-serve room creation --------------------------------------------
 
+// Site-wide gate: does this user's access level alone clear the bar an operator
+// set? Independent of any particular room or floor.
+bool AxLevelMayCreateRooms(const Ctx &ctx) {
+	if (!ctx.Authed()) {
+		return false;
+	}
+	// Defaults to the aide level, so nothing changes on an existing server until
+	// an operator lowers it. A value that is not a number is treated as the
+	// default rather than as 0 — a typo must not open the door.
+	std::string want = ConfigStr(ctx.con, "qm_room_create_axlevel", "");
+	int64_t level = quackmail::citadel::kAideAxLevel;
+	if (!want.empty()) {
+		char *end = nullptr;
+		long parsed = std::strtol(want.c_str(), &end, 10);
+		if (end != want.c_str() && *end == '\0' && parsed >= 0 && parsed <= 6) {
+			level = (int64_t)parsed;
+		}
+	}
+	return ctx.axlevel >= level;
+}
+
+// May `username` create a room on `floor` specifically — the axlevel gate, or a
+// `k` grant on some room they can see on that floor.
+bool MayCreateRoomOnFloor(const Ctx &ctx, int64_t floor) {
+	if (!ctx.Authed()) {
+		return false;
+	}
+	return AxLevelMayCreateRooms(ctx) || quackmail::citadel::CanCreateRoomOnFloor(ctx.con, ctx.username, floor);
+}
+
+// Floors this caller may create a room on: every floor if the axlevel gate
+// clears, otherwise only the ones a `k` grant opens — which is also what keeps
+// the create-room floor picker from offering a floor POST would then refuse.
+// Empty means they may create nothing anywhere, so this doubles as the gate:
+// one answer, rather than a permission check that can drift from the picker.
+std::vector<std::pair<std::string, std::string>> CreatableFloorOptions(Ctx &ctx) {
+	if (!ctx.Authed()) {
+		return {};
+	}
+	if (AxLevelMayCreateRooms(ctx)) {
+		return FloorOptions(ctx);
+	}
+	std::vector<std::pair<std::string, std::string>> out;
+	auto creatable = quackmail::citadel::CreatableFloors(ctx.con, ctx.username);
+	if (creatable.empty()) {
+		return out;
+	}
+	for (auto &f : quackmail::citadel::ListFloors(ctx.con)) {
+		if (std::find(creatable.begin(), creatable.end(), f.floor_num) != creatable.end()) {
+			out.emplace_back(std::to_string(f.floor_num), f.name);
+		}
+	}
+	return out;
+}
+
 void GetNewRoom(Ctx &ctx) {
-	if (!MayCreateRooms(ctx)) {
+	auto floors = CreatableFloorOptions(ctx);
+	if (floors.empty()) {
 		Forbidden(ctx, "Creating rooms on this server is reserved. An operator sets the access level it "
-		               "needs with qm_room_create_axlevel.");
+		               "needs with qm_room_create_axlevel, or a room administrator can grant you the \"k\" "
+		               "right on a room whose floor you want to create alongside.");
 		return;
 	}
 	std::string body = FormStart(ctx, "/bbs/new");
 	body += "<label class=\"field\"><span>Name</span>" + TextInput("display_name", "") + "</label>";
-	body += "<label class=\"field\"><span>Floor</span>" + Select("floor", FloorOptions(ctx), "0") +
+	body += "<label class=\"field\"><span>Floor</span>" + Select("floor", floors, "0") +
 	        "</label>";
 	body += "<label class=\"field\"><span>What it holds</span>" + Select("view", ViewOptions(), "0") +
 	        "</label>";
@@ -719,8 +773,10 @@ void GetNewRoom(Ctx &ctx) {
 }
 
 void PostNewRoom(Ctx &ctx) {
-	if (!MayCreateRooms(ctx)) {
-		Forbidden(ctx, "Creating rooms on this server is reserved.");
+	int64_t floor = ctx.FormInt("floor", 0);
+	if (!MayCreateRoomOnFloor(ctx, floor)) {
+		Forbidden(ctx, "Creating rooms on this server is reserved, or you do not hold the \"k\" right on "
+		               "that floor.");
 		return;
 	}
 	std::string name = ctx.req.Form("display_name");
@@ -748,8 +804,7 @@ void PostNewRoom(Ctx &ctx) {
 	// CreateRoom refuses a name shaped like a personal room's internal key
 	// ("0000000002.Mail"), which is the one name that would collide with the
 	// mailbox keyspace rather than merely with another room.
-	int64_t room_num = quackmail::citadel::CreateRoom(ctx.con, name, ctx.FormInt("floor", 0), flags,
-	                                                  password, 0, err);
+	int64_t room_num = quackmail::citadel::CreateRoom(ctx.con, name, floor, flags, password, 0, err);
 	if (room_num < 0) {
 		BadRequest(ctx, err);
 		return;
@@ -784,19 +839,12 @@ bool MayCreateRooms(const Ctx &ctx) {
 	if (!ctx.Authed()) {
 		return false;
 	}
-	// Defaults to the aide level, so nothing changes on an existing server until
-	// an operator lowers it. A value that is not a number is treated as the
-	// default rather than as 0 — a typo must not open the door.
-	std::string want = ConfigStr(ctx.con, "qm_room_create_axlevel", "");
-	int64_t level = quackmail::citadel::kAideAxLevel;
-	if (!want.empty()) {
-		char *end = nullptr;
-		long parsed = std::strtol(want.c_str(), &end, 10);
-		if (end != want.c_str() && *end == '\0' && parsed >= 0 && parsed <= 6) {
-			level = (int64_t)parsed;
-		}
+	if (AxLevelMayCreateRooms(ctx)) {
+		return true;
 	}
-	return ctx.axlevel >= level;
+	// The sidebar asks this on every page render, which is why CreatableFloors
+	// answers "none" from one query rather than by walking the rooms.
+	return !quackmail::citadel::CreatableFloors(ctx.con, ctx.username).empty();
 }
 
 void RegisterRoomAdminRoutes(std::vector<Route> &out) {

@@ -240,6 +240,55 @@ def main():
         assert status == 303
         assert rights(con, "Project X", "member") == ("", False, False)
 
+        # ---- delegating room *creation* -----------------------------------
+        #
+        # `k` lets a room administrator hand a member the ability to create
+        # rooms on that room's floor, without touching the site-wide
+        # qm_room_create_axlevel gate or the delegate's own access level.
+        # Raise the gate to aide-only first so the axlevel path cannot be what
+        # is actually passing this.
+        con.execute("CALL qm_config_set('qm_room_create_axlevel', '6')")
+        con.execute("CALL cit_floor_add('Annex')")
+        annex = con.execute(
+            "SELECT floor_num FROM citadel_floors WHERE name = 'Annex'"
+        ).fetchone()[0]
+
+        status, _, _ = request(stranger, BASE + "/bbs/new")
+        assert status == 403, f"a plain user reached /bbs/new with the gate raised: {status}"
+
+        status, _, _ = post(owner, settings + "/acl", {"identifier": "stranger", "rights": "lk"},
+                            csrf_from=settings)
+        assert status == 303, f"granting k returned {status}"
+
+        status, _, page = request(stranger, BASE + "/bbs/new")
+        assert status == 200, f"a `k` grant on a room's floor did not open /bbs/new: {status}"
+        assert "Annex" not in page, "the floor picker offered a floor `k` was never granted on"
+
+        status, _, _ = post(
+            stranger, "/bbs/new", {"display_name": "Annex Room", "floor": str(annex), "view": "0"}
+        )
+        assert status == 403, f"`k` on floor 0 created a room on a different floor: {status}"
+
+        status, headers, _ = post(
+            stranger, "/bbs/new", {"display_name": "Delegated Room", "floor": "0", "view": "0"}
+        )
+        assert status == 303, f"a `k` grant did not allow creating on that room's floor: {status}"
+        # The creator still becomes the new room's own administrator, same as
+        # any other creation path.
+        r = rights(con, "Delegated Room", "stranger")
+        assert r[2] is True, f"k-delegated creator did not become the room's administrator: {r}"
+        con.execute("CALL cit_room_kill('Delegated Room')")
+
+        # Taking `k` away closes the door again.
+        status, _, _ = post(owner, settings + "/acl", {"identifier": "stranger", "rights": "l"},
+                            csrf_from=settings)
+        assert status == 303
+        status, _, _ = request(stranger, BASE + "/bbs/new")
+        assert status == 403, "revoking k left /bbs/new open"
+        assert rights(con, "Project X", "stranger") == ("l", False, False)
+
+        con.execute("CALL qm_config_set('qm_room_create_axlevel', '4')")
+
         # ---- saving preferences ------------------------------------------
         #
         # QR_UPLOAD is not one of this form's checkboxes. A checkbox set that is

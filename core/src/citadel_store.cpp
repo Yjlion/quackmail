@@ -1423,6 +1423,63 @@ bool CanAdminister(Connection &con, const std::string &username, const Room &roo
 	return EffectiveRights(con, username, room).find('a') != std::string::npos;
 }
 
+std::vector<int64_t> CreatableFloors(Connection &con, const std::string &username) {
+	std::vector<int64_t> out;
+	if (username.empty() || IsAnyone(username)) {
+		return out;
+	}
+	// The cheap question first, because the answer is almost always "none" and
+	// this runs on every page render (the sidebar decides whether to offer
+	// "Create a room"). For anyone who is neither an aide nor a mailbox owner,
+	// EffectiveRights only ever produces `k` from a *stored* row — the derived
+	// set is "lrs"/"lrswi" — so a caller with no such row cannot hold it
+	// anywhere, and one query settles it without touching a single room.
+	bool aide = GetAxLevel(con, username) >= kAideAxLevel;
+	std::vector<int64_t> granted;
+	if (!aide) {
+		auto r = ExecP(con,
+		               "SELECT DISTINCT room_num FROM citadel_room_acl "
+		               "WHERE rights LIKE '%k%' "
+		               "AND (lower(identifier) = lower($1) OR lower(identifier) = 'anyone')",
+		               {Value(username)});
+		if (!r) {
+			return out;
+		}
+		auto &mat = r->Cast<MaterializedQueryResult>();
+		if (mat.RowCount() == 0) {
+			return out;
+		}
+		for (idx_t i = 0; i < mat.RowCount(); i++) {
+			granted.push_back(mat.GetValue(0, i).GetValue<int64_t>());
+		}
+	}
+	// ListRooms already carries the visibility rules (an invitation-only room
+	// found through this username's own `l` grant, never someone else's), so
+	// reusing it here is what keeps a `k` grant on a room the caller cannot even
+	// see from being usable. Personal rooms are skipped deliberately: their
+	// owner always holds every right, including `k`, and every user has one on
+	// floor 0 — counting those would hand every logged-in user the run of the
+	// Main Floor regardless of qm_room_create_axlevel.
+	for (auto &room : ListRooms(con, username, -1, "all")) {
+		if (room.mailbox_owner != 0) {
+			continue;
+		}
+		if (!aide && std::find(granted.begin(), granted.end(), room.room_num) == granted.end()) {
+			continue;
+		}
+		if (std::find(out.begin(), out.end(), room.floor_num) == out.end()) {
+			out.push_back(room.floor_num);
+		}
+	}
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
+bool CanCreateRoomOnFloor(Connection &con, const std::string &username, int64_t floor) {
+	auto floors = CreatableFloors(con, username);
+	return std::find(floors.begin(), floors.end(), floor) != floors.end();
+}
+
 int64_t ResolveMailRoom(Connection &con, const std::string &local_part) {
 	static const char kPrefix[] = "room_";
 	const size_t kPrefixLen = sizeof(kPrefix) - 1;

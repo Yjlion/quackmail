@@ -10,6 +10,32 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **The `k` right delegates room creation.** Left out of phase 4
+      deliberately: `k` ("create rooms under this one") was in the rights
+      legend but nothing read it, so a room administrator could delegate
+      *access* but not *creation*.
+  - [x] `citadel::CreatableFloors` / `CanCreateRoomOnFloor` — a caller may
+        create when their access level clears `qm_room_create_axlevel` (the
+        existing site-wide gate, unchanged), or they hold `k` on some room they
+        can see on that floor. A stored ACL row and an aide's blanket grant
+        both count. Personal rooms are skipped on purpose: their owner always
+        holds every right including `k`, and every user has one on floor 0, so
+        counting those would hand every logged-in user the run of the Main
+        Floor.
+  - [x] the answer is cheap when it is "no", because the sidebar asks it on
+        every page render. `EffectiveRights` only ever produces `k` for a
+        non-aide from a *stored* row — the derived set is `lrs`/`lrswi` — so
+        one query over `citadel_room_acl` settles the common case without
+        touching a room. `ListRooms` still decides visibility, so a `k` grant
+        on a room the caller cannot see stays unusable.
+  - [x] `/bbs/new`'s floor picker offers every floor to someone who clears the
+        axlevel gate, and only the floors a `k` grant opens to everyone else;
+        `POST` re-checks the specific floor submitted, so the picker being
+        right is a courtesy and not the enforcement.
+  - [x] `test_roomadmin.py`: the axlevel gate raised to aide-only so the
+        axlevel path cannot be what is actually passing, a second floor a `k`
+        grant does not reach, and revocation closing the door again.
+
 - [x] **Three bugs squashed from the 0.6.0 backlog.**
   - [x] `c_version` no longer sticks at whatever an install was created with.
         `deploy/quackcit.sh`'s `seed_site()` gained a `seed_version()` sibling
@@ -541,9 +567,6 @@ The first two came out of building 0.6.0 and are the ones most likely to bite.
 - Web: the wiki view (`VIEW_WIKI`/`WIKIMD`), which needs versioning, a
   name→euid resolver and a markdown renderer — deferred out of phase 2b and
   still the largest single gap against WebCit.
-- Room administration, left out of phase 4 deliberately: `k` ("create rooms
-  under this one") is in the rights legend but nothing reads it, so a room
-  administrator cannot yet delegate *creation* the way they delegate access.
 - Telnet BBS, still to fill in from `citadel.rc`: file transfer (the
   `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR` room flags and the `.Read file` /
   `.Admin File` family), `C`hat, and help files.

@@ -372,6 +372,20 @@ bool CanPost(duckdb::Connection &con, const std::string &username, const Room &r
 // nothing new to store and nothing that only one protocol can see.
 bool CanAdminister(duckdb::Connection &con, const std::string &username, const Room &room);
 
+// The floors `username` may create a room on, on the strength of the RFC 4314
+// `k` right alone (i.e. without the site-wide qm_room_create_axlevel gate):
+// every floor carrying a room they can see and hold `k` on. An aide's blanket
+// grant and a stored ACL row both count. `k` is never derived for an ordinary
+// member, so in practice this means a room administrator granted it explicitly,
+// the same way they would grant `a` to delegate administration: delegating
+// *creation* under a room they run, without raising the delegate's site-wide
+// access level.
+//
+// Sorted and deduplicated. Cheap when the answer is "none" — which is the
+// common case, and the one the web sidebar asks on every page render.
+std::vector<int64_t> CreatableFloors(duckdb::Connection &con, const std::string &username);
+bool CanCreateRoomOnFloor(duckdb::Connection &con, const std::string &username, int64_t floor);
+
 // True when `display_name` would collide with the personal-room keyspace.
 //
 // A public room's internal key *is* its display name, while a personal room's is
