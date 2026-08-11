@@ -85,6 +85,12 @@ struct Item {
 	Kind kind = Event;
 	std::string uid;
 	std::string summary, description, location, organizer, status;
+	// TRANSP, **read only**. Not something a form edits, but free/busy has to
+	// know: an event marked TRANSPARENT occupies the calendar without occupying
+	// the person. ParseItems fills it and FoldItemInto deliberately does not
+	// write it back, so it stays where it already lives — in the Component tree,
+	// which is what keeps an edit from dropping it.
+	std::string transp;
 	std::string rrule;                  // verbatim, for Expand and for emitting
 	std::vector<std::string> attendees; // the CAL-ADDRESS values
 	std::vector<int64_t> exdates;       // EXDATE instants, for Expand
@@ -155,6 +161,62 @@ struct Occurrence {
 // request thread.
 extern const size_t kMaxOccurrences;
 std::vector<Occurrence> Expand(const Item &item, int64_t from, int64_t to);
+
+// ---- free/busy -----------------------------------------------------------
+//
+// The question a scheduling client asks before proposing a time: when is this
+// person unavailable? It is deliberately *not* "what is on their calendar" —
+// a free/busy reply carries intervals and nothing else, no summary, no
+// location, no attendees. That is what makes it safe to answer for a calendar
+// the asker cannot read.
+
+// A half-open interval of UTC seconds, [start, end).
+struct Period {
+	int64_t start = 0;
+	int64_t end = 0;
+
+	Period();
+};
+
+// Sort, then merge everything that overlaps or merely touches. The result is
+// the minimal set covering the same time — which is the whole point: a busy
+// reply describes availability, and two adjacent meetings are one unavailable
+// stretch, not two.
+std::vector<Period> MergePeriods(std::vector<Period> in);
+
+// What one calendar object contributes to a free/busy answer, split because
+// RFC 5545 reports the two under different FBTYPEs and a client draws them
+// differently.
+struct Busy {
+	std::vector<Period> busy;
+	std::vector<Period> tentative;
+
+	Busy();
+};
+
+// Accumulate the busy time in `text` that falls within [from, to).
+//
+// The rules are RFC 4791 §7.10's: only VEVENTs count; `TRANSP:TRANSPARENT`
+// contributes nothing, which is how an all-day "on holiday" marker avoids
+// blocking the whole day; `STATUS:CANCELLED` contributes nothing;
+// `STATUS:TENTATIVE` lands in `tentative`. Recurrences are expanded, so a
+// weekly meeting is busy every week rather than once.
+//
+// Zero-length events are skipped: an instant is not an interval, and emitting
+// one would claim a period no client can render.
+//
+// Appends, so a caller can sweep a whole collection into one Busy and merge at
+// the end.
+void CollectBusy(const std::string &text, int64_t from, int64_t to, Busy &out);
+
+// A complete VCALENDAR holding one VFREEBUSY over [from, to).
+//
+// `organizer` and `attendee` are CAL-ADDRESS values ("mailto:ada@example.com")
+// and may be empty, which is the plain CalDAV free-busy-query case — those
+// properties belong to an iTIP reply, not to a REPORT.
+std::string EmitFreeBusy(int64_t from, int64_t to, const Busy &busy,
+                         const std::string &organizer, const std::string &attendee,
+                         const std::string &prodid);
 
 // The euid an item is stored under: its UID, or a stable derived one.
 std::string EuidFor(const Item &item);

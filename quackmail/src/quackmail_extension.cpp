@@ -1808,6 +1808,24 @@ void IcalExpandStartsScalar(DataChunk &args, ExpressionState &, Vector &result) 
 	    });
 }
 
+// qm_ical_freebusy(text, from, to) -> a VFREEBUSY over the window.
+//
+// Free/busy is where the *absences* are the contract — TRANSP:TRANSPARENT and
+// STATUS:CANCELLED must contribute nothing, adjacent meetings must merge into
+// one interval, and a recurring meeting must be busy every week. All of that is
+// a pure function of the text, so it is assertable from SQL with no socket,
+// which is the only way to pin it down cheaply enough to keep pinning it.
+void IcalFreebusyScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	TernaryExecutor::ExecuteWithNulls<string_t, int64_t, int64_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, args.size(),
+	    [&](string_t text, int64_t from, int64_t to, ValidityMask &mask, idx_t idx) {
+		    quackmail::ical::Busy busy;
+		    quackmail::ical::CollectBusy(text.GetString(), from, to, busy);
+		    return StringVector::AddString(
+		        result, quackmail::ical::EmitFreeBusy(from, to, busy, "", "", ""));
+	    });
+}
+
 // qm_ical_set_summary(text, summary) -> the calendar with the first item's
 // SUMMARY changed, everything else untouched.
 //
@@ -2089,6 +2107,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_ical_euid", {V}, V, IcalEuidScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_expand_count", {V, I, I}, I, IcalExpandCountScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_expand_starts", {V, I, I}, V, IcalExpandStartsScalar));
+	loader.RegisterFunction(ScalarFunction("qm_ical_freebusy", {V, I, I}, V, IcalFreebusyScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_set_summary", {V, V}, V, IcalSetSummaryScalar));
 	loader.RegisterFunction(ScalarFunction("qm_ical_vtimezone", {V, I, I}, V, IcalVtimezoneScalar));
 

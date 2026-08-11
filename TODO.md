@@ -10,6 +10,41 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **CalDAV free/busy** (`CALDAV:free-busy-query`, RFC 4791 §7.10) — the
+      first half of DAV scheduling, and the half that stands on its own: it
+      needs no mail, no scheduling collections and no new compliance class.
+  - [x] `ical::Period`, `Busy`, `MergePeriods`, `CollectBusy`, `EmitFreeBusy`
+        in core. The rules are the spec's and every one of them is about what
+        *does not* count: `TRANSP:TRANSPARENT` contributes nothing (that is how
+        an all-day "on holiday" marker avoids blocking the week),
+        `STATUS:CANCELLED` contributes nothing, `STATUS:TENTATIVE` reports
+        under `FBTYPE=BUSY-TENTATIVE`, and only VEVENTs count at all.
+        Recurrences expand through `ical::Expand`, so the rule that draws the
+        calendar is the rule that decides availability.
+  - [x] Periods that merely *touch* merge into one. Two back-to-back meetings
+        are one unavailable stretch; reporting them separately invites a client
+        to offer the zero-length gap between them.
+  - [x] `ical::Item` gained `transp`, read-only: `FoldItemInto` deliberately
+        does not write it back, so TRANSP keeps living in the `Component` tree
+        and an edit cannot drop it.
+  - [x] The report answers with one `text/calendar` body rather than a
+        multistatus, which is the whole point — it carries intervals and
+        nothing else, so it is answerable for a calendar the asker cannot read.
+        `test_caldav.py` asserts the reply leaks no `SUMMARY`, `VALARM` or `X-`
+        property, which is the assertion that matters.
+  - [x] An unbounded request is refused with `CALDAV:valid-filter` rather than
+        served: "expand every recurrence you have" is a way to hang a thread,
+        not a question.
+  - [x] Added to `supported-report-set`, or no client would attempt it.
+  - [x] `qm_ical_freebusy(text, from, to)` puts the merging, the exclusions and
+        the recurrence expansion in `test/sql/ical.test`, where they are pinned
+        without a socket.
+  - [x] **The oracle is not an oracle here.** `citadeldotorg/citadel` ships
+        classic WebCit, which serves *GroupDAV* at `/groupdav/` — `DAV: 1`,
+        `Allow: OPTIONS, PROPFIND`, nothing else — and no CalDAV at all. There
+        is nothing to diff against; the RFCs and real clients are the authority
+        for everything under `/dav/`.
+
 - [x] **A real JMAP client was pointed at `/jmap/`, and it could not use it.**
       The client is [`jmapc`](https://github.com/smkent/jmapc) 0.3.0 — chosen
       because nobody here wrote it, which was the whole point of the backlog
@@ -581,25 +616,24 @@ listeners; the backlog below leads with what that work left open.
 
 The first came out of building 0.6.0 and is the one most likely to bite.
 
-- **DAV scheduling**, which a groupware server is expected to have and this one
-  does not: free-busy (`CALDAV:free-busy-query`, `schedule-outbox`), and iTIP/
-  iMIP so an invitation sent to an attendee arrives as mail and their reply
-  updates the event. Today an event with `ATTENDEE` properties is stored and
+- **DAV scheduling, the rest of it.** `free-busy-query` shipped (above); what
+  is left is iTIP/iMIP — an invitation sent to an attendee arriving as mail,
+  and their reply updating the event — plus RFC 6638's scheduling collections
+  (`schedule-inbox-URL`, `schedule-outbox-URL`, a `POST` to the outbox, and the
+  `calendar-auto-schedule` compliance token, which stays off the `DAV:` header
+  until they exist). Today an event with `ATTENDEE` properties is stored and
   served faithfully and nothing else happens. What it will run into:
   `ical::Item` keeps `ORGANIZER` as a flat string and `ATTENDEE` as bare
   CAL-ADDRESS values with the parameters dropped, so a `PARTSTAT` round-trips
-  only through the `Component` tree and a REPLY handler must work on that;
-  nothing models `VFREEBUSY` or writes `METHOD`, though `ical::Parse`/`Emit`
-  are generic over component names so both are additions rather than parser
-  changes; `ParseDavPath` has no room for a schedule inbox/outbox and
-  `DavHandler` has no `POST` branch; `free-busy-query` has to be added to
-  `supported-report-set` or clients never attempt it; and `LocalDeliver` has
-  no content-type dispatch at all — it parses headers and never builds the
-  part tree — so noticing an inbound `text/calendar; method=` part is a new
-  hook whose position relative to `sieve::Evaluate` is a real decision.
+  only through the `Component` tree and a REPLY handler must work on that
+  rather than on `Item`; `ParseDavPath` has no room for a schedule inbox or
+  outbox and `DavHandler` has no `POST` branch; and `LocalDeliver` has no
+  content-type dispatch at all — it parses headers and never builds the part
+  tree — so noticing an inbound `text/calendar; method=` part is a new hook
+  whose position relative to `sieve::Evaluate` is a real decision.
   `submission::Send` is quota-agnostic by contract, so an iMIP sender must
   charge `policy::CheckRate`/`RecordSend` itself the way `jmap_submission.cpp`
-  does.
+  does. `EmitFreeBusy` already writes a `METHOD`, so that much of iTIP exists.
 
 - DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
   `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the

@@ -25,6 +25,10 @@ Item::Item() {
 }
 Occurrence::Occurrence() {
 }
+Period::Period() {
+}
+Busy::Busy() {
+}
 
 namespace {
 
@@ -452,6 +456,7 @@ bool ParseItems(const std::string &text, std::vector<Item> &out) {
 		it.location = c.Get("LOCATION");
 		it.organizer = c.Get("ORGANIZER");
 		it.status = c.Get("STATUS");
+		it.transp = c.Get("TRANSP");
 		it.rrule = c.Get("RRULE");
 		it.sequence = std::atoll(c.Get("SEQUENCE").c_str());
 		it.priority = std::atoi(c.Get("PRIORITY").c_str());
@@ -1098,6 +1103,126 @@ std::vector<Occurrence> Expand(const Item &item, int64_t from, int64_t to) {
 	}
 
 	emit(item.start.epoch);
+	return out;
+}
+
+// ---- free/busy -----------------------------------------------------------
+
+std::vector<Period> MergePeriods(std::vector<Period> in) {
+	std::vector<Period> out;
+	if (in.empty()) {
+		return out;
+	}
+	std::sort(in.begin(), in.end(), [](const Period &a, const Period &b) {
+		return a.start != b.start ? a.start < b.start : a.end < b.end;
+	});
+	for (const Period &p : in) {
+		if (p.end <= p.start) {
+			continue; // an instant is not an interval
+		}
+		// `<=` rather than `<`: two meetings that merely touch are one
+		// unavailable stretch, and reporting them separately invites a client to
+		// offer the zero-length gap between them.
+		if (!out.empty() && p.start <= out.back().end) {
+			if (p.end > out.back().end) {
+				out.back().end = p.end;
+			}
+			continue;
+		}
+		out.push_back(p);
+	}
+	return out;
+}
+
+void CollectBusy(const std::string &text, int64_t from, int64_t to, Busy &out) {
+	std::vector<Item> items;
+	if (!ParseItems(text, items)) {
+		return;
+	}
+	for (const Item &it : items) {
+		if (it.kind != Item::Event) {
+			continue; // RFC 4791 §7.10: only VEVENTs contribute
+		}
+		std::string status = Upper(it.status);
+		if (status == "CANCELLED") {
+			continue;
+		}
+		if (Upper(it.transp) == "TRANSPARENT") {
+			// The property exists precisely so an entry can sit on a calendar
+			// without claiming the person — an all-day "on holiday" marker is
+			// the usual one, and honouring it is what stops it blocking a week.
+			continue;
+		}
+		std::vector<Period> &into = status == "TENTATIVE" ? out.tentative : out.busy;
+		for (const Occurrence &occ : Expand(it, from, to)) {
+			if (occ.end <= occ.start) {
+				continue;
+			}
+			Period p;
+			// Clipped to the window: a client asked about a range and a period
+			// running past it is an answer to a question it did not ask.
+			p.start = occ.start < from ? from : occ.start;
+			p.end = occ.end > to ? to : occ.end;
+			if (p.end > p.start) {
+				into.push_back(p);
+			}
+		}
+	}
+}
+
+std::string EmitFreeBusy(int64_t from, int64_t to, const Busy &busy,
+                         const std::string &organizer, const std::string &attendee,
+                         const std::string &prodid) {
+	auto utc = [](int64_t t) {
+		DateTime dt;
+		dt.epoch = t;
+		dt.utc = true;
+		dt.valid = true;
+		return FormatDateTime(dt);
+	};
+	auto periods = [&](const char *fbtype, const std::vector<Period> &in) {
+		std::string line;
+		for (const Period &p : MergePeriods(in)) {
+			line += line.empty() ? "" : ",";
+			line += utc(p.start) + "/" + utc(p.end);
+		}
+		if (line.empty()) {
+			return std::string();
+		}
+		return std::string("FREEBUSY;FBTYPE=") + fbtype + ":" + line;
+	};
+
+	std::string out;
+	cl::AppendFolded(out, "BEGIN:VCALENDAR");
+	cl::AppendFolded(out, "VERSION:2.0");
+	cl::AppendFolded(out, "PRODID:" + (prodid.empty() ? std::string("-//QuackCit//EN") : prodid));
+	// METHOD belongs to an iTIP reply. A CalDAV free-busy-query REPORT is not
+	// one, so it is only written when there is a scheduling identity to write.
+	if (!organizer.empty()) {
+		cl::AppendFolded(out, "METHOD:REPLY");
+	}
+	cl::AppendFolded(out, "BEGIN:VFREEBUSY");
+	cl::AppendFolded(out, "DTSTAMP:" + utc((int64_t)std::time(nullptr)));
+	cl::AppendFolded(out, "DTSTART:" + utc(from));
+	cl::AppendFolded(out, "DTEND:" + utc(to));
+	if (!organizer.empty()) {
+		cl::AppendFolded(out, "ORGANIZER:" + cl::Escape(organizer));
+	}
+	if (!attendee.empty()) {
+		cl::AppendFolded(out, "ATTENDEE:" + cl::Escape(attendee));
+	}
+	// Absent FREEBUSY lines mean "free for the whole window", which is a real
+	// answer and not an empty one — RFC 5545 §3.6.4 says so explicitly.
+	std::string line = periods("BUSY", busy.busy);
+	if (!line.empty()) {
+		cl::AppendFolded(out, line);
+	}
+	line = periods("BUSY-TENTATIVE", busy.tentative);
+	if (!line.empty()) {
+		cl::AppendFolded(out, line);
+	}
+	cl::AppendFolded(out, "END:VFREEBUSY");
+	cl::AppendFolded(out, "END:VCALENDAR");
 	return out;
 }
 
