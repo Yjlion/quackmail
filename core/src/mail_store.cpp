@@ -68,6 +68,20 @@ void EnsureSchema(Connection &con) {
 		)
 	)");
 
+	// Who a Sieve `vacation` has already answered, and when. RFC 5230 §4.1's
+	// whole point is that an auto-reply goes out once per correspondent per
+	// window rather than once per message, so the window needs somewhere to
+	// live between two deliveries — which is to say a table, since two SMTP
+	// sessions share no other state.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS quackmail_vacation_sent (
+			username VARCHAR,
+			handle   VARCHAR,
+			sender   VARCHAR,
+			sent_at  TIMESTAMP DEFAULT now()
+		)
+	)");
+
 	// Local user credentials (verified by SASL AUTH and the Citadel USER/PASS).
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS quackmail_users (
