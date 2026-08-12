@@ -10,6 +10,75 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **The sidebar counts what is unread, and a message page moves.** The last
+      two gaps from the web review.
+  - [x] `SidebarFor` emits the `.count` span `qc.css` had described since the
+        sidebar was written and nothing ever produced, for every mail folder and
+        for the rooms with something new in them. It costs *fewer* queries than
+        before: one `ListRooms` plus one or two `RoomStatsBulk` calls, replacing
+        the four `FindUserRoom` lookups the groupware links used to make, since
+        those rooms are in the same listing.
+  - [x] `qm_web_sidebar_rooms` (default 10) caps the room half, most unread
+        first, and 0 drops it and its query. The sidebar renders on every page,
+        so the ceiling is the point. Folder counts are a handful of personal
+        rooms and are not gated.
+  - [x] `PageOpts::active` gained a `room:<num>` form, so the folder or room
+        being read is what gets `aria-current`, with "All rooms" as the fallback
+        for one the sidebar does not list — no room page is ever unmarked.
+  - [x] Newer / Older / Next unread above every message (`NavHtml`), each a
+        bounded min/max over the `(room_num, msgnum)` primary key rather than
+        `RoomMessages`: reading one message should not cost a listing of ten
+        thousand. "Next unread" means what the room's own listing means —
+        `\Seen` in a mail folder, the last-read pointer on a board — and is
+        suppressed when it would point where "Newer" already does.
+
+- [x] **The mail folder view**, and with it the two endpoints that had no way in.
+  - [x] `http/src/web_mailbox.cpp` renders `VIEW_MAILBOX`/`VIEW_DRAFTS`, which
+        every folder `EnsureUserRooms` provisions is. Until now they fell
+        through to the message-board renderer, so *the* webmail listing was
+        Subject / From / Date with no action anywhere on the page.
+  - [x] `/mail/move` and `/mail/flag` are reachable at last. Both handlers were
+        written, registered and correct, and nothing rendered a form that
+        posted to either — a message could not be filed or flagged from a
+        browser at all. They now take a selection (`FormAll("msgnum")`) rather
+        than one number, and `SelectedIn` runs every element through
+        `LoadMessageIn`, so a bulk action cannot become an IDOR by smuggling
+        somebody else's message number into the list.
+  - [x] One `<form>` with a `formaction` per button, so the bulk actions are
+        HTML rather than script. The select-all is the only scripted part and
+        is hidden by CSS until `qc.js` sets `data-js` — a control that did
+        nothing without script would be a lie rather than an enhancement.
+  - [x] Read state is `\Seen`, not the Citadel last-read pointer: a high-water
+        mark cannot express "this one, not that one". Opening a message in a
+        folder sets it, and it is the row IMAP already shares.
+  - [x] `flag` + `on` became one `set` field (`seen`/`unseen`/`flagged`/
+        `unflagged`) because an HTML button contributes exactly one name and
+        value, and the buttons share a form. Free to change: nothing could
+        reach the old contract.
+
+- [x] **Message search in the web front-end** (`/search`, plus a box in the page
+      header and "Search this room" on a room's toolbar).
+  - [x] `http/src/web_search.cpp`. The room set **is** the access control: it
+        enumerates rooms through `citadel::ListRooms` and `RoomUnlocked` — the
+        same helpers the pages use — and searches inside that set, so a `room=`
+        parameter naming anything outside it is ignored rather than turned into
+        a query. Private rooms stay invisible, zapped rooms stay forgotten,
+        another user's mailbox is unreachable, and a passworded room is not
+        searched until that session has unlocked it.
+  - [x] Two match paths, because `subject` and `author` are columns and a body
+        is not. Headers are one prepared statement over the whole store, using
+        `contains(lower(...), $1)` rather than `LIKE` so a term holding `%` or
+        `_` needs no escaping. Message text decodes each candidate through
+        `citadel::BodyText` — a `contains()` over `raw` would match transfer
+        encoding and header noise while missing every base64 body — and is
+        bounded by `qm_web_search_scan` (default 2000), with the page saying so
+        when it hits the bound.
+  - [x] `test/integration/test_http.py`: a subject-only term, a term that
+        exists only inside a base64 part (which is what proves `BodyText` is
+        being used), another user's mailbox holding the same term and never
+        appearing, a locked room before and after `/unlock`, room scoping,
+        date bounds, paging, and a term full of LIKE and HTML metacharacters.
+
 - [x] **Three bugs squashed from the 0.6.0 backlog.**
   - [x] `c_version` no longer sticks at whatever an install was created with.
         `deploy/quackcit.sh`'s `seed_site()` gained a `seed_version()` sibling

@@ -25,6 +25,19 @@
     if (!window.confirm(ask)) ev.preventDefault();
   });
 
+  // Select-all for the mail folder listing. Every row's checkbox is a real
+  // control that works on its own, so this only spares thirty clicks — which
+  // is why the header checkbox is hidden by CSS until the attribute above
+  // says script is running. Without it there is nothing that looks clickable
+  // and does nothing.
+  var pickall = document.querySelector(".pickall");
+  if (pickall) {
+    pickall.addEventListener("change", function () {
+      var boxes = document.querySelectorAll('input[type="checkbox"][name="msgnum"]');
+      for (var i = 0; i < boxes.length; i++) boxes[i].checked = pickall.checked;
+    });
+  }
+
   // Close the mobile sidebar after following a link in it. The checkbox is the
   // real state; this just spares a second tap.
   var toggle = document.getElementById("navtoggle");

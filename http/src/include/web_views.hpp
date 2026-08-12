@@ -47,6 +47,10 @@ const RoomViewHandler &ViewFor(int default_view);
 bool HasCustomView(int default_view);
 
 // Each view file contributes its handler.
+// Mail folders. Registered for VIEW_DRAFTS as well as VIEW_MAILBOX: a draft is
+// a stored message in a personal room like any other, and the same listing and
+// the same bulk actions apply to it.
+const RoomViewHandler &MailboxView();
 const RoomViewHandler &ContactsView();
 const RoomViewHandler &CalendarView();
 const RoomViewHandler &CalBriefView();

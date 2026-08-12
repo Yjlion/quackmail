@@ -371,7 +371,8 @@ usage: quackcitadm.sh <object> <action> [arguments]
               qm_quarantine_room, c_fqdn, ...
               web: qm_web_force_https, qm_web_trusted_proxies, qm_web_hsts,
                    qm_web_origins, qm_web_admin_enabled (off by default),
-                   qm_web_admin_require_tls
+                   qm_web_admin_require_tls, qm_web_search_scan,
+                   qm_web_sidebar_rooms
   room      add <name> | kill <name> | list | acl <room> [<identifier> <rights>]
             rights <room> <user>
               "kill" takes everything keyed by the room with it: message
