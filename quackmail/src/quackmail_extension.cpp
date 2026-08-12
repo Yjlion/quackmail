@@ -1575,6 +1575,54 @@ std::string BuildShapeOrBytes(const std::string &plain, const std::string &html,
 
 } // namespace
 
+// ---- password storage ----------------------------------------------------
+//
+// A password KDF is the one piece of this server whose failure is silent and
+// permanent: nothing misbehaves, nobody notices, and the damage only shows up
+// after a database leak. So the two things that matter are asserted in SQL —
+// that the legacy scheme still verifies (an upgrade that locked every existing
+// user out would be worse than the weakness it fixed), and that a row hashed
+// the old way is reported as needing a rewrite.
+
+// qm_password_check(password, algo, salt, hash) -> does it match?
+void PasswordCheckScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnifiedVectorFormat pf, af, sf, hf;
+	args.data[0].ToUnifiedFormat(args.size(), pf);
+	args.data[1].ToUnifiedFormat(args.size(), af);
+	args.data[2].ToUnifiedFormat(args.size(), sf);
+	args.data[3].ToUnifiedFormat(args.size(), hf);
+	auto pd = UnifiedVectorFormat::GetData<string_t>(pf);
+	auto ad = UnifiedVectorFormat::GetData<string_t>(af);
+	auto sd = UnifiedVectorFormat::GetData<string_t>(sf);
+	auto hd = UnifiedVectorFormat::GetData<string_t>(hf);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto out = FlatVector::GetData<bool>(result);
+	for (idx_t i = 0; i < args.size(); i++) {
+		quackmail::auth::Stored stored;
+		stored.algo = ad[af.sel->get_index(i)].GetString();
+		stored.salt = sd[sf.sel->get_index(i)].GetString();
+		stored.hash = hd[hf.sel->get_index(i)].GetString();
+		out[i] = quackmail::auth::CheckPassword(pd[pf.sel->get_index(i)].GetString(), stored);
+	}
+}
+
+// qm_password_needs_rehash(algo) -> is this row stored below the current bar?
+void PasswordNeedsRehashScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, bool>(args.data[0], result, args.size(), [&](string_t algo) {
+		return quackmail::auth::NeedsRehash(algo.GetString());
+	});
+}
+
+// qm_password_hash(password) -> "<algo>:<salt>:<hash>", a freshly salted hash at
+// the current work factor. Non-deterministic by construction, so a test asserts
+// that it round-trips rather than that it equals anything.
+void PasswordHashScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t pw) {
+		auto s = quackmail::auth::HashPassword(pw.GetString());
+		return StringVector::AddString(result, s.algo + ":" + s.salt + ":" + s.hash);
+	});
+}
+
 // qm_mime_shape(plain, html, inline_count, attachment_count) -> "mixed(...)"
 void MimeShapeScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	auto &plain = args.data[0];
@@ -2186,6 +2234,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_html_display", {V}, V, HtmlSanitizeDisplayScalar));
 	loader.RegisterFunction(ScalarFunction("qm_html_to_text", {V}, V, HtmlToTextScalar));
 	loader.RegisterFunction(ScalarFunction("qm_html_rewrite_cid", {V, V}, V, HtmlRewriteCidScalar));
+
+	loader.RegisterFunction(
+	    ScalarFunction("qm_password_check", {V, V, V, V}, B, PasswordCheckScalar));
+	loader.RegisterFunction(
+	    ScalarFunction("qm_password_needs_rehash", {V}, B, PasswordNeedsRehashScalar));
+	loader.RegisterFunction(ScalarFunction("qm_password_hash", {V}, V, PasswordHashScalar));
 
 	loader.RegisterFunction(ScalarFunction("qm_mime_shape", {V, V, I, I}, V, MimeShapeScalar));
 	loader.RegisterFunction(ScalarFunction("qm_mime_build", {V, V, I, I}, V, MimeBuildScalar));

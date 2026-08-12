@@ -10,6 +10,37 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **Passwords are hashed with scrypt**, not one round of salted SHA-256.
+      The old scheme gave a leaked `quackmail_users` table up at GPU speed, and
+      the header said as much ("first-pass KDF; bcrypt/argon2 is a noted
+      hardening follow-up") — this is that follow-up.
+  - [x] scrypt (RFC 7914) through OpenSSL's `EVP_PBE_scrypt`: no new
+        dependency, and available since OpenSSL 1.1.0, where Argon2 needs 3.2
+        and would have broken portability to anything older. Memory-hardness is
+        the property that matters — PBKDF2 and bcrypt both fit in a GPU's
+        registers and scrypt does not. N=16384 r=8 p=1 is 16 MiB and ~80 ms per
+        verify, measured rather than guessed.
+  - [x] `algo` is self-describing (`scrypt$16384$8$1`), so the work factor can
+        be raised later without invalidating rows stored at the old one. It is
+        parsed with bounds and *refused* rather than clamped when absurd: the
+        value comes out of a database, and a row naming a huge N would let one
+        sign-in allocate the machine.
+  - [x] **Legacy rows still verify, and are rewritten on the next successful
+        sign-in.** Without that the change is close to worthless on an install
+        that already exists: every account created before it keeps the weak hash
+        until somebody happens to set a new password, which for most accounts is
+        never. The rewrite failing is ignored on purpose — the sign-in already
+        succeeded, and refusing it because a housekeeping UPDATE did not land
+        would turn hardening into an outage.
+  - [x] `test/sql/password.test` pins the legacy format with a vector computed
+        *independently* rather than by asking the server what it produces, and
+        the scrypt output against a vector from `hashlib.scrypt`. An upgrade
+        that locked every existing user out would be worse than the weakness it
+        fixed, so that path needs a test that fails loudly if it is ever
+        "tidied". `test_http.py` asserts the in-place upgrade end to end.
+  - [x] Contained entirely in `core/src/auth.cpp`: all twenty-odd call sites
+        already went through `auth::Verify`/`AddUser`, so no front-end changed.
+
 - [x] **IMAP `IDLE`** (RFC 2177), and the tombstone bug finding it uncovered.
   - [x] A parked client is told about new mail and expunges from *another*
         session. The wake-up is a **poll of the store**, not a push from
@@ -746,5 +777,4 @@ The first came out of building 0.6.0 and is the one most likely to bite.
   mail keeps an authenticated chain; MTA-STS / DANE for outbound transport.
 - Sieve extensions beyond the current core + `reject`/`envelope`/`body`/`copy`:
   variables, regex, vacation, imap4flags.
-- Hardening: SCRAM-SHA-256, bcrypt/argon2 password hashing, charset transcoding
-  beyond UTF-8/Latin-1.
+- Hardening: SCRAM-SHA-256, charset transcoding beyond UTF-8/Latin-1.

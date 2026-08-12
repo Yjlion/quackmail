@@ -669,8 +669,21 @@ SELECT epoch, iso FROM qm_parse_date('Mon, 02 Jan 2006 15:04:05 -0700');
 
 TLS uses the **system OpenSSL** (`libssl-dev`); DuckDB's bundled mbedTLS is
 crypto-only. SASL `PLAIN`/`LOGIN` (SMTP) is offered only after TLS; credentials
-are verified against `quackmail_users` (salted SHA-256, constant-time compare).
-The native Citadel `USER`/`PASS` verify against the same table.
+are verified against `quackmail_users` with a constant-time compare. The native
+Citadel `USER`/`PASS` verify against the same table.
+
+Passwords are stored with **scrypt** (RFC 7914, N=16384 r=8 p=1 — 16 MiB and
+~80 ms per check), through OpenSSL's `EVP_PBE_scrypt`. Memory-hardness is the
+point: PBKDF2 and bcrypt both fit in a GPU's registers, scrypt does not. The
+`algo` column is self-describing (`scrypt$16384$8$1`), so the work factor can
+be raised later without invalidating rows already stored at the old one.
+
+This replaced a single round of salted SHA-256, which a leaked
+`quackmail_users` table gave up at GPU speed. Rows written by the old scheme
+**still verify**, and are rewritten with scrypt on their owner's next
+successful sign-in — otherwise an existing install would keep the weak hash for
+every account until somebody happened to change a password, which for most
+accounts is never.
 
 ## Build
 
@@ -903,8 +916,8 @@ back to DNS, so a sign→verify round trip needs no resolver.
 - **SMTP**: PIPELINING (2920), CHUNKING/BDAT (3030), and DSN (3461).
 - **Mail authentication depth**: DMARC aggregate (`rua`) reporting, ARC (8617)
   so forwarded mail survives, and MTA-STS / DANE for outbound transport.
-- **Hardening**: SCRAM-SHA-256 SASL (5802/7677), bcrypt/argon2 hashing, and
-  charset transcoding beyond UTF-8/Latin-1.
+- **Hardening**: SCRAM-SHA-256 SASL (5802/7677) and charset transcoding beyond
+  UTF-8/Latin-1. Password hashing is scrypt (see [TLS & AUTH](#tls--auth)).
 - **Sieve**: the variables (5229), regex, vacation (5230) and imap4flags (5232)
   extensions; the parser covers the RFC 5228 core plus `reject`, `envelope`,
   `body` and `copy` today.
