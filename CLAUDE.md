@@ -120,7 +120,12 @@ asserts, instead of sleeping past a poll interval.
   authentication. `dkim::Verify` takes an injectable `KeyLookup` so it can read
   locally stored keys instead of DNS; that is what makes it testable offline.
 - `sieve.hpp` — RFC 5228 `Evaluate` (returns a *list* of actions with implicit
-  keep) and `Check` for ManageSieve validation.
+  keep) and `Check` for ManageSieve validation, plus `imap4flags` (flags ride on
+  the KEEP/FILEINTO they were set for), `variables` and `vacation`. `Evaluate`
+  takes no `Connection` and must stay that way: it decides only what *this
+  message* deserves, so every RFC 5230 suppression rule is testable from
+  `test/sql/sieve.test` through `qm_sieve_eval`. The per-correspondent window
+  and the actual send are `delivery.cpp`'s, because only it has a connection.
 - `listserv.hpp` — mailing lists over rooms: `ResolveAddress` (post vs. command
   address), `Subscribe`/`Unsubscribe`/`Confirm`, `RenderForList` (the List-*
   rewriting, pure enough to assert from SQL), `SpoolOnce`/`SpoolRoom`.

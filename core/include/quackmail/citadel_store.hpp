@@ -423,6 +423,13 @@ bool DeleteMessage(duckdb::Connection &con, int64_t room_num, int64_t msgnum, st
 bool MoveMessage(duckdb::Connection &con, int64_t from_room, int64_t to_room, int64_t msgnum, bool is_copy,
                  std::string &err);
 
+// Set one IMAP flag on one user's view of a message (`citadel_msg_flags`),
+// doing nothing when it is already there. IMAP's STORE writes these, the web
+// mailbox reads them, and a Sieve `fileinto :flags` sets them at delivery — one
+// spelling, so a flag set by one of them means the same to the other two.
+void AddMsgFlag(duckdb::Connection &con, int64_t msgnum, const std::string &username,
+                const std::string &flag);
+
 // ---- groupware objects, addressed by euid --------------------------------
 //
 // Citadel identifies a contact, event or task by its euid (the object's own UID

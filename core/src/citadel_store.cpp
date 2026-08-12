@@ -1788,6 +1788,22 @@ int64_t UpsertByEuid(Connection &con, const Message &msg, int64_t room_num, std:
 	return created;
 }
 
+void AddMsgFlag(Connection &con, int64_t msgnum, const std::string &username,
+                const std::string &flag) {
+	if (flag.empty()) {
+		return;
+	}
+	// citadel_msg_flags has no unique constraint (IMAP has always deleted and
+	// re-inserted a message's whole set), so the duplicate check is here rather
+	// than in the schema — a second row for one flag would show up as a
+	// repeated flag in a FETCH.
+	ExecP(con,
+	      "INSERT INTO citadel_msg_flags (msgnum, username, flag) "
+	      "SELECT $1, $2, $3 WHERE NOT EXISTS ("
+	      "  SELECT 1 FROM citadel_msg_flags WHERE msgnum = $1 AND username = $2 AND flag = $3)",
+	      {Value::BIGINT(msgnum), Value(username), Value(flag)});
+}
+
 bool MoveMessage(Connection &con, int64_t from_room, int64_t to_room, int64_t msgnum, bool is_copy,
                  std::string &err) {
 	if (!MessageInRoom(con, from_room, msgnum)) {

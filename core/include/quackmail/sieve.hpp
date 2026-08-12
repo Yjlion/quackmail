@@ -10,8 +10,28 @@ namespace quackmail {
 namespace sieve {
 
 // RFC 5228 mail filtering, plus the `reject` (RFC 5429), `envelope` and `copy`
-// (RFC 3894) extensions. A script produces a *set* of actions, not one: a
-// message can be filed into several folders, or redirected and kept.
+// (RFC 3894), `mailbox` (RFC 5490 — only `fileinto :create`), `imap4flags`
+// (RFC 5232), `variables` (RFC 5229) and `vacation` (RFC 5230) extensions. A
+// script produces a *set* of actions, not one: a message can be filed into
+// several folders, or redirected and kept.
+
+// vacation's tagged arguments (RFC 5230). Only meaningful on a VACATION action.
+//
+// The evaluator decides *whether an auto-reply is warranted by the message* and
+// nothing else — every rule in §4.5/§4.6 that is a pure function of the message
+// is applied before the action is emitted, so those rules are testable without
+// a database. Whether one was already sent to this correspondent recently is
+// the caller's problem, because only the caller has a connection.
+struct VacationSpec {
+	std::string subject;                // :subject; empty means "Auto: <original>"
+	std::string from;                   // :from; empty means the recipient's own address
+	std::string handle;                 // :handle; empty means "derive it from the text"
+	std::vector<std::string> addresses; // :addresses — further addresses that are "me"
+	int days = 7;                       // :days — the per-correspondent silence window
+	bool mime = false;                  // the reason is a MIME entity rather than plain text
+
+	VacationSpec() = default;
+};
 
 struct Action {
 	enum Type {
@@ -20,12 +40,21 @@ struct Action {
 		REDIRECT, // forward to another address
 		REJECT,   // refuse the message with a reason
 		DISCARD,  // silently drop
+		VACATION, // auto-reply to the sender
 	};
 	Type type = KEEP;
 	std::string folder;  // FILEINTO
 	std::string address; // REDIRECT
-	std::string reason;  // REJECT
+	std::string reason;  // REJECT, VACATION
 	bool create = false; // fileinto :create
+
+	// imap4flags: the flags to set on the stored copy. A *snapshot* of the
+	// internal flag set as it stood when this action ran, not a reference to it
+	// — `addflag` after a `fileinto` must not reach back and change what was
+	// already filed, which is the whole subtlety of RFC 5232 §5.
+	std::vector<std::string> flags;
+
+	VacationSpec vacation; // VACATION
 
 	Action() = default;
 	explicit Action(Type t) : type(t) {}
@@ -120,6 +149,12 @@ struct Rule {
 	// as "Rule 3" rather than breaking.
 	std::string name;
 	bool all = true; // allof (every test) vs anyof (any test)
+	// Empty means *unconditional*: the actions run for every message and the
+	// script has them at the top level with no `if` around them. An
+	// out-of-office reply is the shape that needs this — "when should I
+	// auto-reply?" has the answer "always" far more often than it has a
+	// condition — and a rule list that could not say "always" could not
+	// describe one.
 	std::vector<RuleTest> tests;
 	std::vector<Action> actions;
 	bool stop = false; // a trailing `stop;` inside the block

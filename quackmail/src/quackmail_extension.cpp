@@ -1141,6 +1141,84 @@ void SieveValidScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	});
 }
 
+// qm_sieve_eval(script, raw_message, mail_from, rcpt_to) -> what the script
+// would do, one action per line.
+//
+// Parsing is one thing and *deciding* is another, and until this there was no
+// way to assert the second without a socket. The rules that need it most are the
+// ones that fail silently against a real correspondent: which flags a fileinto
+// carries, what a `${1}` captured, and every reason RFC 5230 gives for saying
+// nothing back — an auto-reply to a mailing list is not an error anybody sees
+// until it has gone to four hundred people.
+//
+// Scalar rather than a table function, so a test can compose it (CLAUDE.md: a
+// table function's arguments must be constant-foldable, so they cannot nest).
+void SieveEvalScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnifiedVectorFormat sf, mf, ff, tf;
+	args.data[0].ToUnifiedFormat(args.size(), sf);
+	args.data[1].ToUnifiedFormat(args.size(), mf);
+	args.data[2].ToUnifiedFormat(args.size(), ff);
+	args.data[3].ToUnifiedFormat(args.size(), tf);
+	auto sd = UnifiedVectorFormat::GetData<string_t>(sf);
+	auto md = UnifiedVectorFormat::GetData<string_t>(mf);
+	auto fd = UnifiedVectorFormat::GetData<string_t>(ff);
+	auto td = UnifiedVectorFormat::GetData<string_t>(tf);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto out = FlatVector::GetData<string_t>(result);
+	for (idx_t i = 0; i < args.size(); i++) {
+		std::string raw = md[mf.sel->get_index(i)].GetString();
+		auto parsed = quackmail::mime::Parse(raw);
+		quackmail::sieve::Envelope env(fd[ff.sel->get_index(i)].GetString(),
+		                               td[tf.sel->get_index(i)].GetString());
+		auto res = quackmail::sieve::Evaluate(sd[sf.sel->get_index(i)].GetString(), parsed, raw, env);
+
+		std::string text;
+		if (!res.error.empty()) {
+			text = "error " + res.error + "\n";
+		}
+		for (auto &a : res.actions) {
+			switch (a.type) {
+			case quackmail::sieve::Action::FILEINTO:
+				text += "fileinto " + a.folder + (a.create ? " :create" : "");
+				break;
+			case quackmail::sieve::Action::REDIRECT:
+				text += "redirect " + a.address;
+				break;
+			case quackmail::sieve::Action::REJECT:
+				text += "reject " + a.reason;
+				break;
+			case quackmail::sieve::Action::DISCARD:
+				text += "discard";
+				break;
+			case quackmail::sieve::Action::VACATION:
+				text += "vacation days=" + std::to_string(a.vacation.days);
+				if (!a.vacation.subject.empty()) {
+					text += " subject=" + a.vacation.subject;
+				}
+				if (!a.vacation.from.empty()) {
+					text += " from=" + a.vacation.from;
+				}
+				if (!a.vacation.handle.empty()) {
+					text += " handle=" + a.vacation.handle;
+				}
+				text += " " + a.reason;
+				break;
+			default:
+				text += "keep";
+				break;
+			}
+			for (auto &f : a.flags) {
+				text += " +" + f;
+			}
+			text += "\n";
+		}
+		if (!text.empty() && text.back() == '\n') {
+			text.pop_back();
+		}
+		out[i] = StringVector::AddString(result, text);
+	}
+}
+
 // qm_psl_org_domain(domain) -> the DMARC organizational (registrable) domain,
 // from the bundled Public Suffix List. Scalar and touching no tables, so it is
 // assertable straight from sqllogictest with no DNS in the loop — which is the
@@ -1434,9 +1512,18 @@ void SieveRulesScalar(DataChunk &args, ExpressionState &, Vector &result) {
 				    case quackmail::sieve::Action::DISCARD:
 					    out += "discard";
 					    break;
+				    case quackmail::sieve::Action::VACATION:
+					    out += "vacation " + r.actions[i].reason;
+					    break;
 				    default:
 					    out += "keep";
 					    break;
+				    }
+				    if (r.actions[i].create) {
+					    out += " :create";
+				    }
+				    for (auto &f : r.actions[i].flags) {
+					    out += " +" + f;
 				    }
 			    }
 			    if (r.stop) {
@@ -2226,6 +2313,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_vcard_euid", {V}, V, VcardEuidScalar));
 	loader.RegisterFunction(ScalarFunction("qm_vcard_emit", {V, I}, V, VcardEmitScalar));
 
+	loader.RegisterFunction(ScalarFunction("qm_sieve_eval", {V, V, V, V}, V, SieveEvalScalar));
 	loader.RegisterFunction(ScalarFunction("qm_sieve_rules", {V}, V, SieveRulesScalar));
 	loader.RegisterFunction(ScalarFunction("qm_sieve_rules_why", {V}, V, SieveRulesWhyScalar));
 	loader.RegisterFunction(ScalarFunction("qm_sieve_recompose", {V}, V, SieveRecomposeScalar));

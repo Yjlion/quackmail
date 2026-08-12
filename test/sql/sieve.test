@@ -242,7 +242,8 @@ SELECT count(*) FROM (VALUES
     -- a test the flat view does not model
     (E'if envelope :is "from" "a@x" {\n  discard;\n}\n'),
     (E'if exists "x-spam" {\n  discard;\n}\n'),
-    (E'if true {\n  keep;\n}\n'),
+    -- a rule that can never run
+    (E'if false {\n  keep;\n}\n'),
     -- several headers or values in one test
     (E'if header :is ["from", "to"] "a@x" {\n  keep;\n}\n'),
     (E'if header :is "from" ["a@x", "b@x"] {\n  keep;\n}\n'),
@@ -252,6 +253,16 @@ SELECT count(*) FROM (VALUES
 WHERE qm_sieve_rules(s) IS NOT NULL;
 ----
 0
+
+# `if true` used to be on that list. It is not any more: it is how the rule view
+# spells an *unconditional* rule, which is the shape an out-of-office reply has
+# — "when should I auto-reply?" answers "always" far more often than it answers
+# a condition, and a rule list that could not say "always" could not describe
+# one. Compose writes it back the same way.
+query I
+SELECT qm_sieve_rules(E'if true {\n  keep;\n}\n');
+----
+|all||keep
 
 # And each of those gives a reason rather than an empty failure, so the banner
 # can say something useful.
@@ -308,3 +319,306 @@ query I
 SELECT qm_sieve_rules(qm_sieve_recompose(E'if header :is "subject" "a \\"quoted\\" word" {\n  keep;\n}\n'));
 ----
 |all|subject is a "quoted" word|keep
+
+# ---- imap4flags (RFC 5232) -------------------------------------------------
+
+query I
+SELECT qm_sieve_valid('
+require ["imap4flags", "fileinto"];
+setflag "\\Seen";
+addflag ["\\Flagged", "$label1"];
+removeflag "\\Seen";
+if hasflag "\\Flagged" { fileinto :flags "\\Seen" "Box"; }
+keep :flags [];
+');
+----
+true
+
+# The flags an action carries are the internal set *as it stood when that action
+# ran*. An addflag afterwards must not reach back and change what was already
+# filed — which is the entire subtlety of §5, and the thing a parse test cannot
+# see.
+query I
+SELECT replace(qm_sieve_eval(E'require ["imap4flags", "fileinto"];\naddflag "\\\\Seen";\nfileinto "Early";\naddflag "\\\\Flagged";\nfileinto "Late";\n',
+                     E'Subject: hi\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto Early +\Seen / fileinto Late +\Seen +\Flagged
+
+# `:flags` on the action overrides the internal set, and `:flags []` means "no
+# flags", which is a different thing from not writing the tag at all.
+query I
+SELECT replace(qm_sieve_eval(E'require ["imap4flags", "fileinto"];\nsetflag "\\\\Seen";\nfileinto :flags "\\\\Flagged" "A";\nfileinto :flags [] "B";\n',
+                     E'Subject: hi\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto A +\Flagged / fileinto B
+
+# System flags fold case on the wire, so `\seen` and `\Seen` are one flag and
+# are stored under IMAP's spelling. A keyword is passed through as written.
+query I
+SELECT replace(qm_sieve_eval(E'require ["imap4flags"];\nsetflag "\\\\seen \\\\SEEN $Work";\nkeep;\n',
+                     E'Subject: hi\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep +\Seen +$Work
+
+# setflag replaces, addflag adds, removeflag takes away.
+query I
+SELECT replace(qm_sieve_eval(E'require ["imap4flags"];\naddflag "\\\\Flagged";\nsetflag "\\\\Draft";\naddflag "\\\\Seen";\nremoveflag "\\\\Draft";\nkeep;\n',
+                     E'Subject: hi\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep +\Seen
+
+# ---- variables (RFC 5229) --------------------------------------------------
+
+query I
+SELECT qm_sieve_valid('
+require ["variables", "fileinto"];
+set "name" "value";
+set :lower :upperfirst "greeting" "HELLO";
+set :length "n" "abcd";
+if string :is "${name}" "value" { fileinto "${greeting}"; }
+');
+----
+true
+
+# ${...} expands in a fileinto argument.
+query I
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nset "box" "Lists";\nfileinto "${box}";\n',
+                     E'Subject: hi\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto Lists
+
+# **Without `require "variables"` the same script files into a folder literally
+# called `${box}`.** This is the one capability that is not advisory: a script
+# written before the extension existed must keep meaning what it meant then.
+query I
+SELECT replace(qm_sieve_eval(E'require ["fileinto"];\nset "box" "Lists";\nfileinto "${box}";\n',
+                     E'Subject: hi\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto ${box}
+
+# `:matches` captures into ${1}..${9}, which is what makes a per-sender or
+# per-list folder expressible at all.
+query I
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nif header :matches "Subject" "[*] *" {\n  fileinto "Lists/${1}";\n}\n',
+                     E'Subject: [duckdb] a question\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto Lists/duckdb
+
+# ${0} is everything the pattern matched.
+query I
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nif header :matches "Subject" "re: *" {\n  fileinto "${0}";\n}\n',
+                     E'Subject: re: hello\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto re: hello
+
+# A failed match leaves the previous captures alone rather than clearing them:
+# reading ${1} from a test that never fired would be worse than reading a stale
+# one, because nothing would say so.
+query I
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nif header :matches "Subject" "[*] *" { keep; }\nif header :matches "Subject" "zzz*" { keep; }\nfileinto "${1}";\n',
+                     E'Subject: [duckdb] a question\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep / fileinto duckdb
+
+# An unset variable is the empty string, not an error and not the literal text.
+query I
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nfileinto "A${nope}B";\n',
+                     E'Subject: hi\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto AB
+
+# Something that is not a variable name is left exactly as written (§3).
+query I
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nfileinto "${} ${a b} ${";\n',
+                     E'Subject: hi\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto ${} ${a b} ${
+
+# Expansion is not recursive: a value holding ${...} is data. Otherwise a
+# sender who gets text into a variable could have it read back as script.
+query I
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nset "inner" "Box";\nset "outer" "${inner}";\nif header :matches "Subject" "*" { }\nfileinto "${outer}";\n',
+                     E'Subject: ${inner}\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+fileinto Box
+
+# set modifiers, applied by precedence rather than in the order written (§4.1).
+query IIII
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nset :lower "v" "HELLO";\nfileinto "${v}";\n', E'Subject: x\r\n\r\n', 'a@x.test', 'b@y.test'), chr(10), ' / '),
+       replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nset :upper "v" "hello";\nfileinto "${v}";\n', E'Subject: x\r\n\r\n', 'a@x.test', 'b@y.test'), chr(10), ' / '),
+       replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nset :lower :upperfirst "v" "hELLO";\nfileinto "${v}";\n', E'Subject: x\r\n\r\n', 'a@x.test', 'b@y.test'), chr(10), ' / '),
+       replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nset :length "v" "abcd";\nfileinto "${v}";\n', E'Subject: x\r\n\r\n', 'a@x.test', 'b@y.test'), chr(10), ' / ');
+----
+fileinto hello	fileinto HELLO	fileinto Hello	fileinto 4
+
+# :quotewildcard escapes a captured value before it is used as a pattern, which
+# is what stops a subject full of '*' from matching everything afterwards.
+query I
+SELECT replace(qm_sieve_eval(E'require ["variables", "fileinto"];\nset :quotewildcard "v" "a*b";\nfileinto "${v}";\n',
+                     E'Subject: x\r\n\r\n', 'a@x.test', 'b@y.test'), chr(10), ' / ');
+----
+fileinto a\*b
+
+# ---- vacation (RFC 5230) ---------------------------------------------------
+
+query I
+SELECT qm_sieve_valid('
+require ["vacation"];
+vacation :days 3 :subject "Away" :from "me@example.com" :handle "h" :addresses ["a@x", "b@x"] :mime
+  text:
+I am away until Monday.
+.
+;
+');
+----
+true
+
+# The ordinary case: a person writes to a person, and the reply is warranted.
+# The implicit keep survives — an out-of-office is not a delivery, so the
+# message still lands in the inbox.
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation :days 3 "Away until Monday";\n',
+                     E'From: a@x.test\r\nTo: bob@y.test\r\nSubject: lunch?\r\n\r\nbody',
+                     'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+vacation days=3 Away until Monday / keep
+
+# Every reason RFC 5230 gives for staying quiet, one at a time. Each of these
+# fails *silently* against a real correspondent, which is why they are pinned
+# here rather than left to an integration test to notice.
+
+# §4.6 — the message was itself generated.
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: a@x.test\r\nTo: bob@y.test\r\nAuto-Submitted: auto-replied\r\n\r\nbody',
+                     'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep
+
+# `Auto-Submitted: no` is the one value that means "an ordinary message".
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: a@x.test\r\nTo: bob@y.test\r\nAuto-Submitted: no\r\n\r\nbody',
+                     'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+vacation days=7 Away / keep
+
+# A mailing list. Replying to one is how an out-of-office reaches four hundred
+# people who did not write to anybody.
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: a@x.test\r\nTo: list@y.test\r\nList-Id: <l.y.test>\r\n\r\nbody',
+                     'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep
+
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: a@x.test\r\nTo: bob@y.test\r\nPrecedence: bulk\r\n\r\nbody',
+                     'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep
+
+# An empty envelope sender is a bounce or a notification. Answering one is how
+# two servers talk to each other until somebody notices.
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: a@x.test\r\nTo: bob@y.test\r\n\r\nbody', '', 'bob@y.test'), chr(10), ' / ');
+----
+keep
+
+# §4.5 — the user has to be a visible recipient. Without this, every message a
+# rule routed here and every thread the user was bcc'd on gets an answer.
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: a@x.test\r\nTo: someone-else@y.test\r\n\r\nbody',
+                     'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep
+
+# ...and Cc counts, as does an address named by :addresses.
+query II
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: a@x.test\r\nTo: c@y.test\r\nCc: bob@y.test\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / '),
+       replace(qm_sieve_eval(E'require ["vacation"];\nvacation :addresses ["robert@y.test"] "Away";\n',
+                     E'From: a@x.test\r\nTo: robert@y.test\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+vacation days=7 Away / keep	vacation days=7 Away / keep
+
+# Never answer yourself.
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: bob@y.test\r\nTo: bob@y.test\r\n\r\nbody', 'bob@y.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep
+
+# §4.7 — one reply per message however many times the command is reached.
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "First";\nvacation "Second";\n',
+                     E'From: a@x.test\r\nTo: bob@y.test\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+vacation days=7 First / keep
+
+# §4.1 — the window defaults to seven days and has a floor of one, because an
+# auto-replier with no floor answers a persistent correspondent every time.
+query II
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: a@x.test\r\nTo: bob@y.test\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / '),
+       replace(qm_sieve_eval(E'require ["vacation"];\nvacation :days 0 "Away";\n',
+                     E'From: a@x.test\r\nTo: bob@y.test\r\n\r\nbody', 'a@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+vacation days=7 Away / keep	vacation days=7 Away / keep
+
+# ---- what the rule editor can and cannot show -------------------------------
+
+# A script requiring `variables` is refused outright rather than shown without
+# them: a variable's value depends on what ran before it, and a list of
+# independent rules has no "before".
+query II
+SELECT qm_sieve_rules(E'require ["variables"];\nset "a" "b";\nif header :is "subject" "x" { keep; }\n') IS NULL,
+       qm_sieve_rules_why(E'require ["variables"];\nif header :is "subject" "x" { keep; }\n');
+----
+true	This script uses variables, which the rule editor cannot show.
+
+# So is a bare setflag: it changes what runs after it, and the builder writes
+# flags as `:flags` on the action they belong to instead.
+query I
+SELECT qm_sieve_rules_why(E'require ["imap4flags"];\nif header :is "subject" "x" {\n  addflag "\\\\Seen";\n  keep;\n}\n');
+----
+This script sets flags or variables as separate commands, which the rule editor cannot show.
+
+# An unconditional rule — `if true` — is what an out-of-office is, and the rule
+# view shows it with no conditions rather than refusing it.
+query I
+SELECT qm_sieve_rules(E'require ["vacation"];\n# rule: Out of office\nif true {\n  vacation :days 3 "Away";\n}\n');
+----
+Out of office|all||vacation Away
+
+# **`fileinto :create` survives the round trip.** Decompose reads it, so Compose
+# has to write it: dropping it would silently rewrite a script that asked for it
+# the first time any *other* rule on the page was touched.
+query II
+SELECT qm_sieve_rules(E'require ["fileinto", "mailbox"];\nif header :is "subject" "x" {\n  fileinto :create "A/B";\n}\n'),
+       qm_sieve_recompose(E'require ["fileinto", "mailbox"];\nif header :is "subject" "x" {\n  fileinto :create "A/B";\n}\n') LIKE '%:create%';
+----
+|all|subject is x|fileinto A/B :create	true
+
+# Flags on an action survive it too, and bring their own require line.
+query II
+SELECT qm_sieve_rules(qm_sieve_recompose(E'require ["fileinto", "imap4flags"];\nif header :is "subject" "x" {\n  fileinto :flags "\\\\Seen" "A";\n}\n')),
+       qm_sieve_recompose(E'require ["fileinto", "imap4flags"];\nif header :is "subject" "x" {\n  fileinto :flags "\\\\Seen" "A";\n}\n') LIKE '%imap4flags%';
+----
+|all|subject is x|fileinto A +\Seen	true
+
+# A vacation rule round-trips, multi-line message and all: quoting the message
+# would run every paragraph together, so Compose writes a `text:` block.
+query I
+SELECT qm_sieve_valid(qm_sieve_recompose(E'require ["vacation"];\nif true {\n  vacation text:\nLine one.\nLine two.\n.\n;\n}\n'));
+----
+true
+
+query I
+SELECT qm_sieve_rules(qm_sieve_recompose(E'require ["vacation"];\nif true {\n  vacation text:\nLine one.\nLine two.\n.\n;\n}\n')) =
+       qm_sieve_rules(E'require ["vacation"];\nif true {\n  vacation text:\nLine one.\nLine two.\n.\n;\n}\n');
+----
+true
