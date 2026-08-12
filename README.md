@@ -372,6 +372,19 @@ clients see each other in the who-list and can page one another.
   quota is checked first, the message is DKIM-signed once, local recipients are
   delivered and remote ones queued, and a copy is filed into Sent Items.
 
+  A folder is a `VIEW_MAILBOX` room and renders as a mailbox rather than a
+  message board: a checkbox per row, flag and attachment columns, size, and a
+  bulk bar that files, flags, marks read or deletes **whatever is ticked**. It
+  is one `<form>` with a `formaction` per button — plain HTML, so selecting
+  three messages and deleting them works with JavaScript off. The only scripted
+  part is the select-all checkbox, which stays hidden until `qc.js` marks the
+  document rather than sitting there doing nothing.
+
+  Read state in a folder is the IMAP `\Seen` flag, not the Citadel last-read
+  pointer the message board uses: a pointer is a high-water mark and cannot say
+  "this one, not that one". Opening a message sets it, and it is the same
+  `citadel_msg_flags` row a desktop client reads, so the two agree.
+
   Composing offers **formatted text**, producing a `multipart/alternative` with
   both halves so a recipient on a text-only client, or reading over Citadel or
   POP3, still gets something readable. A pasted or dropped image becomes a real
@@ -387,6 +400,34 @@ clients see each other in the who-list and can page one another.
   read, forgetting a room, the who-list and instant messages. A post made here
   is an ordinary `format_type = 0` Citadel message, so it reads back over the
   native protocol, telnet, NNTP, IMAP and POP3.
+- **The sidebar** carries unread counts: every mail folder, and the rooms with
+  something new in them, most unread first. It is one room listing plus one or
+  two `RoomStatsBulk` calls — fewer queries than the four `FindUserRoom` lookups
+  it used to make for the groupware links, which now come out of the same
+  listing. `qm_web_sidebar_rooms` (default 10) caps the room half and 0 turns it
+  and its query off; folder counts are a handful of personal rooms and always
+  shown. A room page marks that room current, falling back to *All rooms* for
+  one the sidebar does not list.
+- **Reading is a flow**, not a round trip through the list: *Newer*, *Older* and
+  *Next unread* sit above every message. Each is a bounded min/max over the
+  `(room_num, msgnum)` key rather than a listing of the room, and *next unread*
+  means what that room's own listing means — `\Seen` in a mail folder, the
+  last-read pointer on a board.
+- **Search** at `/search`, and from the box in the page header. Subject and
+  sender are matched across every room the caller can read; message text is a
+  second mode, because a body is not a column — a `format_type = 4` message
+  keeps its text base64-encoded inside `raw`, so matching it means decoding each
+  candidate through the same `citadel::BodyText` the other front-ends use. That
+  path is bounded by `qm_web_search_scan` (default 2000 messages, newest first)
+  and the page says when it hit the bound rather than passing off a partial
+  answer as a complete one.
+
+  The room set *is* the access control: search enumerates rooms through the same
+  helper the room list uses, so a private room stays invisible, a forgotten room
+  stays forgotten, another user's mailbox is never reachable, and a passworded
+  room is not searched until that session has unlocked it. A `room=` parameter
+  naming a room outside that set is not a scope — it is ignored, never a query
+  against that room.
 - **Room views.** A room's Citadel `default_view` decides how it renders:
 
   | View | What you get |

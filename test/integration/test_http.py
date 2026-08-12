@@ -11,6 +11,7 @@ Requires: pip install duckdb==1.5.4
 Run after `make release` so the loadable extensions exist under
 build/release/extension.
 """
+import base64
 import hashlib
 import http.cookiejar
 import os
@@ -483,6 +484,373 @@ def main():
             "ON rm.msgnum = m.msgnum WHERE rm.room_num = 0 AND m.subject = 'from the web'"
         ).fetchone()[0]
         assert got == 1, "the post did not land in the Lobby"
+
+        # ---- search ---------------------------------------------------------
+        # Three fixtures, each proving a different thing: a term that lives only
+        # in a subject, one that lives only inside a base64 body, and one in a
+        # room the searcher must never be shown.
+        deliver(con, "webuser", "quarterly zorblat report", "nothing to see here", fmt=0)
+        body_only = (
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "Content-Transfer-Encoding: base64\r\n"
+            "\r\n" + base64.b64encode(b"the codeword is fnordium, buried in the body").decode() + "\r\n"
+        )
+        deliver(con, "webuser", "an innocuous subject", body_only, fmt=4)
+        deliver(con, "otheruser", "zorblat belongs to otheruser", "private", fmt=0)
+
+        def search(params):
+            return request(op, BASE + "/search?" + urllib.parse.urlencode(params))
+
+        status, headers, _ = request(opener(), BASE + "/search?q=zorblat")
+        assert status == 303 and "/login" in headers.get("Location", ""), "search is not behind login"
+
+        status, _, page = search({"q": "zorblat"})
+        assert status == 200, f"search returned {status}"
+        assert "quarterly zorblat report" in page, "a subject match was not found"
+        # The whole point of resolving the room set through ListRooms: another
+        # user's mailbox holds the same term and must never surface.
+        assert "belongs to otheruser" not in page, "search crossed into another user's mailbox"
+
+        # The field selector really selects. The sender of every fixture is
+        # sender@example.com, so the two directions are distinguishable.
+        status, _, page = search({"q": "zorblat", "in": "from"})
+        assert "quarterly zorblat report" not in page, "in=from matched a subject"
+        status, _, page = search({"q": "sender@example.com", "in": "from"})
+        assert "quarterly zorblat report" in page, "in=from did not match the sender"
+
+        # The body case. `fnordium` appears nowhere but inside a base64-encoded
+        # part, so finding it proves citadel::BodyText is decoding the message
+        # rather than anything matching the stored bytes.
+        status, _, page = search({"q": "fnordium"})
+        assert "an innocuous subject" not in page, "a body-only word matched as a subject"
+        status, _, page = search({"q": "fnordium", "in": "body"})
+        assert "an innocuous subject" in page, "message text was not searched"
+
+        # Scoping to one room, and a room number the caller may not read.
+        status, _, page = search({"q": "zorblat", "room": str(mail_room)})
+        assert "quarterly zorblat report" in page, "scoping to a readable room lost the match"
+        status, _, page = search({"q": "zorblat", "room": str(other_room)})
+        assert "belongs to otheruser" not in page, "an unreadable room was accepted as a search scope"
+
+        # A window that closed before any fixture was delivered.
+        status, _, page = search({"q": "zorblat", "since": "2000-01-01", "until": "2000-01-02"})
+        assert "quarterly zorblat report" not in page, "the date bounds were not applied"
+        assert "Nothing matched" in page
+
+        # A term full of things that mean something to LIKE and to HTML. It must
+        # match nothing, break nothing, and come back escaped.
+        status, _, page = search({"q": "100%_" + XSS})
+        assert status == 200, f"a term with metacharacters returned {status}"
+        assert "<script>alert(1)" not in page, "the search term was reflected unescaped"
+        assert "Nothing matched" in page, "a LIKE metacharacter was treated as a wildcard"
+
+        # A passworded room is not searchable until this session has unlocked
+        # it — the same rule RequireUnlocked applies one room at a time.
+        con.execute("CALL cit_room_add('Vault')")
+        vault = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'Vault'"
+        ).fetchone()[0]
+        con.execute(
+            "UPDATE citadel_rooms SET qr_flags = qr_flags | 8, password = 'letmein' "
+            "WHERE room_num = ?",
+            [vault],
+        )
+        con.execute(
+            "INSERT INTO citadel_messages (msgnum, author, msgtime, subject, format_type, raw) "
+            "VALUES (nextval('citadel_msg_seq'), 'keeper', epoch(now())::BIGINT, "
+            "'zorblat in the vault', 0, 'body')"
+        )
+        con.execute(
+            "INSERT INTO citadel_room_msgs (room_num, msgnum) "
+            "SELECT ?, max(msgnum) FROM citadel_messages",
+            [vault],
+        )
+
+        status, _, page = search({"q": "zorblat"})
+        assert "in the vault" not in page, "a locked room's subjects leaked into search"
+
+        _, _, vault_page = request(op, f"{BASE}/bbs/room/{vault}")
+        status, _, _ = request(
+            op,
+            f"{BASE}/bbs/room/{vault}/unlock",
+            {"_csrf": csrf_of(vault_page), "password": "letmein", "next": f"/bbs/room/{vault}"},
+        )
+        assert status == 303, f"unlocking the room returned {status}"
+        status, _, page = search({"q": "zorblat"})
+        assert "in the vault" in page, "an unlocked room is still not searched"
+
+        # Two matches fit one page, so there is no pager to render.
+        status, _, page = search({"q": "zorblat", "n": "5"})
+        assert "quarterly zorblat report" in page and "in the vault" in page, "both matches on one page"
+        assert "Page 1 of" not in page, "a single page rendered a pager"
+
+        # Push past the smallest page size the handler will accept and the pager
+        # appears, with different rows on each page.
+        for i in range(6):
+            deliver(con, "webuser", f"zorblat bulk {i}", "filler", fmt=0)
+        status, _, first = search({"q": "zorblat", "n": "5", "p": "1"})
+        assert "Page 1 of 2" in first, "eight matches at five per page is not two pages"
+        status, _, second = search({"q": "zorblat", "n": "5", "p": "2"})
+        assert "Page 2 of 2" in second
+        assert "zorblat bulk 0" in second, "the oldest match is not on the last page"
+        assert "zorblat bulk 0" not in first, "the same row appeared on both pages"
+
+        # ---- the mail folder view -------------------------------------------
+        # Every folder EnsureUserRooms provisions is a VIEW_MAILBOX room, so
+        # this is the listing all of them render.
+        status, _, page = request(op, f"{BASE}/bbs/room/{mail_room}")
+        assert status == 200, f"the mail folder returned {status}"
+        assert 'name="msgnum"' in page, "the folder listing has no per-message checkbox"
+        assert 'formaction="/mail/flag"' in page, "the bulk bar does not reach /mail/flag"
+        assert 'name="folder"' in page, "the bulk bar offers no move target"
+        # The select-all only works with script, so it is hidden until qc.js
+        # marks the document rather than sitting there doing nothing.
+        assert "jsonly" in page, "the select-all is not gated on script"
+        tok = csrf_of(page)
+
+        def in_room(room_num, msgnum):
+            return con.execute(
+                "SELECT count(*) FROM citadel_room_msgs WHERE room_num = ? AND msgnum = ?",
+                [room_num, msgnum],
+            ).fetchone()[0]
+
+        def folder(name):
+            return con.execute(
+                "SELECT r.room_num FROM citadel_rooms r JOIN citadel_users u "
+                "ON u.usernum = r.mailbox_owner WHERE u.username = 'webuser' "
+                "AND r.display_name = ?",
+                [name],
+            ).fetchone()[0]
+
+        def flag_count(msgnum, flag):
+            return con.execute(
+                "SELECT count(*) FROM citadel_msg_flags WHERE username = 'webuser' "
+                "AND msgnum = ? AND flag = ?",
+                [msgnum, flag],
+            ).fetchone()[0]
+
+        bulk_a = deliver(con, "webuser", "bulk fixture a", "aaa", fmt=0)
+        bulk_b = deliver(con, "webuser", "bulk fixture b", "bbb", fmt=0)
+
+        # One request, two messages: the whole point of the view.
+        status, _, _ = request(
+            op,
+            BASE + "/mail/flag",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_a)),
+             ("msgnum", str(bulk_b)), ("set", "flagged")],
+        )
+        assert status == 303, f"bulk flag returned {status}"
+        assert flag_count(bulk_a, "\\Flagged") == 1 and flag_count(bulk_b, "\\Flagged") == 1, (
+            "bulk flag did not reach both messages"
+        )
+        status, _, _ = request(
+            op,
+            BASE + "/mail/flag",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_a)),
+             ("msgnum", str(bulk_b)), ("set", "unflagged")],
+        )
+        assert status == 303
+        assert flag_count(bulk_a, "\\Flagged") == 0, "the flag did not clear"
+
+        # A selection is not a way past the ownership check. otheruser's message
+        # rides along in the list and must simply be dropped.
+        status, _, _ = request(
+            op,
+            BASE + "/mail/flag",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_a)),
+             ("msgnum", str(secret_num)), ("set", "flagged")],
+        )
+        assert status == 303
+        assert flag_count(secret_num, "\\Flagged") == 0, (
+            "a bulk action touched a message the caller may not read"
+        )
+        assert flag_count(bulk_a, "\\Flagged") == 1, "the rest of the selection was dropped too"
+
+        # Move, and then delete-into-Trash.
+        status, _, _ = request(
+            op,
+            BASE + "/mail/move",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_a)),
+             ("folder", "Sent Items")],
+        )
+        assert status == 303, f"bulk move returned {status}"
+        assert in_room(folder("Sent Items"), bulk_a) == 1, "the message did not arrive"
+        assert in_room(mail_room, bulk_a) == 0, "the message is still in the source folder"
+
+        status, _, _ = request(
+            op,
+            BASE + "/mail/delete",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_b))],
+        )
+        assert status == 303, f"bulk delete returned {status}"
+        assert in_room(folder("Trash"), bulk_b) == 1, "delete did not file into Trash"
+
+        # An empty selection changes nothing and says so.
+        status, headers, _ = request(
+            op, BASE + "/mail/delete", [("_csrf", tok), ("room", str(mail_room))]
+        )
+        assert status == 303
+        assert "ok=nothing" in headers.get("Location", ""), headers.get("Location", "")
+
+        # `back` is where the listing asks to be returned to, so it is a path we
+        # built — never somewhere a form field can point a browser.
+        bulk_c = deliver(con, "webuser", "bulk fixture c", "ccc", fmt=0)
+        status, headers, _ = request(
+            op,
+            BASE + "/mail/flag",
+            [("_csrf", tok), ("room", str(mail_room)), ("msgnum", str(bulk_c)),
+             ("set", "flagged"), ("back", "https://evil.example/")],
+        )
+        assert status == 303
+        loc = headers.get("Location", "")
+        assert "evil.example" not in loc, "a mail action redirected to a foreign host"
+        assert loc.startswith(f"/bbs/room/{mail_room}"), loc
+
+        # Reading a message in a folder sets \Seen, which is what the listing
+        # shows as read — the Citadel last-read pointer is a high-water mark and
+        # cannot say "this one, not that one".
+        bulk_d = deliver(con, "webuser", "read me", "ddd", fmt=0)
+        assert flag_count(bulk_d, "\\Seen") == 0
+        status, _, page = request(op, f"{BASE}/bbs/room/{mail_room}/msg/{bulk_d}")
+        assert status == 200
+        assert flag_count(bulk_d, "\\Seen") == 1, "reading in a mail folder did not set \\Seen"
+        # And the read pane reaches both endpoints for a single message.
+        assert 'action="/mail/flag"' in page, "the read pane offers no flag control"
+        assert 'action="/mail/move"' in page, "the read pane offers no move control"
+
+        # A public room is still a message board, not a mailbox.
+        status, _, page = request(op, f"{BASE}/bbs/room/0")
+        assert status == 200
+        assert 'formaction="/mail/flag"' not in page, "the Lobby rendered as a mail folder"
+
+        # ---- the sidebar ----------------------------------------------------
+        # The .count span the stylesheet has always described, and which nothing
+        # emitted until now.
+        # Something new to count: the sections above read the inbox down.
+        deliver(con, "webuser", "sidebar fixture", "unread", fmt=0)
+        # A folder's count is \Seen, the same thing its listing bolds a row on —
+        # not the Citadel last-read pointer, which cannot skip a message left
+        # unread behind one that was opened.
+        unread_before = con.execute(
+            "SELECT count(*) FROM citadel_room_msgs rm WHERE rm.room_num = ? "
+            "AND NOT EXISTS (SELECT 1 FROM citadel_msg_flags f WHERE f.msgnum = rm.msgnum "
+            "AND f.username = 'webuser' AND f.flag = '\\Seen')",
+            [mail_room],
+        ).fetchone()[0]
+        assert unread_before > 0, "the fixture left nothing unread to count"
+
+        status, _, page = request(op, f"{BASE}/prefs")
+        assert status == 200
+        assert 'class="count"' in page, "the sidebar emits no unread count"
+        assert ">Inbox<" in page, "the sidebar does not name the inbox"
+        assert ">Sent Items<" in page, "the sidebar lists no folder past the inbox"
+        assert f'href="/bbs/room/{mail_room}"' in page, "the inbox does not link to its room"
+
+        # The count is the room's unread total, not a decoration.
+        m = re.search(
+            r'href="/bbs/room/%d"[^>]*><span>Inbox</span><span class="count">(\d+)</span>' % mail_room,
+            page,
+        )
+        assert m, "the inbox link carries no count"
+        assert int(m.group(1)) == unread_before, f"count {m.group(1)} != {unread_before} unread"
+
+        # Mark-all-read clears it. In a folder that has to set \Seen as well as
+        # the pointer, or the button would move a number the sidebar does not
+        # read and appear to do nothing.
+        _, _, page = request(
+            op, f"{BASE}/bbs/room/{mail_room}/markread", {"_csrf": tok}
+        )
+        assert con.execute(
+            "SELECT count(*) FROM citadel_room_msgs rm WHERE rm.room_num = ? "
+            "AND NOT EXISTS (SELECT 1 FROM citadel_msg_flags f WHERE f.msgnum = rm.msgnum "
+            "AND f.username = 'webuser' AND f.flag = '\\Seen')",
+            [mail_room],
+        ).fetchone()[0] == 0, "mark-all-read left messages unseen in a mail folder"
+        _, _, page = request(op, f"{BASE}/prefs")
+        m = re.search(
+            r'href="/bbs/room/%d"[^>]*><span>Inbox</span><span class="count">' % mail_room, page
+        )
+        assert not m, "the inbox still shows a count after being marked read"
+
+        # A room page marks that room current, and falls back to All rooms for
+        # one the sidebar does not list.
+        _, _, page = request(op, f"{BASE}/bbs/room/{mail_room}")
+        assert f'href="/bbs/room/{mail_room}" aria-current="page"' in page, (
+            "the folder being read is not marked current"
+        )
+        # A room the sidebar does *not* list — it only lists rooms with unread —
+        # falls back to marking "All rooms", so no room page is ever unmarked.
+        request(op, f"{BASE}/bbs/room/0/markread", {"_csrf": tok})
+        _, _, page = request(op, f"{BASE}/bbs/room/0")
+        assert 'href="/bbs/room/0" aria-current="page"' not in page, (
+            "the Lobby is still listed after being marked read"
+        )
+        assert '<a href="/bbs/" aria-current="page"' in page, (
+            "an unlisted room left the whole sidebar unmarked"
+        )
+
+        # 0 turns the room listing, and the query behind it, off.
+        con.execute("CALL qm_config_set('qm_web_sidebar_rooms', '0')")
+        deliver(con, "webuser", "sidebar cap fixture", "x", fmt=0)
+        _, _, page = request(op, f"{BASE}/prefs")
+        assert ">All rooms<" in page, "the sidebar lost its rooms link entirely"
+        con.execute("CALL qm_config_set('qm_web_sidebar_rooms', '10')")
+
+        # ---- moving between messages ----------------------------------------
+        # Its own folder, so the three fixtures below really are the whole room
+        # and "oldest" means what the assertions say it does. Cloned from the
+        # inbox so it is a personal VIEW_MAILBOX room like any other.
+        con.execute(
+            "INSERT INTO citadel_rooms (room_num, name, display_name, floor_num, qr_flags, "
+            "password, listorder, default_view, info, mailbox_owner, highest_msg) "
+            "SELECT nextval('citadel_room_seq'), lpad(mailbox_owner::VARCHAR, 10, '0') || '.NavTest', "
+            "'NavTest', floor_num, qr_flags, '', listorder, 1, '', mailbox_owner, 0 "
+            "FROM citadel_rooms WHERE room_num = ?",
+            [mail_room],
+        )
+        nav_room = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'NavTest'"
+        ).fetchone()[0]
+        n1 = deliver(con, "webuser", "nav one", "first", fmt=0)
+        n2 = deliver(con, "webuser", "nav two", "second", fmt=0)
+        n3 = deliver(con, "webuser", "nav three", "third", fmt=0)
+        for num in (n1, n2, n3):
+            con.execute("DELETE FROM citadel_room_msgs WHERE msgnum = ?", [num])
+            con.execute(
+                "INSERT INTO citadel_room_msgs (room_num, msgnum) VALUES (?, ?)", [nav_room, num]
+            )
+
+        _, _, page = request(op, f"{BASE}/bbs/room/{nav_room}/msg/{n2}")
+        assert f'href="/bbs/room/{nav_room}/msg/{n3}">Newer' in page, "no link to the newer message"
+        assert f'href="/bbs/room/{nav_room}/msg/{n1}">Older' in page, "no link to the older message"
+
+        # The ends of the room have only one direction each.
+        _, _, page = request(op, f"{BASE}/bbs/room/{nav_room}/msg/{n3}")
+        assert ">Newer<" not in page, "the newest message offers a newer one"
+        assert f'href="/bbs/room/{nav_room}/msg/{n2}">Older' in page
+
+        _, _, page = request(op, f"{BASE}/bbs/room/{nav_room}/msg/{n1}")
+        assert ">Older<" not in page, "the oldest message offers an older one"
+
+        # Next unread, in a mail folder, is the next one without \Seen. All
+        # three have been read by now, so clearing the flag on n3 alone makes it
+        # the only candidate — and reaching it means n2 was skipped rather than
+        # simply being the next message along.
+        con.execute("DELETE FROM citadel_msg_flags WHERE username = 'webuser' AND msgnum = ?", [n3])
+        _, _, page = request(op, f"{BASE}/bbs/room/{nav_room}/msg/{n1}")
+        assert f'href="/bbs/room/{nav_room}/msg/{n3}">Next unread' in page, (
+            "next unread did not skip the messages already seen"
+        )
+
+        # A room holding one message has nowhere to go and says nothing.
+        solo = con.execute("SELECT room_num FROM citadel_rooms WHERE display_name = 'Vault'").fetchone()[0]
+        _, _, page = request(op, f"{BASE}/bbs/room/{solo}")
+        solo_msg = con.execute(
+            "SELECT msgnum FROM citadel_room_msgs WHERE room_num = ?", [solo]
+        ).fetchone()[0]
+        _, _, page = request(op, f"{BASE}/bbs/room/{solo}/msg/{solo_msg}")
+        assert "msgnav" not in page, "a room with one message rendered a navigation row"
 
         # ---- CSRF is per session -----------------------------------------
         admin_op, _ = sign_in(BASE, "admin", "adminpw")

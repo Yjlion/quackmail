@@ -24,6 +24,9 @@ const RoomViewHandler kBoardView = {
 
 const RoomViewHandler &ViewFor(int default_view) {
 	switch (default_view) {
+	case quackmail::citadel::VIEW_MAILBOX:
+	case quackmail::citadel::VIEW_DRAFTS:
+		return MailboxView();
 	case quackmail::citadel::VIEW_ADDRESSBOOK:
 		return ContactsView();
 	case quackmail::citadel::VIEW_CALENDAR:
@@ -39,10 +42,9 @@ const RoomViewHandler &ViewFor(int default_view) {
 	case quackmail::citadel::VIEW_JOURNAL:
 		return JournalView();
 	default:
-		// VIEW_BBS, VIEW_MAILBOX, VIEW_DRAFTS, VIEW_WIKI, VIEW_WIKIMD,
-		// VIEW_QUEUE. Mail rooms are reached through /mail/ rather than here;
-		// the wikis need versioning and a markdown renderer, and the queue is
-		// Citadel's own spool view rather than a user one.
+		// VIEW_BBS, VIEW_WIKI, VIEW_WIKIMD, VIEW_QUEUE. The wikis need
+		// versioning and a markdown renderer, and the queue is Citadel's own
+		// spool view rather than a user one.
 		return kBoardView;
 	}
 }
