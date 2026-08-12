@@ -1655,11 +1655,7 @@ bool MessageInRoom(Connection &con, int64_t room_num, int64_t msgnum) {
 	return !v.IsNull();
 }
 
-bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::string &err) {
-	if (!MessageInRoom(con, room_num, msgnum)) {
-		err = "message not found in this room";
-		return false;
-	}
+bool Unlink(Connection &con, int64_t room_num, int64_t msgnum, std::string &err) {
 	// The euid is read before the unlink, because the tombstone is keyed by it:
 	// a synchronizing client asks about resources, and a resource is an euid.
 	std::string euid;
@@ -1688,6 +1684,14 @@ bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::strin
 		       Value::BIGINT(msgnum), Value::BIGINT((int64_t)std::time(nullptr))});
 	}
 	return true;
+}
+
+bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::string &err) {
+	if (!MessageInRoom(con, room_num, msgnum)) {
+		err = "message not found in this room";
+		return false;
+	}
+	return Unlink(con, room_num, msgnum, err);
 }
 
 int64_t RoomChangeToken(Connection &con, int64_t room_num) {
@@ -1806,9 +1810,11 @@ bool MoveMessage(Connection &con, int64_t from_room, int64_t to_room, int64_t ms
 	ExecP(con, "UPDATE citadel_rooms SET highest_msg = greatest(highest_msg, $2) WHERE room_num = $1",
 	      {Value::BIGINT(to_room), Value::BIGINT(msgnum)});
 	if (!is_copy) {
-		if (!ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2",
-		           {Value::BIGINT(from_room), Value::BIGINT(msgnum)})) {
-			err = "delete failed";
+		// Through the same unlink a delete uses, so the source room gets its
+		// tombstone. A move *is* a removal as far as the source is concerned,
+		// and a synchronizing client that never hears about it keeps showing a
+		// message that is no longer there.
+		if (!Unlink(con, from_room, msgnum, err)) {
 			return false;
 		}
 	}

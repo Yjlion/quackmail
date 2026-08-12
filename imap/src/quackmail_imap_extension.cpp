@@ -36,8 +36,8 @@ ServerController g_imaps;
 
 // IMAP is deliberately a minimal but real subset: LOGIN, CAPABILITY, LIST,
 // SELECT/EXAMINE, FETCH (FLAGS/UID/RFC822.SIZE/INTERNALDATE/ENVELOPE and
-// BODY[]/[HEADER]/[TEXT]), STORE flags, EXPUNGE, CLOSE, LOGOUT. BODYSTRUCTURE,
-// IDLE, CONDSTORE and friends are a later iteration.
+// BODY[]/[HEADER]/[TEXT]), STORE flags, EXPUNGE, CLOSE, LOGOUT, IDLE.
+// BODYSTRUCTURE, CONDSTORE and friends are a later iteration.
 struct Session {
 	bool authed = false;
 	std::string user;
@@ -434,7 +434,7 @@ void FetchOne(Connection &con, Session &s, net::ClientStream &stream, size_t pos
 // The CAPABILITY token list. STARTTLS is advertised only before the TLS upgrade;
 // mirrors a real Citadel server (which offers NAMESPACE, UIDPLUS, SASL, ID).
 std::string CapabilityLine(bool tls_active, bool starttls_avail) {
-	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS MOVE ACL AUTH=PLAIN AUTH=LOGIN";
+	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS MOVE ACL IDLE AUTH=PLAIN AUTH=LOGIN";
 	if (!tls_active && starttls_avail) {
 		caps += " STARTTLS";
 	}
@@ -669,6 +669,110 @@ bool SearchMatch(Connection &con, const std::string &user, size_t idx1, int64_t 
 	return ok;
 }
 
+// ---- IDLE (RFC 2177) -----------------------------------------------------
+
+// How often an idling session looks for changes, and how long it may idle
+// before we make it come back.
+//
+// The wake-up is a **poll of the store**, not a push from whatever made the
+// change. That is the shape this server is built for: extensions share no C++
+// state and coordinate through tables, so the thing a second session wrote is
+// exactly what this one reads back. `citadel::RoomChangeToken` is one cheap
+// aggregate over two indexed columns, and reading it every couple of seconds is
+// what turns polling *here* into push *to the client* — which is the half that
+// matters, because the alternative is every phone on the site opening a fresh
+// connection every few minutes to ask the same question.
+constexpr int kIdlePollMs = 2000;
+// RFC 2177 tells clients to re-issue IDLE at least every 29 minutes. A server
+// that idles forever accumulates connections nothing will ever close, and each
+// one costs a thread.
+constexpr int64_t kIdleMaxSeconds = 29 * 60;
+
+// Emit the untagged responses that bring the client's view of the selected
+// mailbox up to date, and update the session's own sequence map with it.
+//
+// EXPUNGE goes first and in **descending** position order, because each one
+// renumbers every message after it: a client applying ascending expunges
+// removes the wrong messages. EXISTS goes last, and only when the count is not
+// already what the client would have worked out from the expunges.
+bool ReportChanges(Connection &con, Session &s, net::ClientStream &stream) {
+	std::vector<int64_t> now = RoomUids(con, s.room);
+	size_t removed = 0;
+	for (size_t i = s.uids.size(); i > 0; i--) {
+		if (std::find(now.begin(), now.end(), s.uids[i - 1]) == now.end()) {
+			removed++;
+			if (!stream.WriteLine("* " + std::to_string(i) + " EXPUNGE")) {
+				return false;
+			}
+		}
+	}
+	size_t after_expunge = s.uids.size() - removed;
+	s.uids = now;
+	if (now.size() != after_expunge) {
+		if (!stream.WriteLine("* " + std::to_string(now.size()) + " EXISTS")) {
+			return false;
+		}
+		// Nothing tracks \Recent — it would need per-session state the store
+		// does not keep — so it is reported honestly as 0 here, the same as
+		// SELECT does, rather than guessed at.
+		if (!stream.WriteLine("* 0 RECENT")) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// Park until the client says DONE, pushing changes meanwhile. False means the
+// connection is finished and the caller should stop reading from it.
+bool HandleIdle(Connection &con, Session &s, net::ClientStream &stream, const std::string &tag) {
+	stream.WriteLine("+ idling");
+	int64_t token = s.selected ? quackmail::citadel::RoomChangeToken(con, s.room) : 0;
+	int64_t deadline = (int64_t)std::time(nullptr) + kIdleMaxSeconds;
+
+	for (;;) {
+		if (stream.WaitReadable(kIdlePollMs)) {
+			std::string line;
+			if (!stream.ReadLine(line, 4096)) {
+				return false; // the client went away mid-idle
+			}
+			while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+				line.pop_back();
+			}
+			// The reply carries the *IDLE* command's tag whichever way this
+			// goes: the client is not listening for any other tag, so a BAD
+			// under a different one would never be matched to anything.
+			if (util::Upper(line) == "DONE") {
+				stream.WriteLine(tag + " OK IDLE terminated");
+			} else {
+				stream.WriteLine(tag + " BAD expected DONE");
+			}
+			return true;
+		}
+
+		if ((int64_t)std::time(nullptr) >= deadline) {
+			// There is no clean way to end IDLE from this side — the client is
+			// waiting to send DONE and would match our tagged reply to a
+			// command it has not finished. Closing is what other servers do,
+			// and BYE says why.
+			stream.WriteLine("* BYE Idle timeout, please re-issue IDLE");
+			return false;
+		}
+
+		// IDLE outside a selected mailbox is legal and has nothing to report.
+		if (!s.selected) {
+			continue;
+		}
+		int64_t fresh = quackmail::citadel::RoomChangeToken(con, s.room);
+		if (fresh == token) {
+			continue;
+		}
+		token = fresh;
+		if (!ReportChanges(con, s, stream)) {
+			return false;
+		}
+	}
+}
+
 void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerController &ctrl) {
 	Connection con(db);
 	store::EnsureSchema(con);
@@ -743,7 +847,20 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 				}
 			}
 		} else if (cmd == "NOOP") {
+			// A client that cannot IDLE polls with NOOP, and RFC 3501 §6.1.2
+			// names this as the whole point of the command: it is the chance to
+			// be told what changed. Reporting nothing here is what makes such a
+			// client miss new mail until it re-selects.
+			if (s.selected) {
+				ReportChanges(con, s, stream);
+			}
 			stream.WriteLine(tag + " OK NOOP completed");
+		} else if (cmd == "IDLE") {
+			if (!s.authed) {
+				stream.WriteLine(tag + " NO not authenticated");
+			} else if (!HandleIdle(con, s, stream, tag)) {
+				return;
+			}
 		} else if (cmd == "LOGOUT") {
 			stream.WriteLine("* BYE quackcit logging out");
 			stream.WriteLine(tag + " OK LOGOUT completed");
@@ -973,22 +1090,14 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 			} else if (droom < 0) {
 				stream.WriteLine(tag + " NO [TRYCREATE] destination mailbox not found");
 			} else {
+				// Through core rather than inline SQL. The unlink half of a MOVE
+				// has to leave a tombstone or a JMAP/DAV client synchronizing the
+				// same room never learns the message left, and re-deriving that
+				// here is exactly how this front-end came to skip it.
 				for (size_t pos : ParseSet(set, s.uids, is_uid)) {
-					int64_t uid = s.uids[pos - 1];
-					auto ins = con.Prepare("INSERT OR IGNORE INTO citadel_room_msgs (room_num, msgnum) VALUES ($1, $2)");
-					if (!ins->HasError()) {
-						duckdb::vector<Value> pr = {Value::BIGINT(droom), Value::BIGINT(uid)};
-						ins->Execute(pr, false);
-					}
-					con.Query("UPDATE citadel_rooms SET highest_msg = greatest(highest_msg, " +
-					          std::to_string(uid) + ") WHERE room_num = " + std::to_string(droom));
-					if (is_move) {
-						auto del = con.Prepare("DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2");
-						if (!del->HasError()) {
-							duckdb::vector<Value> pr = {Value::BIGINT(s.room), Value::BIGINT(uid)};
-							del->Execute(pr, false);
-						}
-					}
+					std::string move_err;
+					quackmail::citadel::MoveMessage(con, s.room, droom, s.uids[pos - 1], !is_move,
+					                                move_err);
 				}
 				if (is_move) {
 					s.uids = RoomUids(con, s.room);
@@ -1215,11 +1324,12 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 						}
 					}
 					if (del) {
-						auto stmt = con.Prepare("DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2");
-						if (!stmt->HasError()) {
-							duckdb::vector<Value> params = {Value::BIGINT(s.room), Value::BIGINT(s.uids[i])};
-							stmt->Execute(params, false);
-						}
+						// citadel::DeleteMessage, not a DELETE of our own: it is
+						// the one unlink that records a tombstone, and without one
+						// an expunge here is invisible to JMAP's Email/changes, to
+						// DAV's sync-collection, and to another session's IDLE.
+						std::string del_err;
+						quackmail::citadel::DeleteMessage(con, s.room, s.uids[i], del_err);
 						stream.WriteLine("* " + std::to_string(i + 1) + " EXPUNGE");
 					}
 				}

@@ -56,7 +56,7 @@ extension.
 | `quackmail_smtp_in` | `qm_smtp_in_start/_stop/_status`, `qm_lmtp_*` | ✅ inbound MX with SPF/DKIM/DMARC/DNSBL, hosted domains, aliases and allow/block rules — plus an LMTP local-injection listener (24; dev 2033) |
 | `quackmail_smtp_out` | `qm_smtp_submission_start/_stop/_status`, `qm_smtp_smtps_*`, `qm_smtp_relay_*` | ✅ authenticated submission (587/465; dev 2587/2465) with DKIM signing and per-user rate limiting, plus the outbound queue drainer |
 | `quackmail_pop3` | `qm_pop3_start/_stop/_status`, `qm_pop3s_*` | ✅ POP3 gateway (STLS + implicit TLS) → serves each user's Mail room |
-| `quackmail_imap` | `qm_imap_start/_stop/_status`, `qm_imaps_*` | ✅ minimal IMAP4rev1 gateway (STARTTLS + implicit TLS) → mailboxes = rooms |
+| `quackmail_imap` | `qm_imap_start/_stop/_status`, `qm_imaps_*` | ✅ IMAP4rev1 gateway (STARTTLS + implicit TLS) → mailboxes = rooms, with `NAMESPACE`, `UIDPLUS`, `MOVE`, RFC 4314 `ACL` and `IDLE` |
 | `quackmail_managesieve` | `qm_managesieve_start/_stop/_status` | ✅ ManageSieve (RFC 5804, port 4190) — install the Sieve filters the delivery path applies |
 | `quackmail_nntp` | `qm_nntp_start/_stop/_status`, `qm_nntps_*` | ✅ NNTP reader **and poster** (119/563; dev 1119/1563) — rooms are newsgroups |
 | `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
@@ -894,8 +894,9 @@ back to DNS, so a sign→verify round trip needs no resolver.
 
 ## Roadmap
 
-- **IMAP depth**: `BODYSTRUCTURE`, `IDLE`, `UIDPLUS`, `CONDSTORE`/`QRESYNC`,
-  `NAMESPACE`, and the extension batch (RFC 3501+).
+- **IMAP depth**: `BODYSTRUCTURE`, `CONDSTORE`/`QRESYNC`, server-side
+  `SORT`/`THREAD`, and the extension batch (RFC 3501+). `NAMESPACE`, `UIDPLUS`,
+  `MOVE`, `ACL` and `IDLE` are implemented.
 - **Citadel breadth**: `CONF`/config verbs, message expiry/purge (`EXPI`),
   instant messaging (`SEXP`/`GEXP`), address books / vCard rooms, and the
   Citadel network mesh (inter-node message replication).

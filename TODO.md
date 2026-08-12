@@ -10,6 +10,41 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **IMAP `IDLE`** (RFC 2177), and the tombstone bug finding it uncovered.
+  - [x] A parked client is told about new mail and expunges from *another*
+        session. The wake-up is a **poll of the store**, not a push from
+        whatever made the change: extensions share no C++ state, DuckDB has no
+        `LISTEN`/`NOTIFY`, and `RoomChangeToken` is one cheap aggregate over two
+        indexed columns. Reading it every two seconds is what turns polling
+        here into push *to the client*, which is the half that matters — the
+        alternative is every phone on the site opening a fresh connection every
+        few minutes to ask the same question. The comment says so rather than
+        implying it is event-driven.
+  - [x] `EXPUNGE` goes out highest-position-first, because each one renumbers
+        everything after it and a client applying them in ascending order
+        deletes the wrong messages. `EXISTS` follows, and only when the count is
+        not already what the client would have worked out from the expunges.
+  - [x] Capped at 29 minutes, then `* BYE` and close. There is no clean way to
+        end IDLE from the server side — the client is waiting to send `DONE` and
+        would match a tagged reply to a command it has not finished.
+  - [x] `NOOP` reports changes too. RFC 3501 §6.1.2 names that as the point of
+        the command, and a client that cannot IDLE polls with it; reporting
+        nothing was how such a client missed new mail until it re-selected.
+  - [x] **Three removal paths left no tombstone**, which the IDLE test found
+        immediately: IMAP `EXPUNGE`, IMAP `MOVE` and POP3 `DELE`-at-QUIT each
+        deleted the `citadel_room_msgs` row with SQL of their own, and so did
+        `citadel::MoveMessage` in core. `citadel_room_tombstones` exists
+        precisely because "removals left nothing behind at all, which is why a
+        deletion was invisible to any token derived from the store" — and a
+        message deleted in any ordinary mail client was still invisible to
+        JMAP's `Email/changes` and DAV's `sync-collection`. All four now go
+        through one `Unlink` that records the tombstone, and `test_imap.py` /
+        `test_pop3.py` assert it directly.
+  - [x] Driven through Python 3.14's `imaplib.idle()` — a client implementation
+        nobody here wrote — with a second connection appending and expunging
+        from another thread, because a single-session test cannot prove the
+        cross-session path at all.
+
 - [x] **iTIP/iMIP** (RFC 5546 + 6047) — an invitation sent to an attendee now
       arrives as mail, and their reply updates the event. Until this, an event
       with `ATTENDEE` properties was stored and served faithfully and nothing
@@ -697,7 +732,7 @@ The first came out of building 0.6.0 and is the one most likely to bite.
   `.Admin File` family), `C`hat, and help files.
 - XMPP, not implemented (Citadel does not have them either): MUC, offline
   storage, stored rosters/subscriptions, s2s.
-- IMAP depth: `IDLE`, `CONDSTORE`/`QRESYNC`, server-side sort/thread.
+- IMAP depth: `CONDSTORE`/`QRESYNC`, server-side sort/thread, `BODYSTRUCTURE`.
 - JMAP depth: `Email/import`, `SearchSnippet/get`, push over EventSource, and
   `Email/query` sorts other than newest-first. `Thread/get` scans the account
   rather than an index, because a thread id is a function of the References
