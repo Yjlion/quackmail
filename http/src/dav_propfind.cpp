@@ -158,6 +158,7 @@ bool EmitProp(Ctx &ctx, davx::Writer &w, const PropSource &src, const std::strin
 			if (is_calendar_coll) {
 				report(davx::kNsCalDav, "calendar-query");
 				report(davx::kNsCalDav, "calendar-multiget");
+				report(davx::kNsCalDav, "free-busy-query");
 			}
 			if (is_card_coll) {
 				report(davx::kNsCardDav, "addressbook-query");

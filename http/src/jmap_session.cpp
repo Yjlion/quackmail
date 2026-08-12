@@ -120,17 +120,29 @@ void GetSession(Ctx &ctx) {
 	accounts.Set(account, acct);
 
 	js::Value primary = js::Value::MakeObject();
+	// Core belongs here as much as the other two. A client picking an account
+	// out of this map has no reason to prefer one URN over another, and one
+	// that reads `core` first — jmapc does — finds nothing if we omit it.
+	primary.Set(kCoreCapability, account);
 	primary.Set(kMailCapability, account);
 	primary.Set(kSubmissionCapability, account);
+
+	// Absolute, because a client uses these verbatim rather than resolving them
+	// against the request URI the way it resolves a DAV href. A path here is not
+	// a URL, and every one of these three was one: `requests` refuses
+	// "/jmap/api" outright, so a real JMAP client got a working Session
+	// resource and then failed on its first method call, its first upload and
+	// its first download alike.
+	std::string base = SelfBaseUrl(ctx);
 
 	js::Value session = js::Value::MakeObject();
 	session.Set("capabilities", capabilities);
 	session.Set("accounts", accounts);
 	session.Set("primaryAccounts", primary);
 	session.Set("username", account);
-	session.Set("apiUrl", "/jmap/api");
-	session.Set("downloadUrl", "/jmap/download/{accountId}/{blobId}/{name}?accept={type}");
-	session.Set("uploadUrl", "/jmap/upload/{accountId}");
+	session.Set("apiUrl", base + "/jmap/api");
+	session.Set("downloadUrl", base + "/jmap/download/{accountId}/{blobId}/{name}?accept={type}");
+	session.Set("uploadUrl", base + "/jmap/upload/{accountId}");
 	// No push. A client polls Email/changes instead, which is what the state
 	// strings are for; saying so is how it is told not to open a stream that
 	// would never carry anything.

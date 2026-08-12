@@ -2,6 +2,7 @@
 #include "web_views.hpp"
 
 #include "quackmail/ical.hpp"
+#include "quackmail/itip.hpp"
 #include "quackmail/util.hpp"
 #include "quackmail/vcard.hpp"
 
@@ -228,6 +229,17 @@ void DavPut(Ctx &ctx, const DavPath &p) {
 	// already has rather than a second spelling of the same resource.
 	BindResourceName(ctx, c, p.name, uid);
 
+	// iMIP: tell the attendees. Only if this user organizes the event —
+	// itip::Notify checks — so an attendee storing their own copy does not mail
+	// everyone else. Best effort on purpose: the object *is* saved, and failing
+	// the PUT because a recipient's MX is down would leave the client believing
+	// the event was never created.
+	if (c.kind == DavKind::Calendar) {
+		quackmail::itip::Sent sent;
+		quackmail::itip::Notify(ctx.con, ctx.username, ctx.req.body, quackmail::itip::Method::Request,
+		                        "caldav", ctx.tls, sent);
+	}
+
 	DavStatus(ctx, existing >= 0 ? 204 : 201);
 	ctx.resp.SetHeader("ETag", ETagFor(msgnum));
 	if (existing < 0) {
@@ -260,6 +272,14 @@ void DavDelete(Ctx &ctx, const DavPath &p) {
 	if (!quackmail::citadel::CanPost(ctx.con, ctx.username, c.room)) {
 		DavStatus(ctx, 403);
 		return;
+	}
+
+	// The cancellation goes out *before* the delete, because it is built from
+	// the stored bytes and there is nothing to build it from afterwards.
+	if (c.kind == DavKind::Calendar) {
+		quackmail::itip::Sent sent;
+		quackmail::itip::Notify(ctx.con, ctx.username, o.body, quackmail::itip::Method::Cancel,
+		                        "caldav", ctx.tls, sent);
 	}
 
 	std::string err;

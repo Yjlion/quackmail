@@ -234,6 +234,13 @@ def main():
         # remaining message counts as seen.
         assert M.stat()[0] == 1, M.stat()
         M.quit()
+
+        # A DELE is a removal like any other, so it leaves a tombstone. This
+        # path used to unlink the pointer with SQL of its own, which meant a
+        # message deleted from a POP3 client stayed visible forever to JMAP's
+        # Email/changes and DAV's sync-collection over the same room.
+        tombs = con.execute("SELECT count(*) FROM citadel_room_tombstones").fetchone()[0]
+        assert tombs >= 1, "DELE left no tombstone, so no synchronizing client can see it"
     finally:
         con.execute("CALL qm_pop3_stop()").fetchall()
         con.execute("CALL qm_pop3s_stop()").fetchall()

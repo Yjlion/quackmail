@@ -116,16 +116,16 @@ void ApplyUpdate(Connection &con, const std::string &user, const Maildrop &drop)
 	if (room < 0) {
 		return;
 	}
-	auto del_ptr = con.Prepare("DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2");
 	auto del_flags = con.Prepare("DELETE FROM citadel_msg_flags WHERE msgnum = $1 AND lower(username) = lower($2)");
 	for (auto &e : drop.msgs) {
 		if (!e.deleted) {
 			continue;
 		}
-		if (!del_ptr->HasError()) {
-			duckdb::vector<Value> params = {Value::BIGINT(room), Value::BIGINT(e.msgnum)};
-			del_ptr->Execute(params, false);
-		}
+		// Through core's unlink, which is the one that records a tombstone.
+		// A DELE applied here is a removal like any other, and a JMAP or DAV
+		// client synchronizing the same room has to be able to see it.
+		std::string del_err;
+		citadel::DeleteMessage(con, room, e.msgnum, del_err);
 		if (!del_flags->HasError()) {
 			duckdb::vector<Value> params = {Value::BIGINT(e.msgnum), Value(user)};
 			del_flags->Execute(params, false);

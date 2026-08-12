@@ -397,6 +397,47 @@ def main():
         assert EVENT_UID in xml, "the in-range event is missing from the query result"
         assert FAR_UID not in xml, "the out-of-range event was returned anyway"
 
+        # ---- free-busy-query -------------------------------------------------
+        #
+        # The odd report out: it answers with a single text/calendar body rather
+        # than a multistatus, and that body is the whole contract. It says when
+        # somebody is unavailable and must not say what they are doing, which is
+        # what makes it answerable for a calendar the asker cannot read.
+        fb = ('<?xml version="1.0"?><C:free-busy-query '
+              'xmlns:C="urn:ietf:params:xml:ns:caldav">'
+              '<C:time-range start="20260801T000000Z" end="20260901T000000Z"/>'
+              "</C:free-busy-query>")
+        status, headers, body = d.report(calendar, fb)
+        assert status == 200, f"free-busy-query returned {status}: {body[:300]}"
+        assert headers.get("Content-Type", "").startswith("text/calendar"), \
+            f"free-busy came back as {headers.get('Content-Type')!r}"
+        assert "BEGIN:VFREEBUSY" in body, body[:300]
+        assert "FREEBUSY;FBTYPE=BUSY:20260815T170000Z/20260815T190000Z" in body, \
+            f"the busy period is wrong or missing: {body}"
+        for leak in ("SUMMARY", "Rooftop party", "VALARM", "X-CUSTOM-VENDOR-FIELD"):
+            assert leak not in body, f"free-busy leaked {leak!r}, which is the one thing it must not"
+        # The out-of-window event contributes nothing, same as the query filter.
+        assert "20271201" not in body, "an event outside the window was reported busy"
+
+        # An unbounded request is a way to make the server expand every
+        # recurrence it has, so it is refused by name rather than served.
+        status, _, body = d.report(
+            calendar,
+            '<?xml version="1.0"?><C:free-busy-query '
+            'xmlns:C="urn:ietf:params:xml:ns:caldav"/>')
+        assert status == 400, f"an unbounded free-busy-query returned {status}"
+        assert "valid-filter" in body, body[:300]
+
+        # It is a calendar report. Aimed at an address book it is refused, the
+        # same way calendar-query is.
+        status, _, _ = d.report(contacts, fb)
+        assert status == 403, "free-busy-query worked against an address book"
+
+        # And clients only attempt what the collection advertises.
+        status, _, xml = d.propfind(calendar, prop(["D:supported-report-set"]))
+        assert "free-busy-query" in xml, \
+            "free-busy-query is implemented but not advertised, so no client will try it"
+
         # ---- CardDAV ---------------------------------------------------------
         card_href = contacts + dav_name(CARD_UID) + ".vcf"
         status, _, _ = d.go("PUT", card_href, CARD.encode(), {"Content-Type": "text/vcard"})

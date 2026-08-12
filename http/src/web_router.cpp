@@ -15,6 +15,38 @@ namespace qmweb {
 
 namespace {
 
+// A Host header we are willing to put in front of a path and hand back as a
+// URL: a host name or IP literal, optionally with a port, and nothing else.
+// Anything carrying a slash, a space, an `@` or a control byte is refused
+// rather than sanitized — the only reason to send one is to make the result
+// parse as some other URL.
+bool ValidAuthority(const std::string &host) {
+	if (host.empty() || host.size() > 255) {
+		return false;
+	}
+	bool bracketed = host[0] == '[';
+	if (!bracketed && !std::isalnum((unsigned char)host[0])) {
+		return false;
+	}
+	size_t colons = 0;
+	for (unsigned char c : host) {
+		if (c == ':') {
+			colons++;
+			continue;
+		}
+		if (bracketed && (c == '[' || c == ']')) {
+			continue;
+		}
+		if (std::isalnum(c) || c == '.' || c == '-' || c == '_') {
+			continue;
+		}
+		return false;
+	}
+	// One colon separates a port. An IPv6 literal has several, but then it must
+	// be bracketed, and only the trailing colon is the separator.
+	return colons <= 1 || bracketed;
+}
+
 const std::vector<Route> &Routes() {
 	// Assembled once. Function-local statics are initialized thread-safely, and
 	// the table is read-only afterwards, so the connection threads can share it.
@@ -247,6 +279,38 @@ bool AdminReachable(Ctx &ctx, std::string &why) {
 }
 
 } // namespace
+
+std::string SelfBaseUrl(Ctx &ctx) {
+	// An explicit override wins. It is what a reverse proxy needs when it does
+	// not pass the front door's Host through, and the only way an operator can
+	// state a base path if the server is mounted under one.
+	std::string configured = ConfigStr(ctx.con, "qm_web_base_url", "");
+	while (!configured.empty() && configured.back() == '/') {
+		configured.pop_back();
+	}
+	if (!configured.empty()) {
+		return configured;
+	}
+	// Otherwise the authority the client itself reached us on. That is the only
+	// source that carries the **port**: c_fqdn does not, so deriving from it
+	// would describe every server not on 80/443 wrongly — which is most of them,
+	// including every one QUACKCIT_PORT_HTTP configures.
+	//
+	// The HTTPS redirect below deliberately refuses to do this, and the
+	// difference is real rather than an inconsistency. A Location is followed by
+	// a browser and can be cached, so a poisoned Host there is an open redirect.
+	// A URL emitted here goes back to the authenticated client that just sent
+	// the header, on the same connection, in a no-store response, for that
+	// client to call us on. Poisoning it poisons only the poisoner.
+	std::string host = ctx.req.Header("Host");
+	if (!ValidAuthority(host)) {
+		host = ConfigStr(ctx.con, "c_fqdn", "");
+		if (!ValidAuthority(host)) {
+			host = "localhost";
+		}
+	}
+	return std::string(ctx.tls ? "https://" : "http://") + host;
+}
 
 void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 	Ctx ctx(con, req, resp);

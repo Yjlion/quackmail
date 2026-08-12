@@ -55,44 +55,17 @@ bool HasCustomView(int default_view) {
 
 // ---- shared helpers ------------------------------------------------------
 
+// Both of these live in core now: inbound iTIP writes calendar objects into the
+// same rooms this module does, and a second spelling of the wrapper would leave
+// one of them unable to read what the other wrote.
 std::string ObjectBody(const Message &msg, const std::string &want_type) {
-	// A groupware object is stored as format_type 4 with one part. Anything else
-	// in the room is an ordinary message and is not ours to interpret.
-	if (msg.format_type != 4) {
-		return std::string();
-	}
-	auto entity = quackmail::mime::ParseEntity(msg.raw);
-	for (auto &part : quackmail::mime::FlattenParts(entity)) {
-		std::string type = quackmail::util::Lower(part.content_type);
-		if (type == want_type) {
-			return part.content;
-		}
-		// Older Citadel writes text/x-vcard; accept it on the way in and emit
-		// the registered type on the way out.
-		if (want_type == "text/vcard" && type == "text/x-vcard") {
-			return part.content;
-		}
-	}
-	return std::string();
+	return quackmail::citadel::ObjectBody(msg, want_type);
 }
 
 std::string WrapObject(Ctx &ctx, const std::string &content_type, const std::string &body,
                        const std::string &subject, const std::string &uid) {
-	std::string node = ConfigStr(ctx.con, "c_fqdn", "localhost");
-	std::string out;
-	out += "Content-Type: " + content_type + "; charset=utf-8\r\n";
-	out += "MIME-Version: 1.0\r\n";
-	out += "Content-Transfer-Encoding: 8bit\r\n";
-	out += "From: " + ctx.username + "@" + node + "\r\n";
-	out += "Subject: " + subject + "\r\n";
-	if (!uid.empty()) {
-		// A Message-ID derived from the object's own UID, so the same object
-		// keeps the same identity across edits for anything reading over IMAP.
-		out += "Message-ID: <" + uid + ">\r\n";
-	}
-	out += "\r\n";
-	out += body;
-	return out;
+	return quackmail::citadel::WrapObject(content_type, body, subject, uid, ctx.username,
+	                                      ConfigStr(ctx.con, "c_fqdn", "localhost"));
 }
 
 int64_t SaveObjectRaw(Ctx &ctx, const Room &room, const std::string &euid, const std::string &subject,

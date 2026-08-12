@@ -10,6 +10,224 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **Passwords are hashed with scrypt**, not one round of salted SHA-256.
+      The old scheme gave a leaked `quackmail_users` table up at GPU speed, and
+      the header said as much ("first-pass KDF; bcrypt/argon2 is a noted
+      hardening follow-up") — this is that follow-up.
+  - [x] scrypt (RFC 7914) through OpenSSL's `EVP_PBE_scrypt`: no new
+        dependency, and available since OpenSSL 1.1.0, where Argon2 needs 3.2
+        and would have broken portability to anything older. Memory-hardness is
+        the property that matters — PBKDF2 and bcrypt both fit in a GPU's
+        registers and scrypt does not. N=16384 r=8 p=1 is 16 MiB and ~80 ms per
+        verify, measured rather than guessed.
+  - [x] `algo` is self-describing (`scrypt$16384$8$1`), so the work factor can
+        be raised later without invalidating rows stored at the old one. It is
+        parsed with bounds and *refused* rather than clamped when absurd: the
+        value comes out of a database, and a row naming a huge N would let one
+        sign-in allocate the machine.
+  - [x] **Legacy rows still verify, and are rewritten on the next successful
+        sign-in.** Without that the change is close to worthless on an install
+        that already exists: every account created before it keeps the weak hash
+        until somebody happens to set a new password, which for most accounts is
+        never. The rewrite failing is ignored on purpose — the sign-in already
+        succeeded, and refusing it because a housekeeping UPDATE did not land
+        would turn hardening into an outage.
+  - [x] `test/sql/password.test` pins the legacy format with a vector computed
+        *independently* rather than by asking the server what it produces, and
+        the scrypt output against a vector from `hashlib.scrypt`. An upgrade
+        that locked every existing user out would be worse than the weakness it
+        fixed, so that path needs a test that fails loudly if it is ever
+        "tidied". `test_http.py` asserts the in-place upgrade end to end.
+  - [x] Contained entirely in `core/src/auth.cpp`: all twenty-odd call sites
+        already went through `auth::Verify`/`AddUser`, so no front-end changed.
+
+- [x] **IMAP `IDLE`** (RFC 2177), and the tombstone bug finding it uncovered.
+  - [x] A parked client is told about new mail and expunges from *another*
+        session. The wake-up is a **poll of the store**, not a push from
+        whatever made the change: extensions share no C++ state, DuckDB has no
+        `LISTEN`/`NOTIFY`, and `RoomChangeToken` is one cheap aggregate over two
+        indexed columns. Reading it every two seconds is what turns polling
+        here into push *to the client*, which is the half that matters — the
+        alternative is every phone on the site opening a fresh connection every
+        few minutes to ask the same question. The comment says so rather than
+        implying it is event-driven.
+  - [x] `EXPUNGE` goes out highest-position-first, because each one renumbers
+        everything after it and a client applying them in ascending order
+        deletes the wrong messages. `EXISTS` follows, and only when the count is
+        not already what the client would have worked out from the expunges.
+  - [x] Capped at 29 minutes, then `* BYE` and close. There is no clean way to
+        end IDLE from the server side — the client is waiting to send `DONE` and
+        would match a tagged reply to a command it has not finished.
+  - [x] `NOOP` reports changes too. RFC 3501 §6.1.2 names that as the point of
+        the command, and a client that cannot IDLE polls with it; reporting
+        nothing was how such a client missed new mail until it re-selected.
+  - [x] **Three removal paths left no tombstone**, which the IDLE test found
+        immediately: IMAP `EXPUNGE`, IMAP `MOVE` and POP3 `DELE`-at-QUIT each
+        deleted the `citadel_room_msgs` row with SQL of their own, and so did
+        `citadel::MoveMessage` in core. `citadel_room_tombstones` exists
+        precisely because "removals left nothing behind at all, which is why a
+        deletion was invisible to any token derived from the store" — and a
+        message deleted in any ordinary mail client was still invisible to
+        JMAP's `Email/changes` and DAV's `sync-collection`. All four now go
+        through one `Unlink` that records the tombstone, and `test_imap.py` /
+        `test_pop3.py` assert it directly.
+  - [x] Driven through Python 3.14's `imaplib.idle()` — a client implementation
+        nobody here wrote — with a second connection appending and expunging
+        from another thread, because a single-session test cannot prove the
+        cross-session path at all.
+
+- [x] **iTIP/iMIP** (RFC 5546 + 6047) — an invitation sent to an attendee now
+      arrives as mail, and their reply updates the event. Until this, an event
+      with `ATTENDEE` properties was stored and served faithfully and nothing
+      else happened.
+  - [x] `core/itip.{hpp,cpp}`. Everything except the two functions that need
+        site config is a **pure function of the calendar text**, so the rules
+        that fail *silently* against a real client are pinned in
+        `test/sql/itip.test` with no mail server: a `CANCEL` that does not bump
+        `SEQUENCE` is dropped as a stale duplicate and the meeting never leaves
+        the attendee's calendar; a `REPLY` must carry only the replying
+        attendee, because what the others said is not theirs to report; a
+        delayed `REPLY` to `SEQUENCE:1` must not overwrite an answer given to
+        `SEQUENCE:2`; and the organizer must not be mailed their own
+        invitation.
+  - [x] **Only the organizer sends.** `IsOrganizer` gates `Notify` before
+        anything is built, and requires the ORGANIZER's local part to *be* the
+        acting user on a domain this site hosts — checking only the domain
+        would let anyone with an account organize as anyone else. Without this,
+        an attendee saving their own copy of a shared event would mail
+        everybody, and every calendar would become a mailing list.
+  - [x] `Notify` charges `policy::CheckRate`/`RecordSend` itself.
+        `submission::Send` is quota-agnostic by contract, so a scheduling path
+        that skipped it would be a third door onto the mail path with the limit
+        switched off.
+  - [x] `DavPut` sends the REQUEST after the save, best effort — the object
+        *is* stored, and failing the PUT because a recipient's MX is down would
+        tell the client the event was never created. `DavDelete` sends the
+        CANCEL *before* the delete, because it is built from the stored bytes
+        and there are none afterwards.
+  - [x] **The first content-type hook on the delivery path.**
+        `deliver::LocalDeliver` parsed headers and never built the part tree;
+        it now looks for a `text/calendar` part carrying a `METHOD`. It sits
+        *after* Sieve has ruled, and only for recipients who actually kept the
+        message: a user who wrote `discard` for a sender meant it, and acting
+        on a scheduling message they told us to throw away would make the rule
+        a lie. A message that *was* kept gets the calendar effect whichever
+        folder it landed in. The guard is a substring check, because almost no
+        mail is a scheduling message and building the part tree for every
+        inbound message would be a tax on the whole path.
+  - [x] Inbound: REPLY folds the PARTSTAT into the organizer's stored copy,
+        REQUEST files the event onto the attendee's Calendar *in addition to*
+        delivering the mail, CANCEL marks the stored copy `STATUS:CANCELLED`
+        rather than deleting it — a meeting that vanishes without trace is
+        indistinguishable from one that was never there.
+  - [x] `citadel::WrapObject`/`ObjectBody` lifted out of `http/src/web_views.cpp`
+        into core, which now has one implementation. Inbound iTIP writes
+        calendar objects into the rooms CalDAV and the web UI read, and a
+        second spelling of that wrapper would leave one of them unable to read
+        what another wrote.
+  - [x] Still absent, deliberately: RFC 6638's scheduling collections
+        (`schedule-inbox-URL`, `schedule-outbox-URL`, `POST` to the outbox) and
+        with them the `calendar-auto-schedule` compliance token, which stays
+        off the `DAV:` header until they exist. iMIP is what makes this
+        interoperate with servers that are not this one; auto-schedule is a
+        convenience for clients that already speak to us.
+
+- [x] **CalDAV free/busy** (`CALDAV:free-busy-query`, RFC 4791 §7.10) — the
+      first half of DAV scheduling, and the half that stands on its own: it
+      needs no mail, no scheduling collections and no new compliance class.
+  - [x] `ical::Period`, `Busy`, `MergePeriods`, `CollectBusy`, `EmitFreeBusy`
+        in core. The rules are the spec's and every one of them is about what
+        *does not* count: `TRANSP:TRANSPARENT` contributes nothing (that is how
+        an all-day "on holiday" marker avoids blocking the week),
+        `STATUS:CANCELLED` contributes nothing, `STATUS:TENTATIVE` reports
+        under `FBTYPE=BUSY-TENTATIVE`, and only VEVENTs count at all.
+        Recurrences expand through `ical::Expand`, so the rule that draws the
+        calendar is the rule that decides availability.
+  - [x] Periods that merely *touch* merge into one. Two back-to-back meetings
+        are one unavailable stretch; reporting them separately invites a client
+        to offer the zero-length gap between them.
+  - [x] `ical::Item` gained `transp`, read-only: `FoldItemInto` deliberately
+        does not write it back, so TRANSP keeps living in the `Component` tree
+        and an edit cannot drop it.
+  - [x] The report answers with one `text/calendar` body rather than a
+        multistatus, which is the whole point — it carries intervals and
+        nothing else, so it is answerable for a calendar the asker cannot read.
+        `test_caldav.py` asserts the reply leaks no `SUMMARY`, `VALARM` or `X-`
+        property, which is the assertion that matters.
+  - [x] An unbounded request is refused with `CALDAV:valid-filter` rather than
+        served: "expand every recurrence you have" is a way to hang a thread,
+        not a question.
+  - [x] Added to `supported-report-set`, or no client would attempt it.
+  - [x] `qm_ical_freebusy(text, from, to)` puts the merging, the exclusions and
+        the recurrence expansion in `test/sql/ical.test`, where they are pinned
+        without a socket.
+  - [x] **The oracle is not an oracle here.** `citadeldotorg/citadel` ships
+        classic WebCit, which serves *GroupDAV* at `/groupdav/` — `DAV: 1`,
+        `Allow: OPTIONS, PROPFIND`, nothing else — and no CalDAV at all. There
+        is nothing to diff against; the RFCs and real clients are the authority
+        for everything under `/dav/`.
+
+- [x] **A real JMAP client was pointed at `/jmap/`, and it could not use it.**
+      The client is [`jmapc`](https://github.com/smkent/jmapc) 0.3.0 — chosen
+      because nobody here wrote it, which was the whole point of the backlog
+      item. It found what assertions written by the same person who chose the
+      behaviour could not.
+  - [x] **`apiUrl`, `uploadUrl` and `downloadUrl` were site-relative paths.**
+        A DAV href is a path the client resolves against the request URI, and
+        `dav.hpp` says so deliberately; RFC 8620's Session URLs are called
+        *verbatim*. `requests` refuses `"/jmap/api"` with "No scheme supplied",
+        so a client parsed the Session resource and then failed on its first
+        method call, its first upload and its first download alike. `/jmap/`
+        was unusable to any client that does not silently `urljoin`, and
+        `test_jmap.py` was asserting the broken value.
+  - [x] `qmweb::SelfBaseUrl` builds the origin from the authority the client
+        reached us on, because `c_fqdn` carries no port and would describe
+        every server not on 80/443 wrongly. The `Host` header is validated to
+        `host[:port]` and falls back to `c_fqdn` otherwise. This is the one
+        place that does derive a URL from `Host`, against the rule the HTTPS
+        redirect follows, and the comment says why the rule does not transfer:
+        a `Location` is followed and cacheable, where these go back to the
+        authenticated client that just sent the header, in a `no-store`
+        response, for it to call us on. `qm_web_base_url` overrides.
+  - [x] `primaryAccounts` named `mail` and `submission` but not `core`. jmapc
+        reads `core` first; a client may read any of the three.
+  - [x] `test/integration/test_jmap_client.py` — the probe kept as a test, so
+        the next regression is caught by somebody else's deserializer rather
+        than by ours. It skips itself when `jmapc` is not installed.
+        `test_jmap.py` gains the hostile-`Host` cases, which are the half a
+        client library cannot exercise.
+  - [x] Everything else jmapc touched worked unchanged: session discovery,
+        `Core/echo`, `Mailbox/get` with roles, `Email/set`/`query`/`get`
+        round-tripping through its models, `Identity/get`, blob upload and
+        download, and the per-account scoping on a blob. Verified against a
+        real `deploy/quackcit.sh start` instance as well as the harness.
+
+- [x] **The `k` right delegates room creation.** Left out of phase 4
+      deliberately: `k` ("create rooms under this one") was in the rights
+      legend but nothing read it, so a room administrator could delegate
+      *access* but not *creation*.
+  - [x] `citadel::CreatableFloors` / `CanCreateRoomOnFloor` — a caller may
+        create when their access level clears `qm_room_create_axlevel` (the
+        existing site-wide gate, unchanged), or they hold `k` on some room they
+        can see on that floor. A stored ACL row and an aide's blanket grant
+        both count. Personal rooms are skipped on purpose: their owner always
+        holds every right including `k`, and every user has one on floor 0, so
+        counting those would hand every logged-in user the run of the Main
+        Floor.
+  - [x] the answer is cheap when it is "no", because the sidebar asks it on
+        every page render. `EffectiveRights` only ever produces `k` for a
+        non-aide from a *stored* row — the derived set is `lrs`/`lrswi` — so
+        one query over `citadel_room_acl` settles the common case without
+        touching a room. `ListRooms` still decides visibility, so a `k` grant
+        on a room the caller cannot see stays unusable.
+  - [x] `/bbs/new`'s floor picker offers every floor to someone who clears the
+        axlevel gate, and only the floors a `k` grant opens to everyone else;
+        `POST` re-checks the specific floor submitted, so the picker being
+        right is a courtesy and not the enforcement.
+  - [x] `test_roomadmin.py`: the axlevel gate raised to aide-only so the
+        axlevel path cannot be what is actually passing, a second floor a `k`
+        grant does not reach, and revocation closing the door again.
+
 - [x] **The sidebar counts what is unread, and a message page moves.** The last
       two gaps from the web review.
   - [x] `SidebarFor` emits the `.count` span `qc.css` had described since the
@@ -587,21 +805,20 @@ listeners; the backlog below leads with what that work left open.
 
 ## Backlog
 
-The first two came out of building 0.6.0 and are the ones most likely to bite.
+The first came out of building 0.6.0 and is the one most likely to bite.
 
-- **Point a real JMAP client at `/jmap/`.** The DAV half was validated against
-  `caldav` 3.2.1 and vdirsyncer 0.20, and that is what caught a design error
-  (resource names were required to equal the object UID; vdirsyncer names them
-  with its own UUID) that `test_caldav.py` had been passing over the whole time.
-  JMAP has had no equivalent probe, so it rests entirely on assertions written
-  by the same person who chose the behaviour — the exact footing that already
-  proved wrong once. There is no widely-deployed JMAP client to point at it,
-  which is the problem rather than an excuse.
-- **DAV scheduling**, which a groupware server is expected to have and this one
-  does not: free-busy (`CALDAV:free-busy-query`, `schedule-outbox`), and iTIP/
-  iMIP so an invitation sent to an attendee arrives as mail and their reply
-  updates the event. Today an event with `ATTENDEE` properties is stored and
-  served faithfully and nothing else happens.
+- **RFC 6638 auto-scheduling**, the last of DAV scheduling: the
+  `schedule-inbox-URL` / `schedule-outbox-URL` collections, a `POST` to the
+  outbox (which is how a client asks for somebody else's free/busy over iTIP
+  rather than through the `free-busy-query` REPORT), `schedule-default-
+  calendar-URL`, the `CALDAV:schedule-send` / `schedule-deliver` privileges,
+  and the `calendar-auto-schedule` compliance token — which stays off the
+  `DAV:` header until all of that exists, because advertising it is a promise
+  clients act on. `ParseDavPath` has no room for the two new collections and
+  `DavHandler` has no `POST` branch, so both are the first work. iMIP already
+  ships (above), which is the half that interoperates with servers other than
+  this one; this is the half that is a convenience for clients already talking
+  to us.
 
 - DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
   `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the
@@ -610,15 +827,12 @@ The first two came out of building 0.6.0 and are the ones most likely to bite.
 - Web: the wiki view (`VIEW_WIKI`/`WIKIMD`), which needs versioning, a
   name→euid resolver and a markdown renderer — deferred out of phase 2b and
   still the largest single gap against WebCit.
-- Room administration, left out of phase 4 deliberately: `k` ("create rooms
-  under this one") is in the rights legend but nothing reads it, so a room
-  administrator cannot yet delegate *creation* the way they delegate access.
 - Telnet BBS, still to fill in from `citadel.rc`: file transfer (the
   `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR` room flags and the `.Read file` /
   `.Admin File` family), `C`hat, and help files.
 - XMPP, not implemented (Citadel does not have them either): MUC, offline
   storage, stored rosters/subscriptions, s2s.
-- IMAP depth: `IDLE`, `CONDSTORE`/`QRESYNC`, server-side sort/thread.
+- IMAP depth: `CONDSTORE`/`QRESYNC`, server-side sort/thread, `BODYSTRUCTURE`.
 - JMAP depth: `Email/import`, `SearchSnippet/get`, push over EventSource, and
   `Email/query` sorts other than newest-first. `Thread/get` scans the account
   rather than an index, because a thread id is a function of the References
@@ -632,5 +846,4 @@ The first two came out of building 0.6.0 and are the ones most likely to bite.
   mail keeps an authenticated chain; MTA-STS / DANE for outbound transport.
 - Sieve extensions beyond the current core + `reject`/`envelope`/`body`/`copy`:
   variables, regex, vacation, imap4flags.
-- Hardening: SCRAM-SHA-256, bcrypt/argon2 password hashing, charset transcoding
-  beyond UTF-8/Latin-1.
+- Hardening: SCRAM-SHA-256, charset transcoding beyond UTF-8/Latin-1.

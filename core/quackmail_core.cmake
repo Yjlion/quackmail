@@ -75,6 +75,7 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/contentline.cpp
         ${QUACKMAIL_CORE_DIR}/src/vcard.cpp
         ${QUACKMAIL_CORE_DIR}/src/ical.cpp
+        ${QUACKMAIL_CORE_DIR}/src/itip.cpp
         ${QUACKMAIL_CORE_DIR}/src/vnote.cpp
         ${QUACKMAIL_CORE_DIR}/src/mime_build.cpp
         ${QUACKMAIL_CORE_DIR}/src/html_sanitize.cpp

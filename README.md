@@ -56,7 +56,7 @@ extension.
 | `quackmail_smtp_in` | `qm_smtp_in_start/_stop/_status`, `qm_lmtp_*` | ✅ inbound MX with SPF/DKIM/DMARC/DNSBL, hosted domains, aliases and allow/block rules — plus an LMTP local-injection listener (24; dev 2033) |
 | `quackmail_smtp_out` | `qm_smtp_submission_start/_stop/_status`, `qm_smtp_smtps_*`, `qm_smtp_relay_*` | ✅ authenticated submission (587/465; dev 2587/2465) with DKIM signing and per-user rate limiting, plus the outbound queue drainer |
 | `quackmail_pop3` | `qm_pop3_start/_stop/_status`, `qm_pop3s_*` | ✅ POP3 gateway (STLS + implicit TLS) → serves each user's Mail room |
-| `quackmail_imap` | `qm_imap_start/_stop/_status`, `qm_imaps_*` | ✅ minimal IMAP4rev1 gateway (STARTTLS + implicit TLS) → mailboxes = rooms |
+| `quackmail_imap` | `qm_imap_start/_stop/_status`, `qm_imaps_*` | ✅ IMAP4rev1 gateway (STARTTLS + implicit TLS) → mailboxes = rooms, with `NAMESPACE`, `UIDPLUS`, `MOVE`, RFC 4314 `ACL` and `IDLE` |
 | `quackmail_managesieve` | `qm_managesieve_start/_stop/_status` | ✅ ManageSieve (RFC 5804, port 4190) — install the Sieve filters the delivery path applies |
 | `quackmail_nntp` | `qm_nntp_start/_stop/_status`, `qm_nntps_*` | ✅ NNTP reader **and poster** (119/563; dev 1119/1563) — rooms are newsgroups |
 | `quackmail_xmpp` | `qm_xmpp_start/_stop/_status`, `qm_xmpps_*` | ✅ XMPP c2s (5222/5223; dev 15222/15223) — instant messages bridged to Citadel's |
@@ -525,6 +525,18 @@ being reachable at all.
   listed in `qm_web_trusted_proxies` — `X-Forwarded-Proto` is honoured only from
   a peer on that list. Sessions are pinned to the transport they were minted
   over either way, so nothing is laundered between the two listeners.
+
+  One thing does build a URL from the `Host` header, and the difference is
+  worth stating rather than leaving as an apparent inconsistency: JMAP's
+  Session resource (`apiUrl`, `uploadUrl`, `downloadUrl`). A client calls those
+  verbatim instead of resolving them against the request the way it resolves a
+  DAV href, so a path is not a URL there — and `c_fqdn` carries no port, which
+  would describe every server not on 80/443 wrongly. A `Location` is followed
+  by a browser and can be cached; these go back to the authenticated client
+  that just sent the header, on the same connection, in a `no-store` response,
+  for that client to call us on. The header is still validated to
+  `host[:port]` and falls back to `c_fqdn` otherwise, and `qm_web_base_url`
+  overrides the whole thing for a reverse proxy that rewrites `Host`.
 - **Form origins are unrestricted until you restrict them** — *relaxed by
   default*. `qm_web_origins` is a comma-separated list of host globs allowed to
   submit forms; while it is empty, any origin may. This server is reached by
@@ -698,8 +710,21 @@ SELECT epoch, iso FROM qm_parse_date('Mon, 02 Jan 2006 15:04:05 -0700');
 
 TLS uses the **system OpenSSL** (`libssl-dev`); DuckDB's bundled mbedTLS is
 crypto-only. SASL `PLAIN`/`LOGIN` (SMTP) is offered only after TLS; credentials
-are verified against `quackmail_users` (salted SHA-256, constant-time compare).
-The native Citadel `USER`/`PASS` verify against the same table.
+are verified against `quackmail_users` with a constant-time compare. The native
+Citadel `USER`/`PASS` verify against the same table.
+
+Passwords are stored with **scrypt** (RFC 7914, N=16384 r=8 p=1 — 16 MiB and
+~80 ms per check), through OpenSSL's `EVP_PBE_scrypt`. Memory-hardness is the
+point: PBKDF2 and bcrypt both fit in a GPU's registers, scrypt does not. The
+`algo` column is self-describing (`scrypt$16384$8$1`), so the work factor can
+be raised later without invalidating rows already stored at the old one.
+
+This replaced a single round of salted SHA-256, which a leaked
+`quackmail_users` table gave up at GPU speed. Rows written by the old scheme
+**still verify**, and are rewritten with scrypt on their owner's next
+successful sign-in — otherwise an existing install would keep the weak hash for
+every account until somebody happened to change a password, which for most
+accounts is never.
 
 ## Build
 
@@ -901,7 +926,21 @@ python3 test/integration/test_smtp_in.py     # MX: recipient validation, domains
 python3 test/integration/test_smtp_policy.py # outbound DKIM signing + per-user rate limiting
 python3 test/integration/test_lmtp.py        # LMTP per-recipient replies, no spam checks
 python3 test/integration/test_managesieve.py # ManageSieve round trip, then the filter routes delivery
+python3 test/integration/test_itip.py        # scheduling: PUT mails an invitation, a reply updates the event
+
+pip install jmapc                            # optional; the test below skips itself without it
+python3 test/integration/test_jmap_client.py # JMAP driven by a third-party client library
 ```
+
+Most integration tests assert the wire format this server produces, which
+cannot catch a format that is self-consistently wrong. `test_caldav.py` passed
+for months while real clients could not sync, because resource names were
+required to equal the object UID and vdirsyncer names them itself.
+`test_jmap_client.py` is the answer to that class of bug for JMAP: every
+request goes through `jmapc`'s own models, so a response shape somebody else's
+deserializer rejects fails without anyone having thought to assert it. It found
+that all three Session URLs were relative paths, which made `/jmap/` unusable
+to any real client.
 
 The DKIM tests run entirely offline: `dkim::Verify` takes an injectable key
 lookup, and `policy::DkimKeyLookup` resolves locally stored keys before falling
@@ -909,16 +948,17 @@ back to DNS, so a sign→verify round trip needs no resolver.
 
 ## Roadmap
 
-- **IMAP depth**: `BODYSTRUCTURE`, `IDLE`, `UIDPLUS`, `CONDSTORE`/`QRESYNC`,
-  `NAMESPACE`, and the extension batch (RFC 3501+).
+- **IMAP depth**: `BODYSTRUCTURE`, `CONDSTORE`/`QRESYNC`, server-side
+  `SORT`/`THREAD`, and the extension batch (RFC 3501+). `NAMESPACE`, `UIDPLUS`,
+  `MOVE`, `ACL` and `IDLE` are implemented.
 - **Citadel breadth**: `CONF`/config verbs, message expiry/purge (`EXPI`),
   instant messaging (`SEXP`/`GEXP`), address books / vCard rooms, and the
   Citadel network mesh (inter-node message replication).
 - **SMTP**: PIPELINING (2920), CHUNKING/BDAT (3030), and DSN (3461).
 - **Mail authentication depth**: DMARC aggregate (`rua`) reporting, ARC (8617)
   so forwarded mail survives, and MTA-STS / DANE for outbound transport.
-- **Hardening**: SCRAM-SHA-256 SASL (5802/7677), bcrypt/argon2 hashing, and
-  charset transcoding beyond UTF-8/Latin-1.
+- **Hardening**: SCRAM-SHA-256 SASL (5802/7677) and charset transcoding beyond
+  UTF-8/Latin-1. Password hashing is scrypt (see [TLS & AUTH](#tls--auth)).
 - **Sieve**: the variables (5229), regex, vacation (5230) and imap4flags (5232)
   extensions; the parser covers the RFC 5228 core plus `reject`, `envelope`,
   `body` and `copy` today.

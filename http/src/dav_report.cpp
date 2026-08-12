@@ -312,6 +312,50 @@ void DavReport(Ctx &ctx, const DavPath &p) {
 		return;
 	}
 
+	// ---- free-busy-query --------------------------------------------------
+	//
+	// RFC 4791 §7.10, and the odd one out: every other report answers with a
+	// multistatus, this one answers with a single text/calendar body. That is
+	// the point of it — the reply carries intervals and nothing else, so it
+	// says when somebody is unavailable without saying what they are doing.
+	if (root.Is(davx::kNsCalDav, "free-busy-query")) {
+		if (!is_cal) {
+			DavStatus(ctx, 403);
+			return;
+		}
+		const davx::Node *tr = root.Child(davx::kNsCalDav, "time-range");
+		int64_t from = 0;
+		int64_t to = 0;
+		bool have_from = tr && ParseIcalUtc(tr->Attr("start"), from);
+		bool have_to = tr && ParseIcalUtc(tr->Attr("end"), to);
+		if (!have_from && !have_to) {
+			// Unbounded means "read the whole calendar and expand every
+			// recurrence in it", which is a request to hang a thread rather than
+			// a question. The spec allows refusing it and names the condition.
+			DavError(ctx, 400, davx::kNsCalDav, "valid-filter");
+			return;
+		}
+		if (!have_to) {
+			to = from + 3650LL * 86400; // the same "open ended" the query filter uses
+		}
+		if (!have_from) {
+			from = to - 3650LL * 86400;
+		}
+		if (to <= from) {
+			DavError(ctx, 400, davx::kNsCalDav, "valid-filter");
+			return;
+		}
+
+		ical::Busy busy;
+		for (const auto &o : ListObjects(ctx, c)) {
+			ical::CollectBusy(o.body, from, to, busy);
+		}
+		std::string body = ical::EmitFreeBusy(from, to, busy, "", "", "");
+		ctx.resp.Bytes(body, "text/calendar; charset=utf-8");
+		ctx.resp.status = 200;
+		return;
+	}
+
 	// ---- multiget --------------------------------------------------------
 	const bool cal_multiget = root.Is(davx::kNsCalDav, "calendar-multiget");
 	const bool card_multiget = root.Is(davx::kNsCardDav, "addressbook-multiget");

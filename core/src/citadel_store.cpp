@@ -1423,6 +1423,63 @@ bool CanAdminister(Connection &con, const std::string &username, const Room &roo
 	return EffectiveRights(con, username, room).find('a') != std::string::npos;
 }
 
+std::vector<int64_t> CreatableFloors(Connection &con, const std::string &username) {
+	std::vector<int64_t> out;
+	if (username.empty() || IsAnyone(username)) {
+		return out;
+	}
+	// The cheap question first, because the answer is almost always "none" and
+	// this runs on every page render (the sidebar decides whether to offer
+	// "Create a room"). For anyone who is neither an aide nor a mailbox owner,
+	// EffectiveRights only ever produces `k` from a *stored* row — the derived
+	// set is "lrs"/"lrswi" — so a caller with no such row cannot hold it
+	// anywhere, and one query settles it without touching a single room.
+	bool aide = GetAxLevel(con, username) >= kAideAxLevel;
+	std::vector<int64_t> granted;
+	if (!aide) {
+		auto r = ExecP(con,
+		               "SELECT DISTINCT room_num FROM citadel_room_acl "
+		               "WHERE rights LIKE '%k%' "
+		               "AND (lower(identifier) = lower($1) OR lower(identifier) = 'anyone')",
+		               {Value(username)});
+		if (!r) {
+			return out;
+		}
+		auto &mat = r->Cast<MaterializedQueryResult>();
+		if (mat.RowCount() == 0) {
+			return out;
+		}
+		for (idx_t i = 0; i < mat.RowCount(); i++) {
+			granted.push_back(mat.GetValue(0, i).GetValue<int64_t>());
+		}
+	}
+	// ListRooms already carries the visibility rules (an invitation-only room
+	// found through this username's own `l` grant, never someone else's), so
+	// reusing it here is what keeps a `k` grant on a room the caller cannot even
+	// see from being usable. Personal rooms are skipped deliberately: their
+	// owner always holds every right, including `k`, and every user has one on
+	// floor 0 — counting those would hand every logged-in user the run of the
+	// Main Floor regardless of qm_room_create_axlevel.
+	for (auto &room : ListRooms(con, username, -1, "all")) {
+		if (room.mailbox_owner != 0) {
+			continue;
+		}
+		if (!aide && std::find(granted.begin(), granted.end(), room.room_num) == granted.end()) {
+			continue;
+		}
+		if (std::find(out.begin(), out.end(), room.floor_num) == out.end()) {
+			out.push_back(room.floor_num);
+		}
+	}
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
+bool CanCreateRoomOnFloor(Connection &con, const std::string &username, int64_t floor) {
+	auto floors = CreatableFloors(con, username);
+	return std::find(floors.begin(), floors.end(), floor) != floors.end();
+}
+
 int64_t ResolveMailRoom(Connection &con, const std::string &local_part) {
 	static const char kPrefix[] = "room_";
 	const size_t kPrefixLen = sizeof(kPrefix) - 1;
@@ -1598,11 +1655,7 @@ bool MessageInRoom(Connection &con, int64_t room_num, int64_t msgnum) {
 	return !v.IsNull();
 }
 
-bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::string &err) {
-	if (!MessageInRoom(con, room_num, msgnum)) {
-		err = "message not found in this room";
-		return false;
-	}
+bool Unlink(Connection &con, int64_t room_num, int64_t msgnum, std::string &err) {
 	// The euid is read before the unlink, because the tombstone is keyed by it:
 	// a synchronizing client asks about resources, and a resource is an euid.
 	std::string euid;
@@ -1631,6 +1684,14 @@ bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::strin
 		       Value::BIGINT(msgnum), Value::BIGINT((int64_t)std::time(nullptr))});
 	}
 	return true;
+}
+
+bool DeleteMessage(Connection &con, int64_t room_num, int64_t msgnum, std::string &err) {
+	if (!MessageInRoom(con, room_num, msgnum)) {
+		err = "message not found in this room";
+		return false;
+	}
+	return Unlink(con, room_num, msgnum, err);
 }
 
 int64_t RoomChangeToken(Connection &con, int64_t room_num) {
@@ -1749,9 +1810,11 @@ bool MoveMessage(Connection &con, int64_t from_room, int64_t to_room, int64_t ms
 	ExecP(con, "UPDATE citadel_rooms SET highest_msg = greatest(highest_msg, $2) WHERE room_num = $1",
 	      {Value::BIGINT(to_room), Value::BIGINT(msgnum)});
 	if (!is_copy) {
-		if (!ExecP(con, "DELETE FROM citadel_room_msgs WHERE room_num = $1 AND msgnum = $2",
-		           {Value::BIGINT(from_room), Value::BIGINT(msgnum)})) {
-			err = "delete failed";
+		// Through the same unlink a delete uses, so the source room gets its
+		// tombstone. A move *is* a removal as far as the source is concerned,
+		// and a synchronizing client that never hears about it keeps showing a
+		// message that is no longer there.
+		if (!Unlink(con, from_room, msgnum, err)) {
 			return false;
 		}
 	}

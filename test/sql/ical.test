@@ -216,3 +216,80 @@ SELECT qm_ical_vtimezone('America/New_York', 2026, 2026) LIKE '%TZOFFSETTO:-0400
        qm_ical_vtimezone('Mars/Olympus', 2026, 2026);
 ----
 true	NULL
+
+# ---- free/busy -------------------------------------------------------------
+# The absences are the contract here. A free/busy reply says when somebody is
+# unavailable and nothing else, so what it *leaves out* is as load-bearing as
+# what it reports, and none of it is visible in an interval list a reader could
+# eyeball.
+
+# Two meetings, 09:00-10:00 and 10:00-11:00 on the same day. They touch, so they
+# are one unavailable stretch: reporting two would invite a client to offer the
+# zero-length gap between them.
+query III
+SELECT fb LIKE '%BEGIN:VFREEBUSY%',
+       fb LIKE '%FREEBUSY;FBTYPE=BUSY:20260315T090000Z/20260315T110000Z%',
+       fb NOT LIKE '%SUMMARY%'   -- intervals only; never what the meeting is
+FROM (SELECT qm_ical_freebusy(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\n' ||
+  E'BEGIN:VEVENT\r\nUID:a@x\r\nDTSTAMP:20260301T120000Z\r\n' ||
+  E'DTSTART:20260315T090000Z\r\nDTEND:20260315T100000Z\r\nSUMMARY:Standup\r\nEND:VEVENT\r\n' ||
+  E'BEGIN:VEVENT\r\nUID:b@x\r\nDTSTAMP:20260301T120000Z\r\n' ||
+  E'DTSTART:20260315T100000Z\r\nDTEND:20260315T110000Z\r\nSUMMARY:Review\r\nEND:VEVENT\r\n' ||
+  E'END:VCALENDAR\r\n', 1773532800, 1773792000) AS fb);
+----
+true	true	true
+
+# TRANSP:TRANSPARENT and STATUS:CANCELLED contribute nothing. The property
+# exists precisely so an entry can sit on a calendar without claiming the
+# person — an all-day "on holiday" marker is the usual one — and a cancelled
+# meeting is not a commitment. Both events below span the whole window, so if
+# either counted there would be no free time at all.
+query II
+SELECT fb NOT LIKE '%FREEBUSY;%',   -- the property, not BEGIN:VFREEBUSY
+       fb LIKE '%DTSTART:20260315T000000Z%'
+FROM (SELECT qm_ical_freebusy(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\n' ||
+  E'BEGIN:VEVENT\r\nUID:c@x\r\nDTSTAMP:20260301T120000Z\r\nTRANSP:TRANSPARENT\r\n' ||
+  E'DTSTART:20260315T000000Z\r\nDTEND:20260316T000000Z\r\nSUMMARY:On leave\r\nEND:VEVENT\r\n' ||
+  E'BEGIN:VEVENT\r\nUID:d@x\r\nDTSTAMP:20260301T120000Z\r\nSTATUS:CANCELLED\r\n' ||
+  E'DTSTART:20260315T000000Z\r\nDTEND:20260316T000000Z\r\nSUMMARY:Called off\r\nEND:VEVENT\r\n' ||
+  E'END:VCALENDAR\r\n', 1773532800, 1773619200) AS fb);
+----
+true	true
+
+# STATUS:TENTATIVE is busy under a different FBTYPE, because a client draws a
+# maybe differently from a commitment.
+query II
+SELECT fb LIKE '%FBTYPE=BUSY-TENTATIVE:20260315T140000Z/20260315T150000Z%',
+       fb NOT LIKE '%FBTYPE=BUSY:%'
+FROM (SELECT qm_ical_freebusy(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\n' ||
+  E'BEGIN:VEVENT\r\nUID:e@x\r\nDTSTAMP:20260301T120000Z\r\nSTATUS:TENTATIVE\r\n' ||
+  E'DTSTART:20260315T140000Z\r\nDTEND:20260315T150000Z\r\nSUMMARY:Maybe\r\nEND:VEVENT\r\n' ||
+  E'END:VCALENDAR\r\n', 1773532800, 1773619200) AS fb);
+----
+true	true
+
+# A recurring meeting is busy every week, not once — the answer comes from
+# ical::Expand, so the same rule that draws the calendar decides availability.
+# A window covering three Sundays must report three periods, and the last one
+# must be clipped to the window rather than running past it.
+#
+# Unfolded first: three periods on one property overrun 75 octets, so RFC 5545
+# folding splits the line and a client stitches it back. Asserting the folded
+# bytes would pin the column the fold happens to land in.
+query III
+SELECT replace(fb, E'\r\n ', '') LIKE '%20260315T090000Z/20260315T100000Z,20260322T090000Z/20260322T100000Z,20260329T090000Z/20260329T093000Z%',
+       fb LIKE '%DTEND:20260329T093000Z%',
+       -- An empty calendar is "free for the whole window", which RFC 5545
+       -- §3.6.4 says is a real answer: a VFREEBUSY with no FREEBUSY property.
+       qm_ical_freebusy(E'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n', 0, 3600) NOT LIKE '%FREEBUSY;%'
+FROM (SELECT qm_ical_freebusy(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\n' ||
+  E'BEGIN:VEVENT\r\nUID:f@x\r\nDTSTAMP:20260301T120000Z\r\n' ||
+  E'DTSTART:20260315T090000Z\r\nDTEND:20260315T100000Z\r\n' ||
+  E'RRULE:FREQ=WEEKLY\r\nSUMMARY:Weekly\r\nEND:VEVENT\r\n' ||
+  E'END:VCALENDAR\r\n', 1773532800, 1774776600) AS fb);
+----
+true	true	true

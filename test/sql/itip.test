@@ -1,0 +1,189 @@
+# name: test/sql/itip.test
+# description: iTIP scheduling messages (RFC 5546) — requests, cancellations and replies
+# group: [quackmail]
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# The rules here are easy to state and easy to get subtly wrong, and every one
+# of them fails *silently* in a way only a real client would show you: a CANCEL
+# without a SEQUENCE bump is dropped as a stale duplicate, a REPLY carrying the
+# other attendees reads as answering on their behalf, and a late REPLY applied
+# over a newer one loses an answer nobody can recover. All of it is a pure
+# function of the calendar text, so all of it is pinned without a mail server.
+
+# ---- who gets told ---------------------------------------------------------
+# The organizer is normally on their own ATTENDEE list, and mailing them their
+# own invitation is the obvious wrong answer. Duplicates collapse, and a
+# CAL-ADDRESS we cannot post to is not a recipient at all.
+
+query III
+SELECT qm_itip_recipients(ics, 'mailto:ada@example.com'),
+       qm_itip_recipients(ics, ''),
+       qm_itip_recipients(ics, 'ADA@EXAMPLE.COM')
+FROM (SELECT E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m1@x\r\n' ||
+             E'DTSTAMP:20260301T120000Z\r\nDTSTART:20260315T090000Z\r\n' ||
+             E'ORGANIZER:mailto:ada@example.com\r\n' ||
+             E'ATTENDEE;PARTSTAT=ACCEPTED:mailto:ada@example.com\r\n' ||
+             E'ATTENDEE;RSVP=TRUE:mailto:bob@example.com\r\n' ||
+             E'ATTENDEE:MAILTO:Bob@Example.COM\r\n' ||
+             E'ATTENDEE:urn:uuid:4a3f-not-a-mailbox\r\n' ||
+             E'END:VEVENT\r\nEND:VCALENDAR\r\n' AS ics);
+----
+bob@example.com	ada@example.com,bob@example.com	bob@example.com
+
+# ---- REQUEST ---------------------------------------------------------------
+# An invitation is the event as it stands with a METHOD on it. Everything the
+# flat Item view cannot hold has to survive, because the invitation is what the
+# attendee's calendar becomes — losing the alarm here loses it for them too.
+
+query IIII
+SELECT req LIKE '%METHOD:REQUEST%',
+       req LIKE '%BEGIN:VALARM%',
+       req LIKE '%X-PHONE-WROTE-THIS:keep me%',
+       req LIKE '%ATTENDEE;RSVP=TRUE:mailto:bob@example.com%'
+FROM (SELECT qm_itip_request(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m2@x\r\n' ||
+  E'DTSTAMP:20260301T120000Z\r\nDTSTART:20260315T090000Z\r\nSUMMARY:Design review\r\n' ||
+  E'ORGANIZER:mailto:ada@example.com\r\nATTENDEE;RSVP=TRUE:mailto:bob@example.com\r\n' ||
+  E'X-PHONE-WROTE-THIS:keep me\r\n' ||
+  E'BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n' ||
+  E'END:VEVENT\r\nEND:VCALENDAR\r\n') AS req);
+----
+true	true	true	true
+
+# Nothing schedulable is not a scheduling message. A calendar holding only a
+# VTIMEZONE, or nothing at all, yields NULL rather than an empty invitation.
+query II
+SELECT qm_itip_request(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n'),
+       qm_itip_cancel(E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n');
+----
+NULL	NULL
+
+# ---- CANCEL ----------------------------------------------------------------
+# STATUS:CANCELLED and a bumped SEQUENCE, both. Without the bump the message is
+# indistinguishable from a stale copy of the invitation and clients drop it, so
+# the meeting stays on the attendee's calendar forever.
+
+query IIII
+SELECT c LIKE '%METHOD:CANCEL%',
+       c LIKE '%STATUS:CANCELLED%',
+       c LIKE '%SEQUENCE:3%',
+       c NOT LIKE '%SEQUENCE:2%'
+FROM (SELECT qm_itip_cancel(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m3@x\r\n' ||
+  E'DTSTAMP:20260301T120000Z\r\nDTSTART:20260315T090000Z\r\nSEQUENCE:2\r\n' ||
+  E'ORGANIZER:mailto:ada@example.com\r\nATTENDEE:mailto:bob@example.com\r\n' ||
+  E'END:VEVENT\r\nEND:VCALENDAR\r\n') AS c);
+----
+true	true	true	true
+
+# An event that never carried a SEQUENCE starts at 0, so its cancellation is 1.
+query I
+SELECT qm_itip_cancel(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m4@x\r\n' ||
+  E'DTSTAMP:20260301T120000Z\r\nDTSTART:20260315T090000Z\r\n' ||
+  E'ORGANIZER:mailto:ada@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n') LIKE '%SEQUENCE:1%';
+----
+true
+
+# ---- REPLY -----------------------------------------------------------------
+# A reply speaks for exactly one attendee. Carrying the others would be this
+# attendee reporting what everybody else said, which is not theirs to report
+# and which several clients read as an attempt to answer on their behalf.
+
+query IIIII
+SELECT r LIKE '%METHOD:REPLY%',
+       r LIKE '%ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.com%',
+       r NOT LIKE '%carol@example.com%',
+       r NOT LIKE '%RSVP%',            -- answered, so stop asking
+       r LIKE '%ORGANIZER:mailto:ada@example.com%'
+FROM (SELECT qm_itip_reply(ics, 'bob@example.com', 'declined') AS r
+      FROM (SELECT E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m5@x\r\n' ||
+                   E'DTSTAMP:20260301T120000Z\r\nDTSTART:20260315T090000Z\r\nSEQUENCE:1\r\n' ||
+                   E'ORGANIZER:mailto:ada@example.com\r\n' ||
+                   E'ATTENDEE;RSVP=TRUE:mailto:bob@example.com\r\n' ||
+                   E'ATTENDEE;PARTSTAT=ACCEPTED:mailto:carol@example.com\r\n' ||
+                   E'END:VEVENT\r\nEND:VCALENDAR\r\n' AS ics));
+----
+true	true	true	true	true
+
+# Somebody who is not on the event cannot reply to it.
+query I
+SELECT qm_itip_reply(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m6@x\r\n' ||
+  E'DTSTAMP:20260301T120000Z\r\nDTSTART:20260315T090000Z\r\n' ||
+  E'ORGANIZER:mailto:ada@example.com\r\nATTENDEE:mailto:bob@example.com\r\n' ||
+  E'END:VEVENT\r\nEND:VCALENDAR\r\n', 'stranger@example.com', 'ACCEPTED');
+----
+NULL
+
+# ---- folding a reply into the organizer's copy ------------------------------
+
+query IIII
+SELECT u LIKE '%ATTENDEE;PARTSTAT=ACCEPTED;RSVP=FALSE:mailto:bob@example.com%',
+       u LIKE '%PARTSTAT=NEEDS-ACTION%',   -- carol has still not answered
+       u LIKE '%SUMMARY:Design review%',    -- and nothing else moved
+       u LIKE '%BEGIN:VALARM%'
+FROM (SELECT qm_itip_apply_reply(
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m7@x\r\n' ||
+  E'DTSTAMP:20260301T120000Z\r\nDTSTART:20260315T090000Z\r\nSEQUENCE:1\r\n' ||
+  E'SUMMARY:Design review\r\nORGANIZER:mailto:ada@example.com\r\n' ||
+  E'ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:bob@example.com\r\n' ||
+  E'ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:carol@example.com\r\n' ||
+  E'BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n' ||
+  E'END:VEVENT\r\nEND:VCALENDAR\r\n',
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:m7@x\r\n' ||
+  E'DTSTAMP:20260302T120000Z\r\nSEQUENCE:1\r\nORGANIZER:mailto:ada@example.com\r\n' ||
+  E'ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.com\r\n' ||
+  E'END:VEVENT\r\nEND:VCALENDAR\r\n') AS u);
+----
+true	true	true	true
+
+# The three refusals, all of which must be NULL rather than a quietly rewritten
+# event. A reply about a different meeting; a reply from somebody who is not on
+# this one; and — the one that actually happens — a delayed reply to SEQUENCE 1
+# arriving after the organizer has moved the meeting to SEQUENCE 2, which would
+# otherwise overwrite the answer somebody gave to the new time.
+query III
+SELECT qm_itip_apply_reply(stored, replace(reply, 'm8@x', 'other@x')),
+       qm_itip_apply_reply(stored, replace(reply, 'bob@example.com', 'nobody@example.com')),
+       qm_itip_apply_reply(replace(stored, 'SEQUENCE:1', 'SEQUENCE:2'), reply)
+FROM (SELECT
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m8@x\r\n' ||
+  E'DTSTAMP:20260301T120000Z\r\nDTSTART:20260315T090000Z\r\nSEQUENCE:1\r\n' ||
+  E'ORGANIZER:mailto:ada@example.com\r\n' ||
+  E'ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@example.com\r\n' ||
+  E'END:VEVENT\r\nEND:VCALENDAR\r\n' AS stored,
+  E'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:m8@x\r\n' ||
+  E'DTSTAMP:20260302T120000Z\r\nSEQUENCE:1\r\n' ||
+  E'ATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@example.com\r\n' ||
+  E'END:VEVENT\r\nEND:VCALENDAR\r\n' AS reply);
+----
+NULL	NULL	NULL
+
+# ---- finding the scheduling part of a message -------------------------------
+# Almost no mail is a scheduling message, so the answer is usually NULL and the
+# cheap check has to come first. The METHOD may be on the Content-Type
+# parameter, in the calendar body, or both — clients differ, and insisting on
+# the parameter would drop real invitations.
+
+query IIII
+SELECT qm_itip_method(E'From: a@b\r\nSubject: hi\r\n\r\nnot a meeting\r\n'),
+       qm_itip_method(E'From: a@b\r\nMIME-Version: 1.0\r\n' ||
+                      E'Content-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n' ||
+                      E'BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n'),
+       -- parameter absent, METHOD only in the body
+       qm_itip_method(E'From: a@b\r\nMIME-Version: 1.0\r\n' ||
+                      E'Content-Type: text/calendar; charset=utf-8\r\n\r\n' ||
+                      E'BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n'),
+       -- buried in a multipart, which is how every real client sends one
+       qm_itip_method(E'From: a@b\r\nMIME-Version: 1.0\r\n' ||
+                      E'Content-Type: multipart/alternative; boundary="bd"\r\n\r\n' ||
+                      E'--bd\r\nContent-Type: text/plain\r\n\r\nYou are invited.\r\n' ||
+                      E'--bd\r\nContent-Type: text/calendar; method=CANCEL\r\n\r\n' ||
+                      E'BEGIN:VCALENDAR\r\nMETHOD:CANCEL\r\nEND:VCALENDAR\r\n--bd--\r\n');
+----
+NULL	REQUEST	REPLY	CANCEL

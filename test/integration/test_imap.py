@@ -14,6 +14,7 @@ import imaplib
 import os
 import re
 import ssl
+import threading
 import time
 
 import duckdb
@@ -202,6 +203,92 @@ def main():
         # A mailbox nobody named does not exist.
         assert M._simple_command("MYRIGHTS", '"No Such Room"')[0] == "NO"
 
+        # ---- IDLE (RFC 2177) -------------------------------------------------
+        #
+        # The whole reason IDLE exists is that a *second* session's write has to
+        # reach a parked client without it asking. Extensions share no C++
+        # state, so what the other connection wrote comes back out of the store
+        # or not at all — the untagged response below is the only proof that
+        # path works. Driven through imaplib's own IDLE support, so the wire
+        # framing is checked by a client rather than by this file.
+        assert "IDLE" in M.capabilities, M.capabilities
+        M.select("INBOX")
+
+        def in_background(fn, delay=0.5):
+            def go():
+                time.sleep(delay)
+                W = imaplib.IMAP4(HOST, PORT)
+                W.starttls()
+                W.login("imapuser", "secret")
+                W.select("INBOX")
+                fn(W)
+                W.logout()
+
+            t = threading.Thread(target=go, daemon=True)
+            t.start()
+            return t
+
+        def append_one(W):
+            W.append("INBOX", None, None,
+                     b"From: sender@example.invalid\r\nSubject: while idling\r\n"
+                     b"\r\nA message that arrived without being asked for.\r\n")
+
+        worker = in_background(append_one)
+        saw = []
+        with M.idle(duration=20) as idler:
+            for typ, data in idler:
+                saw.append((typ, data))
+                if typ == "EXISTS":
+                    break
+        worker.join(15)
+        assert any(t == "EXISTS" for t, _ in saw), \
+            f"a message delivered by another session never reached the idler: {saw}"
+
+        # Exiting the block sent DONE, and imaplib would have raised if the
+        # tagged reply had not come back under the IDLE command's own tag.
+        assert M.state == "SELECTED", M.state
+
+        # An expunge from another session reaches the idler as well. The
+        # positions matter: each EXPUNGE renumbers everything after it, which is
+        # why they go out highest-first.
+        def expunge_first(W):
+            W.store("1", "+FLAGS", r"(\Deleted)")
+            W.expunge()
+
+        worker = in_background(expunge_first)
+        saw = []
+        with M.idle(duration=20) as idler:
+            for typ, data in idler:
+                saw.append((typ, data))
+                if typ == "EXPUNGE":
+                    break
+        worker.join(15)
+        assert any(t == "EXPUNGE" for t, _ in saw), \
+            f"an expunge by another session never reached the idler: {saw}"
+
+        # And the reason it could: EXPUNGE goes through citadel::DeleteMessage,
+        # which records a tombstone. It used to unlink the pointer with SQL of
+        # its own and leave nothing behind — so a message deleted in a mail
+        # client was invisible to JMAP's Email/changes and DAV's
+        # sync-collection, which is the exact hole citadel_room_tombstones was
+        # added to close. IDLE only noticed because it reads the same token.
+        tombs = con.execute("SELECT count(*) FROM citadel_room_tombstones").fetchone()[0]
+        assert tombs >= 1, "EXPUNGE left no tombstone, so no synchronizing client can see it"
+
+        # A client that cannot IDLE polls with NOOP, and RFC 3501 names that as
+        # the point of the command. Reporting nothing there is how such a client
+        # misses new mail until it re-selects.
+        M.untagged_responses.pop("EXISTS", None)
+        W = imaplib.IMAP4(HOST, PORT)
+        W.starttls()
+        W.login("imapuser", "secret")
+        W.select("INBOX")
+        append_one(W)
+        W.logout()
+        assert M.noop()[0] == "OK"
+        assert "EXISTS" in M.untagged_responses, \
+            f"NOOP reported no change: {M.untagged_responses}"
+
         M.logout()
 
         # An ordinary user gets read/post rights on a public room but not "a",
@@ -235,12 +322,16 @@ def main():
         con.execute("CALL qm_imap_stop()").fetchall()
         con.execute("CALL qm_imaps_stop()").fetchall()
 
-    # Verify the append and the seeded native message both persisted.
+    # Four rows: the first APPEND, the seeded native message, and the two the
+    # IDLE section appended. The expunge above removed a *pointer*, not a row —
+    # a message can be pointed into several rooms, so unlinking one of them
+    # never deletes the bytes.
     n = con.execute("SELECT count(*) FROM citadel_messages").fetchone()[0]
-    assert n == 2, f"expected 2 stored messages, got {n}"
+    assert n == 4, f"expected 4 stored messages, got {n}"
 
     print("PASS: IMAP STARTTLS/AUTH, IMAPS implicit TLS, default folder set, "
-          "STATUS, APPEND, SEARCH (incl. native-message rendering), COPY, RFC 4314 ACLs")
+          "STATUS, APPEND, SEARCH (incl. native-message rendering), COPY, "
+          "RFC 4314 ACLs, IDLE (new mail and expunges from another session)")
 
 
 if __name__ == "__main__":

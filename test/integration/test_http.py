@@ -244,6 +244,41 @@ def main():
         )
         assert status == 403, f"login without a CSRF token returned {status}"
 
+        # ---- a legacy password row is upgraded in place --------------------
+        #
+        # Passwords used to be one round of salted SHA-256, which a leaked
+        # quackmail_users table gives up at GPU speed. Storing new ones with
+        # scrypt fixes nothing on an install that already exists: every account
+        # created before the change keeps the weak hash until somebody happens
+        # to set a new password, which for most accounts is never. So a correct
+        # sign-in rewrites the row, and that is the half worth asserting.
+        legacy_salt = "0123456789abcdef0123456789abcdef"
+        legacy_hash = hashlib.sha256(f"{legacy_salt}:oldpass".encode()).hexdigest()
+        con.execute(
+            "INSERT OR REPLACE INTO quackmail_users "
+            "(username, password_hash, salt, algo, enabled, created_at) "
+            "VALUES ('legacyuser', ?, ?, 'sha256', true, now())",
+            [legacy_hash, legacy_salt],
+        )
+        assert con.execute(
+            "SELECT algo FROM quackmail_users WHERE username = 'legacyuser'"
+        ).fetchone()[0] == "sha256"
+
+        # The old password still works — an upgrade that locked existing users
+        # out would be worse than the weakness it fixes.
+        sign_in(BASE, "legacyuser", "oldpass")
+
+        algo, new_hash = con.execute(
+            "SELECT algo, password_hash FROM quackmail_users WHERE username = 'legacyuser'"
+        ).fetchone()
+        assert algo.startswith("scrypt$"), f"a legacy row survived a sign-in as {algo!r}"
+        assert new_hash != legacy_hash, "the row says scrypt but still holds the old digest"
+        # And it still works afterwards, through the new hash this time.
+        sign_in(BASE, "legacyuser", "oldpass")
+        assert con.execute(
+            "SELECT algo FROM quackmail_users WHERE username = 'legacyuser'"
+        ).fetchone()[0] == algo, "a scrypt row was rewritten again for no reason"
+
         # ---- form origin --------------------------------------------------
         # Empty qm_web_origins means any origin may post. This server is reached
         # by whatever name its operator points at it, so the check is opt-in;

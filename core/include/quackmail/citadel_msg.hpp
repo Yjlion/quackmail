@@ -38,5 +38,23 @@ std::string MessageId(const Message &msg, const std::string &node);
 // followed by a blank line and the body. Lines are CRLF-terminated.
 std::string RenderRfc822(const Message &msg, const std::string &node);
 
+// ---- groupware objects ---------------------------------------------------
+//
+// A calendar entry, contact or note is stored as an ordinary format-4 message
+// with one part, keyed by the object's own UID. These two are the wrapper and
+// its inverse, and they live here rather than in a front-end because the web
+// UI, CalDAV/CardDAV and inbound iTIP all write into the same rooms — a second
+// spelling of the wrapper would make one of them unable to read what another
+// wrote.
+
+std::string WrapObject(const std::string &content_type, const std::string &body,
+                       const std::string &subject, const std::string &uid,
+                       const std::string &author, const std::string &node);
+
+// The stored object's own bytes: the first part whose type is `want_type`, or
+// "" when this message is not one of ours. `text/x-vcard` is accepted for
+// `text/vcard`, because that is what older Citadel writes.
+std::string ObjectBody(const Message &msg, const std::string &want_type);
+
 } // namespace citadel
 } // namespace quackmail
