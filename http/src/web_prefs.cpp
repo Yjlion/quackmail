@@ -260,6 +260,10 @@ const std::pair<const char *, const char *> kRuleFields[] = {
     {"subject", "Subject"},
     {"body", "Message body"},
     {"size", "Size in bytes"},
+    // `header:X` has always decomposed and composed correctly; until now there
+    // was no way to type one, so a rule the engine could run could not be
+    // written in the editor that claims to write rules.
+    {"header", "Another header…"},
 };
 
 const std::pair<const char *, const char *> kTextOps[] = {
@@ -273,15 +277,28 @@ const std::pair<const char *, const char *> kSizeOps[] = {
     {"under", "is under"},
 };
 
-// Only the actions the evaluator implements. `Capabilities()` is
-// "fileinto reject envelope body copy subaddress", so there is no vacation here
-// — offering one would be a lie about what the server does with the message.
+// Only the actions the evaluator implements — the list is a claim about what
+// the server does with the message, so it tracks `sieve::Capabilities()` and
+// nothing else. `vacation` is here now because the engine has it; it was
+// deliberately absent while it did not.
 const std::pair<const char *, const char *> kRuleActions[] = {
     {"fileinto", "File into a folder"},
     {"keep", "Keep in the inbox"},
     {"redirect", "Forward to an address"},
     {"reject", "Refuse with a reason"},
     {"discard", "Discard silently"},
+    {"vacation", "Send an out-of-office reply"},
+};
+
+// imap4flags: the IMAP system flags worth offering by name. A keyword is any
+// other string, which the free-text box beside these takes — RFC 5232 does not
+// limit them and neither does the store.
+const std::pair<const char *, const char *> kActionFlags[] = {
+    {"\\Seen", "Mark as read"},
+    {"\\Flagged", "Flag it"},
+    {"\\Answered", "Mark as answered"},
+    {"\\Draft", "Mark as a draft"},
+    {"\\Deleted", "Mark as deleted"},
 };
 
 std::string DescribeTest(const quackmail::sieve::RuleTest &t) {
@@ -312,18 +329,141 @@ std::string DescribeTest(const quackmail::sieve::RuleTest &t) {
 }
 
 std::string DescribeAction(const quackmail::sieve::Action &a) {
+	std::string out;
 	switch (a.type) {
 	case quackmail::sieve::Action::FILEINTO:
-		return "file into " + a.folder;
+		out = "file into " + a.folder + (a.create ? " (creating it if needed)" : "");
+		break;
 	case quackmail::sieve::Action::REDIRECT:
-		return "forward to " + a.address;
+		out = "forward to " + a.address;
+		break;
 	case quackmail::sieve::Action::REJECT:
-		return "refuse: " + a.reason;
+		out = "refuse: " + a.reason;
+		break;
 	case quackmail::sieve::Action::DISCARD:
-		return "discard";
-	default:
-		return "keep";
+		out = "discard";
+		break;
+	case quackmail::sieve::Action::VACATION: {
+		out = "reply once every " + std::to_string(a.vacation.days) + " days";
+		if (!a.vacation.subject.empty()) {
+			out += ", subject \"" + a.vacation.subject + "\"";
+		}
+		// The message itself can be long and is usually several lines; a card is
+		// a summary, and the text editor below is where it is read in full.
+		std::string first = a.reason.substr(0, a.reason.find('\n'));
+		if (first.size() > 60) {
+			first = first.substr(0, 60) + "…";
+		}
+		out += ": " + first;
+		break;
 	}
+	default:
+		out = "keep";
+		break;
+	}
+	for (auto &f : a.flags) {
+		std::string label = f;
+		for (auto &known : kActionFlags) {
+			if (f == known.first) {
+				label = known.second;
+			}
+		}
+		out += ", " + label;
+	}
+	return out;
+}
+
+// One card per rule, each with its own small forms. A rule is identified by its
+// index in the decomposed list — which is stable for the text as it stands, and
+// re-derived on every load, so a concurrent change over ManageSieve cannot make
+// a button act on the wrong rule silently: the indices simply describe whatever
+// the script says now.
+// ---- the pieces the condition and action forms are built from ------------
+
+std::vector<std::pair<std::string, std::string>> FieldOptions() {
+	std::vector<std::pair<std::string, std::string>> out;
+	for (auto &f : kRuleFields) {
+		out.push_back({f.first, f.second});
+	}
+	return out;
+}
+
+std::vector<std::pair<std::string, std::string>> OpOptions() {
+	std::vector<std::pair<std::string, std::string>> out;
+	for (auto &o : kTextOps) {
+		out.push_back({o.first, o.second});
+	}
+	for (auto &o : kSizeOps) {
+		out.push_back({o.first, o.second});
+	}
+	return out;
+}
+
+std::vector<std::pair<std::string, std::string>> ActionOptions() {
+	std::vector<std::pair<std::string, std::string>> out;
+	for (auto &a : kRuleActions) {
+		out.push_back({a.first, a.second});
+	}
+	return out;
+}
+
+// The user's own mail folders, offered as a picker beside the free-text box.
+// The list is `MailFolders`' — the same one the mailbox view and the move form
+// use — so a rule cannot name a "folder" that is really the Calendar. It is a
+// datalist rather than a select because a rule may legitimately name a folder
+// that does not exist yet, which is what `:create` is for.
+//
+// Emitted once per page and referenced by every action form on it: an id has to
+// be unique, and the page carries one of these forms per rule plus the add form.
+std::string FolderList(Ctx &ctx, const std::string &user) {
+	auto rooms = MailFoldersFrom(quackmail::citadel::ListRooms(ctx.con, user, -1, "all"));
+	std::string out = "<datalist id=\"sieve-folders\">";
+	for (auto &r : rooms) {
+		out += "<option value=\"" + A(r.display_name) + "\"></option>";
+	}
+	return out + "</datalist>";
+}
+
+// The condition half of a form: field, operator, value, and the header-name box
+// that "Another header…" needs.
+std::string ConditionFields(Ctx &ctx, const std::string &prefix) {
+	std::string out;
+	out += "<label class=\"field\"><span>When</span>" + Select(prefix + "field", FieldOptions(), "from") +
+	       "</label>";
+	out += "<label class=\"field\"><span>Header name</span>" +
+	       TextInput(prefix + "header_name", "", "text", "X-Spam-Flag") + "</label>";
+	out += "<label class=\"field\"><span>Test</span>" + Select(prefix + "op", OpOptions(), "contains") +
+	       "</label>";
+	out += "<label class=\"field\"><span>Value</span>" + TextInput(prefix + "value", "") + "</label>";
+	out += Checkbox(prefix + "negate", false, "Invert this condition") + "<br>";
+	(void)ctx;
+	return out;
+}
+
+// The action half. `argument` carries the folder, address or reason depending on
+// which action was chosen; the flags are separate because they ride *on* an
+// action rather than being one.
+std::string ActionFields(Ctx &ctx, const std::string &user, const std::string &prefix) {
+	(void)ctx;
+	(void)user;
+	std::string out;
+	out += "<label class=\"field\"><span>Then</span>" +
+	       Select(prefix + "action", ActionOptions(), "fileinto") + "</label>";
+	out += "<label class=\"field\"><span>Folder, address or reason</span>"
+	       "<input type=\"text\" name=\"" +
+	       A(prefix + "argument") + "\" list=\"sieve-folders\" value=\"\">" + "</label>";
+	out += Checkbox(prefix + "create", false, "Create the folder if it does not exist") + "<br>";
+	out += "<fieldset><legend>Also mark the message</legend>";
+	for (auto &f : kActionFlags) {
+		out += Checkbox(prefix + "flag_" + f.first, false, f.second);
+	}
+	out += "<label class=\"field\"><span>Or a keyword of your own</span>" +
+	       TextInput(prefix + "keyword", "", "text", "$Receipt") + "</label>";
+	out += "</fieldset>";
+	out += "<p class=\"muted\">An out-of-office reply uses the text above as the message, and answers "
+	       "each correspondent at most once a week. It never answers a mailing list, an automated "
+	       "message, or mail you were only copied on.</p>";
+	return out;
 }
 
 // One card per rule, each with its own small forms. A rule is identified by its
@@ -337,27 +477,77 @@ std::string RuleCards(Ctx &ctx, const std::string &action_prefix, const std::str
 	std::string out = "<div class=\"rules\">";
 	for (size_t i = 0; i < rules.size(); i++) {
 		const auto &r = rules[i];
+		std::string idx = std::to_string(i);
+		auto hidden = [&]() {
+			return Hidden("user", user) + Hidden("name", script_name) + Hidden("rule", idx);
+		};
+
 		out += "<div class=\"card rule\">";
 		out += "<h3>" + T(r.name.empty() ? "Rule " + std::to_string(i + 1) : r.name) + "</h3>";
 
-		out += "<p class=\"muted\">If " + T(r.all ? "all" : "any") + " of:</p><ul>";
-		for (auto &t : r.tests) {
-			out += "<li>" + T(DescribeTest(t)) + "</li>";
+		// ---- conditions ------------------------------------------------
+		if (r.tests.empty()) {
+			out += "<p class=\"muted\">Applies to every message.</p>";
+		} else {
+			out += "<p class=\"muted\">If " + T(r.all ? "all" : "any") + " of:</p><ul>";
+			for (size_t t = 0; t < r.tests.size(); t++) {
+				out += "<li>" + T(DescribeTest(r.tests[t]));
+				// A rule needs at least one condition or it is unconditional,
+				// which is a different rule — so removing the last one is not
+				// offered here. "Applies to every message" is chosen when the
+				// rule is created.
+				if (r.tests.size() > 1) {
+					out += " " + FormStart(ctx, action_prefix + "/rule/test/delete", "inline") +
+					       hidden() + Hidden("test", std::to_string(t)) + Button("Remove", "sec") +
+					       FormEnd();
+				}
+				out += "</li>";
+			}
+			out += "</ul>";
+			// all/any only means anything with more than one condition.
+			if (r.tests.size() > 1) {
+				out += FormStart(ctx, action_prefix + "/rule/match", "inline") + hidden() +
+				       Hidden("all", r.all ? "0" : "1") +
+				       Button(r.all ? "Match any condition instead" : "Match all conditions instead",
+				              "sec") +
+				       FormEnd();
+			}
 		}
-		out += "</ul><p class=\"muted\">then:</p><ul>";
-		for (auto &a : r.actions) {
-			out += "<li>" + T(DescribeAction(a)) + "</li>";
+
+		// ---- actions ---------------------------------------------------
+		out += "<p class=\"muted\">then:</p><ul>";
+		for (size_t a = 0; a < r.actions.size(); a++) {
+			out += "<li>" + T(DescribeAction(r.actions[a]));
+			if (r.actions.size() > 1) {
+				out += " " + FormStart(ctx, action_prefix + "/rule/action/delete", "inline") +
+				       hidden() + Hidden("action", std::to_string(a)) + Button("Remove", "sec") +
+				       FormEnd();
+			}
+			out += "</li>";
 		}
 		if (r.stop) {
 			out += "<li>" + T("stop — later rules do not run") + "</li>";
 		}
 		out += "</ul>";
 
+		// ---- adding to this rule ---------------------------------------
+		// Behind a <details> so a card stays a summary until somebody wants to
+		// change it. Disclosure is HTML, not script: the page works the same in
+		// a text browser, which is the rule the whole builder follows.
+		if (!r.tests.empty()) {
+			out += "<details><summary>Add a condition</summary>";
+			out += FormStart(ctx, action_prefix + "/rule/test/add") + hidden();
+			out += ConditionFields(ctx, "");
+			out += "<p>" + Button("Add condition") + "</p>" + FormEnd();
+			out += "</details>";
+		}
+		out += "<details><summary>Add an action</summary>";
+		out += FormStart(ctx, action_prefix + "/rule/action/add") + hidden();
+		out += ActionFields(ctx, user, "");
+		out += "<p>" + Button("Add action") + "</p>" + FormEnd();
+		out += "</details>";
+
 		out += "<div class=\"actions\">";
-		auto hidden = [&]() {
-			return Hidden("user", user) + Hidden("name", script_name) +
-			       Hidden("rule", std::to_string(i));
-		};
 		if (i > 0) {
 			out += FormStart(ctx, action_prefix + "/rule/move", "inline") + hidden() +
 			       Hidden("dir", "up") + Button("Move up", "sec") + FormEnd();
@@ -366,6 +556,9 @@ std::string RuleCards(Ctx &ctx, const std::string &action_prefix, const std::str
 			out += FormStart(ctx, action_prefix + "/rule/move", "inline") + hidden() +
 			       Hidden("dir", "down") + Button("Move down", "sec") + FormEnd();
 		}
+		out += FormStart(ctx, action_prefix + "/rule/stop", "inline") + hidden() +
+		       Hidden("stop", r.stop ? "0" : "1") +
+		       Button(r.stop ? "Let later rules run" : "Stop after this rule", "sec") + FormEnd();
 		out += FormStart(ctx, action_prefix + "/rule/delete", "inline") + hidden() +
 		       "<button class=\"btn danger\" type=\"submit\" data-confirm=\"Delete this rule?\">"
 		       "Delete rule</button>" +
@@ -375,45 +568,27 @@ std::string RuleCards(Ctx &ctx, const std::string &action_prefix, const std::str
 	return out + "</div>";
 }
 
-// The add form. One condition at a time: a multi-condition rule is built by
-// adding the rule and then adding conditions to it, which keeps every step a
-// single POST with no client-side state to lose.
+// The add form. One condition and one action to start with; a rule with more of
+// either grows through the "Add a condition" / "Add an action" forms on its own
+// card, which keeps every step a single POST with no client-side state to lose.
 std::string AddRuleForm(Ctx &ctx, const std::string &action_prefix, const std::string &user,
                         const std::string &script_name) {
-	std::vector<std::pair<std::string, std::string>> fields;
-	for (auto &f : kRuleFields) {
-		fields.push_back({f.first, f.second});
-	}
-	std::vector<std::pair<std::string, std::string>> ops;
-	for (auto &o : kTextOps) {
-		ops.push_back({o.first, o.second});
-	}
-	for (auto &o : kSizeOps) {
-		ops.push_back({o.first, o.second});
-	}
-	std::vector<std::pair<std::string, std::string>> actions;
-	for (auto &a : kRuleActions) {
-		actions.push_back({a.first, a.second});
-	}
-
 	std::string out = "<h3>Add a rule</h3>";
 	out += FormStart(ctx, action_prefix + "/rule/add");
 	out += Hidden("user", user);
 	out += Hidden("name", script_name);
 	out += "<label class=\"field\"><span>Name (optional)</span>" + TextInput("rule_name", "") +
 	       "</label>";
-	out += "<label class=\"field\"><span>When</span>" + Select("field", fields, "from") + "</label>";
-	out += "<label class=\"field\"><span>Test</span>" + Select("op", ops, "contains") + "</label>";
-	out += "<label class=\"field\"><span>Value</span>" + TextInput("value", "") + "</label>";
-	out += Checkbox("negate", false, "Invert this condition") + "<br>";
-	out += "<label class=\"field\"><span>Then</span>" + Select("action", actions, "fileinto") +
-	       "</label>";
-	out += "<label class=\"field\"><span>Folder or address</span>" + TextInput("argument", "") +
-	       "</label>";
+	// An unconditional rule is the shape an out-of-office has, and it could not
+	// be written here at all before: "when should I auto-reply?" answers
+	// "always" far more often than it answers a condition.
+	out += Checkbox("always", false, "Apply to every message (no condition)") + "<br>";
+	out += ConditionFields(ctx, "");
+	out += ActionFields(ctx, user, "");
 	out += Checkbox("stop", false, "Stop: do not run later rules") + "<br>";
 	out += "<p>" + Button("Add rule") + "</p>";
-	out += "<p class=\"muted\">Adding a rule rewrites the script text below. A rule with more than one "
-	       "condition is built by adding it and then adding a condition to it.</p>";
+	out += "<p class=\"muted\">Adding a rule rewrites the script text below. Once it exists, its own "
+	       "card is where further conditions and actions are added.</p>";
 	out += FormEnd();
 	return out;
 }
@@ -508,6 +683,8 @@ std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &acti
 	// not what runs. See the note in core/include/quackmail/sieve.hpp.
 	if (!editing.empty() || !current.empty()) {
 		body += "<h2>Rules</h2>";
+		// One per page, shared by every action form below it.
+		body += RawHtml(FolderList(ctx, user));
 		std::vector<quackmail::sieve::Rule> rules;
 		std::string why;
 		if (!quackmail::sieve::Decompose(current, rules, why)) {
@@ -580,6 +757,124 @@ std::string RuleUser(Ctx &ctx) {
 	return requested;
 }
 
+// Read one condition off the form. False having answered with the reason, so
+// every route that takes a condition rejects the same input the same way.
+bool ReadCondition(Ctx &ctx, quackmail::sieve::RuleTest &test) {
+	test.field = ctx.req.Form("field");
+	test.op = ctx.req.Form("op");
+	test.value = ctx.req.Form("value");
+	test.negate = !ctx.req.Form("negate").empty();
+
+	// "Another header…" is the picker's way of asking for `header:X`, which the
+	// rule view has always been able to hold and never had a way to enter.
+	if (test.field == "header") {
+		std::string header = ctx.req.Form("header_name");
+		if (header.empty()) {
+			BadRequest(ctx, "Testing another header needs the header's name.");
+			return false;
+		}
+		// A header name is a token: anything else would end up quoted into the
+		// script as a name no message can have.
+		for (char c : header) {
+			if (c <= ' ' || c == ':' || c == '"' || c == '\\' || (unsigned char)c > 126) {
+				BadRequest(ctx, "That is not a header name.");
+				return false;
+			}
+		}
+		test.field = "header:" + header;
+	}
+
+	if (test.field.empty() || test.value.empty()) {
+		BadRequest(ctx, "A condition needs something to test and a value to test it against.");
+		return false;
+	}
+	// A size test only means anything against a number, and the two operator sets
+	// are not interchangeable.
+	if (test.field == "size") {
+		if (test.op != "over" && test.op != "under") {
+			test.op = "over";
+		}
+		for (char c : test.value) {
+			if (c < '0' || c > '9') {
+				BadRequest(ctx, "A size is a number of bytes.");
+				return false;
+			}
+		}
+	} else if (test.op != "is" && test.op != "contains" && test.op != "matches") {
+		test.op = "contains";
+	}
+	return true;
+}
+
+// Read one action off the form, flags and all.
+bool ReadAction(Ctx &ctx, quackmail::sieve::Action &a) {
+	std::string action = ctx.req.Form("action");
+	std::string argument = ctx.req.Form("argument");
+	if (action == "fileinto") {
+		if (argument.empty()) {
+			BadRequest(ctx, "Filing a message needs a folder to file it into.");
+			return false;
+		}
+		a.type = quackmail::sieve::Action::FILEINTO;
+		a.folder = argument;
+		a.create = !ctx.req.Form("create").empty();
+	} else if (action == "redirect") {
+		if (argument.find('@') == std::string::npos) {
+			BadRequest(ctx, "Forwarding needs an e-mail address.");
+			return false;
+		}
+		a.type = quackmail::sieve::Action::REDIRECT;
+		a.address = argument;
+	} else if (action == "reject") {
+		a.type = quackmail::sieve::Action::REJECT;
+		a.reason = argument.empty() ? "message refused by the recipient's filter" : argument;
+	} else if (action == "discard") {
+		a.type = quackmail::sieve::Action::DISCARD;
+	} else if (action == "vacation") {
+		if (argument.empty()) {
+			BadRequest(ctx, "An out-of-office reply needs a message to send.");
+			return false;
+		}
+		a.type = quackmail::sieve::Action::VACATION;
+		a.reason = argument;
+		// The defaults are the RFC's, and the builder does not offer to change
+		// them: :days is a foot-gun (a short window auto-replies to a persistent
+		// correspondent over and over) and :from is a forgery primitive unless
+		// it is checked, which the engine does but a form cannot explain.
+		a.vacation.days = 7;
+	} else {
+		a.type = quackmail::sieve::Action::KEEP;
+	}
+
+	// imap4flags rides on the action rather than being one: the flags a message
+	// is stored with are a property of storing it.
+	for (auto &f : kActionFlags) {
+		if (!ctx.req.Form(std::string("flag_") + f.first).empty()) {
+			a.flags.push_back(f.first);
+		}
+	}
+	std::string keyword = ctx.req.Form("keyword");
+	if (!keyword.empty()) {
+		// One keyword, no spaces: a flag list is space-separated on the wire, so
+		// a keyword containing one would silently become two flags.
+		for (char c : keyword) {
+			if (c <= ' ' || c == '"' || c == '\\' || (unsigned char)c > 126) {
+				BadRequest(ctx, "A keyword cannot contain spaces, quotes or backslashes.");
+				return false;
+			}
+		}
+		a.flags.push_back(keyword);
+	}
+	// Flags on an action that stores nothing would be written into the script
+	// and then quietly ignored at delivery, which is worse than refusing them.
+	if (!a.flags.empty() && a.type != quackmail::sieve::Action::KEEP &&
+	    a.type != quackmail::sieve::Action::FILEINTO) {
+		BadRequest(ctx, "Only keeping a message or filing it into a folder can mark it.");
+		return false;
+	}
+	return true;
+}
+
 void PostRuleAdd(Ctx &ctx, const std::string &action_prefix) {
 	std::string user = RuleUser(ctx);
 	std::string name = ctx.req.Form("name");
@@ -598,56 +893,18 @@ void PostRuleAdd(Ctx &ctx, const std::string &action_prefix) {
 	rule.all = true;
 	rule.stop = !ctx.req.Form("stop").empty();
 
-	quackmail::sieve::RuleTest test;
-	test.field = ctx.req.Form("field");
-	test.op = ctx.req.Form("op");
-	test.value = ctx.req.Form("value");
-	test.negate = !ctx.req.Form("negate").empty();
-	if (test.field.empty() || test.value.empty()) {
-		BadRequest(ctx, "A rule needs something to test and a value to test it against.");
-		return;
-	}
-	// A size test only means anything against a number, and the two operator sets
-	// are not interchangeable.
-	if (test.field == "size") {
-		if (test.op != "over" && test.op != "under") {
-			test.op = "over";
+	// No conditions means unconditional, which Compose writes as `if true`.
+	if (ctx.req.Form("always").empty()) {
+		quackmail::sieve::RuleTest test;
+		if (!ReadCondition(ctx, test)) {
+			return;
 		}
-		for (char c : test.value) {
-			if (c < '0' || c > '9') {
-				BadRequest(ctx, "A size is a number of bytes.");
-				return;
-			}
-		}
-	} else if (test.op != "is" && test.op != "contains" && test.op != "matches") {
-		test.op = "contains";
+		rule.tests.push_back(test);
 	}
-	rule.tests.push_back(test);
 
-	std::string action = ctx.req.Form("action");
-	std::string argument = ctx.req.Form("argument");
 	quackmail::sieve::Action a;
-	if (action == "fileinto") {
-		if (argument.empty()) {
-			BadRequest(ctx, "Filing a message needs a folder to file it into.");
-			return;
-		}
-		a.type = quackmail::sieve::Action::FILEINTO;
-		a.folder = argument;
-	} else if (action == "redirect") {
-		if (argument.find('@') == std::string::npos) {
-			BadRequest(ctx, "Forwarding needs an e-mail address.");
-			return;
-		}
-		a.type = quackmail::sieve::Action::REDIRECT;
-		a.address = argument;
-	} else if (action == "reject") {
-		a.type = quackmail::sieve::Action::REJECT;
-		a.reason = argument.empty() ? "message refused by the recipient's filter" : argument;
-	} else if (action == "discard") {
-		a.type = quackmail::sieve::Action::DISCARD;
-	} else {
-		a.type = quackmail::sieve::Action::KEEP;
+	if (!ReadAction(ctx, a)) {
+		return;
 	}
 	rule.actions.push_back(a);
 
@@ -656,6 +913,122 @@ void PostRuleAdd(Ctx &ctx, const std::string &action_prefix) {
 		return;
 	}
 	RedirectTo(ctx, SieveHref(action_prefix, ctx.req.Form("user"), name), "saved");
+}
+
+// The rest of the per-rule edits. Each loads the current text, changes one
+// thing about one rule, and composes it back — so an out-of-band rewrite over
+// ManageSieve between the page load and the click changes what the indices
+// mean, and never means the wrong edit is applied silently to the old text.
+//
+// `edit` returns false to answer for itself (a bad index, a rejected field).
+bool WithRule(Ctx &ctx, const std::string &action_prefix, const char *flash,
+              const std::function<bool(std::vector<quackmail::sieve::Rule> &,
+                                       quackmail::sieve::Rule &)> &edit) {
+	std::string user = RuleUser(ctx);
+	std::string name = ctx.req.Form("name");
+	std::string text;
+	std::vector<quackmail::sieve::Rule> rules;
+	if (!LoadRules(ctx, user, name, text, rules)) {
+		return false;
+	}
+	int64_t which = ctx.FormInt("rule", -1);
+	if (which < 0 || (size_t)which >= rules.size()) {
+		NotFound(ctx);
+		return false;
+	}
+	if (!edit(rules, rules[(size_t)which])) {
+		return false;
+	}
+	if (!StoreRules(ctx, user, name, rules)) {
+		return false;
+	}
+	RedirectTo(ctx, SieveHref(action_prefix, ctx.req.Form("user"), name), flash);
+	return true;
+}
+
+void PostRuleTestAdd(Ctx &ctx, const std::string &action_prefix) {
+	WithRule(ctx, action_prefix, "saved",
+	         [&](std::vector<quackmail::sieve::Rule> &, quackmail::sieve::Rule &rule) {
+		         if (rule.tests.empty()) {
+			         BadRequest(ctx, "This rule applies to every message. Delete it and add a new one "
+			                         "if it should have conditions.");
+			         return false;
+		         }
+		         quackmail::sieve::RuleTest test;
+		         if (!ReadCondition(ctx, test)) {
+			         return false;
+		         }
+		         rule.tests.push_back(test);
+		         return true;
+	         });
+}
+
+void PostRuleTestDelete(Ctx &ctx, const std::string &action_prefix) {
+	WithRule(ctx, action_prefix, "deleted",
+	         [&](std::vector<quackmail::sieve::Rule> &, quackmail::sieve::Rule &rule) {
+		         int64_t t = ctx.FormInt("test", -1);
+		         if (t < 0 || (size_t)t >= rule.tests.size()) {
+			         NotFound(ctx);
+			         return false;
+		         }
+		         // Never down to nothing: a rule with no conditions means
+		         // "every message", which is a different rule from the one the
+		         // user is editing and not what removing a line asks for.
+		         if (rule.tests.size() == 1) {
+			         BadRequest(ctx, "A rule needs at least one condition.");
+			         return false;
+		         }
+		         rule.tests.erase(rule.tests.begin() + (size_t)t);
+		         return true;
+	         });
+}
+
+void PostRuleActionAdd(Ctx &ctx, const std::string &action_prefix) {
+	WithRule(ctx, action_prefix, "saved",
+	         [&](std::vector<quackmail::sieve::Rule> &, quackmail::sieve::Rule &rule) {
+		         quackmail::sieve::Action a;
+		         if (!ReadAction(ctx, a)) {
+			         return false;
+		         }
+		         rule.actions.push_back(a);
+		         return true;
+	         });
+}
+
+void PostRuleActionDelete(Ctx &ctx, const std::string &action_prefix) {
+	WithRule(ctx, action_prefix, "deleted",
+	         [&](std::vector<quackmail::sieve::Rule> &, quackmail::sieve::Rule &rule) {
+		         int64_t a = ctx.FormInt("action", -1);
+		         if (a < 0 || (size_t)a >= rule.actions.size()) {
+			         NotFound(ctx);
+			         return false;
+		         }
+		         // A rule with no actions is dropped by Compose, so it would
+		         // vanish rather than become an empty rule. Deleting the rule is
+		         // the button for that, and it says so.
+		         if (rule.actions.size() == 1) {
+			         BadRequest(ctx, "A rule needs at least one action. Delete the rule instead.");
+			         return false;
+		         }
+		         rule.actions.erase(rule.actions.begin() + (size_t)a);
+		         return true;
+	         });
+}
+
+void PostRuleMatch(Ctx &ctx, const std::string &action_prefix) {
+	WithRule(ctx, action_prefix, "saved",
+	         [&](std::vector<quackmail::sieve::Rule> &, quackmail::sieve::Rule &rule) {
+		         rule.all = ctx.req.Form("all") == "1";
+		         return true;
+	         });
+}
+
+void PostRuleStop(Ctx &ctx, const std::string &action_prefix) {
+	WithRule(ctx, action_prefix, "saved",
+	         [&](std::vector<quackmail::sieve::Rule> &, quackmail::sieve::Rule &rule) {
+		         rule.stop = ctx.req.Form("stop") == "1";
+		         return true;
+	         });
 }
 
 void PostRuleDelete(Ctx &ctx, const std::string &action_prefix) {
@@ -713,6 +1086,24 @@ void PostSieveRuleDelete(Ctx &ctx) {
 }
 void PostSieveRuleMove(Ctx &ctx) {
 	PostRuleMove(ctx, "/prefs/sieve");
+}
+void PostSieveRuleTestAdd(Ctx &ctx) {
+	PostRuleTestAdd(ctx, "/prefs/sieve");
+}
+void PostSieveRuleTestDelete(Ctx &ctx) {
+	PostRuleTestDelete(ctx, "/prefs/sieve");
+}
+void PostSieveRuleActionAdd(Ctx &ctx) {
+	PostRuleActionAdd(ctx, "/prefs/sieve");
+}
+void PostSieveRuleActionDelete(Ctx &ctx) {
+	PostRuleActionDelete(ctx, "/prefs/sieve");
+}
+void PostSieveRuleMatch(Ctx &ctx) {
+	PostRuleMatch(ctx, "/prefs/sieve");
+}
+void PostSieveRuleStop(Ctx &ctx) {
+	PostRuleStop(ctx, "/prefs/sieve");
 }
 
 void GetSieve(Ctx &ctx) {
@@ -797,6 +1188,40 @@ void SieveActivate(Ctx &ctx, const std::string &user, const std::string &name) {
 	ActivateScript(ctx, user, name);
 }
 
+// The rule handlers, for the admin console to register under its own prefix.
+//
+// It has always rendered the same builder — SieveSection is this file's
+// SieveBody — but only /prefs/sieve ever registered the routes the buttons post
+// to, so every rule control on /admin/sieve answered 404. Exporting them is
+// what makes the two copies of the page the same page.
+void SieveRuleAdd(Ctx &ctx, const std::string &prefix) {
+	PostRuleAdd(ctx, prefix);
+}
+void SieveRuleDelete(Ctx &ctx, const std::string &prefix) {
+	PostRuleDelete(ctx, prefix);
+}
+void SieveRuleMove(Ctx &ctx, const std::string &prefix) {
+	PostRuleMove(ctx, prefix);
+}
+void SieveRuleTestAdd(Ctx &ctx, const std::string &prefix) {
+	PostRuleTestAdd(ctx, prefix);
+}
+void SieveRuleTestDelete(Ctx &ctx, const std::string &prefix) {
+	PostRuleTestDelete(ctx, prefix);
+}
+void SieveRuleActionAdd(Ctx &ctx, const std::string &prefix) {
+	PostRuleActionAdd(ctx, prefix);
+}
+void SieveRuleActionDelete(Ctx &ctx, const std::string &prefix) {
+	PostRuleActionDelete(ctx, prefix);
+}
+void SieveRuleMatch(Ctx &ctx, const std::string &prefix) {
+	PostRuleMatch(ctx, prefix);
+}
+void SieveRuleStop(Ctx &ctx, const std::string &prefix) {
+	PostRuleStop(ctx, prefix);
+}
+
 std::string WebSessionTable(Ctx &ctx, const std::vector<quackmail::web::SessionRow> &rows,
                             const std::string &action, bool show_user) {
 	return SessionTable(ctx, rows, action, show_user);
@@ -814,6 +1239,12 @@ void RegisterPrefsRoutes(std::vector<Route> &out) {
 	out.push_back({"POST", "/prefs/sieve/rule/add", Role::User, PostSieveRuleAdd});
 	out.push_back({"POST", "/prefs/sieve/rule/delete", Role::User, PostSieveRuleDelete});
 	out.push_back({"POST", "/prefs/sieve/rule/move", Role::User, PostSieveRuleMove});
+	out.push_back({"POST", "/prefs/sieve/rule/test/add", Role::User, PostSieveRuleTestAdd});
+	out.push_back({"POST", "/prefs/sieve/rule/test/delete", Role::User, PostSieveRuleTestDelete});
+	out.push_back({"POST", "/prefs/sieve/rule/action/add", Role::User, PostSieveRuleActionAdd});
+	out.push_back({"POST", "/prefs/sieve/rule/action/delete", Role::User, PostSieveRuleActionDelete});
+	out.push_back({"POST", "/prefs/sieve/rule/match", Role::User, PostSieveRuleMatch});
+	out.push_back({"POST", "/prefs/sieve/rule/stop", Role::User, PostSieveRuleStop});
 	out.push_back({"GET", "/prefs/sessions", Role::User, GetSessions});
 	out.push_back({"POST", "/prefs/sessions/revoke", Role::User, PostRevokeSession});
 }

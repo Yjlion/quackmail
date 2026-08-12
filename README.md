@@ -216,8 +216,26 @@ admin console write the same row, so a table of structured rules would either be
 silently overwritten or start describing filtering that is not what runs.
 
 When a script says something the rule view cannot express — a nested `if`, an
-`else`, an `envelope` test — the page says so and offers only the text editor. It
-never shows a partial decomposition, and it refuses to rewrite such a script.
+`else`, an `envelope` test, anything using `variables` — the page says so and
+offers only the text editor. It never shows a partial decomposition, and it
+refuses to rewrite such a script.
+
+A rule can carry several conditions (matching all or any of them) and several
+actions, and a rule with *no* conditions applies to every message — which is the
+shape an out-of-office reply has. The actions offered are exactly the ones the
+engine implements: file into a folder (optionally creating it), keep, forward,
+refuse, discard, and reply once. Filing or keeping can also set IMAP flags, so a
+rule can file something as already read and every mail client agrees.
+
+`/admin/sieve` is the same builder pointed at any user's filters.
+
+The engine is RFC 5228 plus `reject`, `envelope`, `body`, `copy`, `mailbox`
+(`fileinto :create`), `imap4flags`, `variables` and `vacation`; `regex` is
+deliberately absent, being an expired draft whose backtracking would run on the
+delivery path. Auto-replies never answer a mailing list, an automated message, a
+bounce, mail you were only copied on, or yourself, and answer any one
+correspondent at most once per `:days` (7 by default). An operator can switch
+them off site-wide with `qm_sieve_vacation`.
 
 Only the actions the engine implements are offered (`fileinto`, `keep`,
 `redirect`, `reject`, `discard`); there is no vacation, because there is no
@@ -926,6 +944,7 @@ python3 test/integration/test_smtp_in.py     # MX: recipient validation, domains
 python3 test/integration/test_smtp_policy.py # outbound DKIM signing + per-user rate limiting
 python3 test/integration/test_lmtp.py        # LMTP per-recipient replies, no spam checks
 python3 test/integration/test_managesieve.py # ManageSieve round trip, then the filter routes delivery
+python3 test/integration/test_sieve_extensions.py # flags reach IMAP, vacation answers a sender once
 python3 test/integration/test_itip.py        # scheduling: PUT mails an invitation, a reply updates the event
 
 pip install jmapc                            # optional; the test below skips itself without it

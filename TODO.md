@@ -10,6 +10,66 @@ listeners; the backlog below leads with what that work left open.
 
 ## Shipped
 
+- [x] **Sieve past its core: `imap4flags`, `variables` and `vacation`**, and a
+      filter builder that can express them.
+  - [x] `qm_sieve_eval(script, message, mail_from, rcpt_to)` first, because
+        until it existed there was no way to assert what a script *does* —
+        only that it parses. Every rule below that fails silently against a
+        real correspondent is one line in `test/sql/sieve.test` because of it.
+  - [x] **imap4flags** (RFC 5232): `setflag`/`addflag`/`removeflag`, `:flags`
+        on `keep`/`fileinto`, and `hasflag`. The flags an action carries are a
+        *snapshot* of the internal set as it stood when that action ran — an
+        `addflag` afterwards must not reach back and change what was already
+        filed, which is the whole subtlety of §5. They land in
+        `citadel_msg_flags` through a new `citadel::AddMsgFlag`, the rows
+        IMAP's STORE writes and the web mailbox reads, so a rule that files
+        something as read shows up read in every client at once.
+  - [x] **variables** (RFC 5229): `set` with its modifiers, `${}` expansion at
+        evaluation time, the `string` test, and `:matches` captures into
+        `${1}`..`${9}` — which is what makes a per-list folder expressible.
+        **`require "variables"` is the one capability that stops being
+        advisory**: without it `${foo}` is literal text (§3), and a script
+        written before this existed has to keep meaning what it meant then.
+  - [x] The capture matcher is new rather than `WildmatMatch`. That answers
+        yes/no for NNTP's comma/`!`/`[class]` syntax Sieve does not have —
+        which is why the caller was escaping it back out — and cannot say what
+        a wildcard consumed. It was also unbounded: `*a*a*a*a*b` against a
+        sender-chosen value is exponential. The replacement has a step budget.
+  - [x] **vacation** (RFC 5230). `Evaluate` stays a pure function of the
+        message and takes no `Connection`, so it decides only whether *this
+        message* deserves a reply — §4.5/§4.6 in full: `Auto-Submitted`,
+        `Precedence`, `List-*`, a null return-path, the user not being a
+        visible recipient, replying to oneself, one reply per message. What
+        needs a connection is the per-correspondent window, and that lives in
+        `delivery.cpp` against a new `quackmail_vacation_sent`.
+  - [x] The send is modelled on `itip::Notify`: charged against
+        `policy::CheckRate` (`submission::Send` is quota-agnostic by contract,
+        and an auto-replier with the limit off is a backscatter cannon),
+        `Auto-Submitted: auto-replied` per §4.6, and an **empty envelope
+        sender** per §4.5. `:from` is honoured only for an address the user
+        actually owns — taken on trust it is a From-forgery primitive handed to
+        every account holder, the same hole `itip::IsOrganizer` closes.
+  - [x] `qm_sieve_vacation` switches auto-replies off site-wide, because an
+        auto-reply is mail this server sends to an address somebody else chose.
+  - [x] **Three bugs the builder had been carrying.** `/admin/sieve` rendered
+        the whole rule builder and had registered *none* of the routes its
+        buttons post to, so every control there answered 404 while looking
+        identical to the one that works. The page told users to build a
+        multi-condition rule by "adding a condition to it" and there was no
+        such route. And `fileinto :create` was read by `Decompose` and never
+        written back by `Compose`, so a click on any *other* rule silently
+        rewrote a script that asked for it.
+  - [x] The builder now edits a rule in place: conditions and actions added and
+        removed one at a time, all/any, stop, a custom header (`header:X` always
+        round-tripped and could not be typed), a folder picker fed by
+        `MailFolders`, `:create`, and flags. An unconditional rule — `if true` —
+        is representable at last, which is the shape an out-of-office has.
+  - [x] `test_sieve_rules.py` asserted the builder must *not* offer vacation,
+        which was right while the engine lacked it. Inverted rather than
+        deleted: the property worth keeping is that the builder offers exactly
+        what the engine implements.
+  - [x] `regex` stays out, deliberately — see the backlog.
+
 - [x] **Passwords are hashed with scrypt**, not one round of salted SHA-256.
       The old scheme gave a leaked `quackmail_users` table up at GPU speed, and
       the header said as much ("first-pass KDF; bcrypt/argon2 is a noted
@@ -844,6 +904,9 @@ The first came out of building 0.6.0 and is the one most likely to bite.
 - SMTP: PIPELINING, CHUNKING/BDAT, DSN.
 - Mail authentication depth: DMARC aggregate (`rua`) reports; ARC, so forwarded
   mail keeps an authenticated chain; MTA-STS / DANE for outbound transport.
-- Sieve extensions beyond the current core + `reject`/`envelope`/`body`/`copy`:
-  variables, regex, vacation, imap4flags.
+- Sieve `regex`, the one extension of the four left undone. It is an expired
+  draft rather than an RFC, and the value it adds over `:matches` — which now
+  captures into `${1}`..`${9}` — is small next to putting a backtracking engine
+  on the delivery path against text a sender chooses. Reconsider only with a
+  regex implementation that is bounded by construction.
 - Hardening: SCRAM-SHA-256, charset transcoding beyond UTF-8/Latin-1.

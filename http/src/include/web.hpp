@@ -282,6 +282,19 @@ std::string SieveSection(Ctx &ctx, const std::string &user, const std::string &a
 bool SieveSave(Ctx &ctx, const std::string &user, const std::string &name, const std::string &script,
                std::string &err);
 void SieveActivate(Ctx &ctx, const std::string &user, const std::string &name);
+// The rule-builder handlers, parameterised by the prefix the page posts to.
+// SieveSection renders the same builder for both pages, so both have to register
+// these or one of them renders buttons that answer 404 — which is what
+// /admin/sieve did until they were exported.
+void SieveRuleAdd(Ctx &ctx, const std::string &prefix);
+void SieveRuleDelete(Ctx &ctx, const std::string &prefix);
+void SieveRuleMove(Ctx &ctx, const std::string &prefix);
+void SieveRuleTestAdd(Ctx &ctx, const std::string &prefix);
+void SieveRuleTestDelete(Ctx &ctx, const std::string &prefix);
+void SieveRuleActionAdd(Ctx &ctx, const std::string &prefix);
+void SieveRuleActionDelete(Ctx &ctx, const std::string &prefix);
+void SieveRuleMatch(Ctx &ctx, const std::string &prefix);
+void SieveRuleStop(Ctx &ctx, const std::string &prefix);
 std::string WebSessionTable(Ctx &ctx, const std::vector<quackmail::web::SessionRow> &rows,
                             const std::string &action, bool show_user);
 

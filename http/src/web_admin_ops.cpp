@@ -155,6 +155,38 @@ void PostAdminSieveDelete(Ctx &ctx) {
 	RedirectTo(ctx, "/admin/sieve?user=" + http::PercentEncode(user), "deleted");
 }
 
+// The rule builder's own controls. SieveSection has always rendered them here
+// too, and until these existed every one of them posted to a route that was
+// never registered — so the whole builder was decorative on this page while
+// looking identical to the one on /prefs/sieve that works.
+void PostAdminRuleAdd(Ctx &ctx) {
+	SieveRuleAdd(ctx, "/admin/sieve");
+}
+void PostAdminRuleDelete(Ctx &ctx) {
+	SieveRuleDelete(ctx, "/admin/sieve");
+}
+void PostAdminRuleMove(Ctx &ctx) {
+	SieveRuleMove(ctx, "/admin/sieve");
+}
+void PostAdminRuleTestAdd(Ctx &ctx) {
+	SieveRuleTestAdd(ctx, "/admin/sieve");
+}
+void PostAdminRuleTestDelete(Ctx &ctx) {
+	SieveRuleTestDelete(ctx, "/admin/sieve");
+}
+void PostAdminRuleActionAdd(Ctx &ctx) {
+	SieveRuleActionAdd(ctx, "/admin/sieve");
+}
+void PostAdminRuleActionDelete(Ctx &ctx) {
+	SieveRuleActionDelete(ctx, "/admin/sieve");
+}
+void PostAdminRuleMatch(Ctx &ctx) {
+	SieveRuleMatch(ctx, "/admin/sieve");
+}
+void PostAdminRuleStop(Ctx &ctx) {
+	SieveRuleStop(ctx, "/admin/sieve");
+}
+
 // ---- presence and browser sessions ---------------------------------------
 
 void GetAdminWho(Ctx &ctx) {
@@ -203,6 +235,15 @@ void RegisterAdminOpsRoutes(std::vector<Route> &out) {
 	out.push_back({"POST", "/admin/sieve/save", Role::Aide, PostAdminSieveSave});
 	out.push_back({"POST", "/admin/sieve/activate", Role::Aide, PostAdminSieveActivate});
 	out.push_back({"POST", "/admin/sieve/delete", Role::Aide, PostAdminSieveDelete});
+	out.push_back({"POST", "/admin/sieve/rule/add", Role::Aide, PostAdminRuleAdd});
+	out.push_back({"POST", "/admin/sieve/rule/delete", Role::Aide, PostAdminRuleDelete});
+	out.push_back({"POST", "/admin/sieve/rule/move", Role::Aide, PostAdminRuleMove});
+	out.push_back({"POST", "/admin/sieve/rule/test/add", Role::Aide, PostAdminRuleTestAdd});
+	out.push_back({"POST", "/admin/sieve/rule/test/delete", Role::Aide, PostAdminRuleTestDelete});
+	out.push_back({"POST", "/admin/sieve/rule/action/add", Role::Aide, PostAdminRuleActionAdd});
+	out.push_back({"POST", "/admin/sieve/rule/action/delete", Role::Aide, PostAdminRuleActionDelete});
+	out.push_back({"POST", "/admin/sieve/rule/match", Role::Aide, PostAdminRuleMatch});
+	out.push_back({"POST", "/admin/sieve/rule/stop", Role::Aide, PostAdminRuleStop});
 	out.push_back({"GET", "/admin/who", Role::Aide, GetAdminWho});
 	out.push_back({"GET", "/admin/websessions", Role::Aide, GetWebSessions});
 	out.push_back({"POST", "/admin/websessions/revoke", Role::Aide, PostRevokeWebSession});
