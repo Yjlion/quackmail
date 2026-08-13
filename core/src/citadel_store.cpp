@@ -343,7 +343,7 @@ void EnsureCitadelSchema(Connection &con) {
 	          "('c_humannode', 'QuackCit BBS'), "
 	          "('c_fqdn', 'quackmail.test'), "
 	          "('c_sysadm', 'admin'), "
-	          "('c_version', 'QuackCit 0.6.0'), "
+	          "('c_version', 'QuackCit 0.7.0'), "
 	          "('c_bbs_city', 'The Cloud'), "
 	          // System messages to the Aide room. Rejected inbound mail is off by
 	          // default: on a live MX it would bury everything else.
