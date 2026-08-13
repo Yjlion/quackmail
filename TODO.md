@@ -5,8 +5,11 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-Nothing. **v0.6.0** shipped CalDAV, CardDAV and JMAP on the existing HTTP/HTTPS
-listeners; the backlog below leads with what that work left open.
+Nothing. **v0.7.0** shipped DAV scheduling (CalDAV free/busy and iTIP/iMIP), IMAP
+`IDLE`, scrypt password hashing, the `k` right, a real JMAP client's worth of
+fixes, webmail search and folder views, and Sieve past its core — `imap4flags`,
+`variables` and `vacation`. The backlog below leads with what that work left
+open.
 
 ## Shipped
 
