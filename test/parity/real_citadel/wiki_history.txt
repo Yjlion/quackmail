@@ -1,0 +1,56 @@
+Return-Path: Citadel
+Date: Tue, 25 Aug 2026 17:17:30 -0000
+To: WikiParity@6b32e5e1a365
+Subject: home_HISTORY_
+Message-ID: <6A8DCE2A-17@6b32e5e1a365>
+From: "Citadel" <citadel@>
+Content-type: multipart/mixed; boundary="Citadel--Multipart--0007--6a8dce12"
+
+This is a Citadel wiki history encoded as multipart MIME.
+Each part is comprised of a diff script representing one change set.
+
+--Citadel--Multipart--0007--6a8dce12
+Content-type: text/x-diff
+Content-disposition: attachment; filename="MjJ8MTc4NzY3ODI1MHxhZG1pbnwA"
+
+@@ -3,4 +3,3 @@
+ Revision A 1787678249.
+ Line two changed.
+ Line three.
+-Line four.
+
+--Citadel--Multipart--0007--6a8dce12
+Content-type: text/x-diff
+Content-disposition: attachment; filename="MjB8MTc4NzY3ODI0OXxhZG1pbnwA"
+
+@@ -1,5 +1,4 @@
+ Content-type: text/plain
+ 
+ Revision A 1787678249.
+-Line two changed.
+-Line three.
++Line two.
+
+--Citadel--Multipart--0007--6a8dce12
+Content-type: text/x-diff
+Content-disposition: attachment; filename="MTh8MTc4NzY3ODIyNnxhZG1pbnwA"
+
+@@ -1,4 +1,4 @@
+ Content-type: text/plain
+ 
+-Revision A 1787678249.
++Revision A 1787678226.
+ Line two.
+
+--Citadel--Multipart--0007--6a8dce12
+Content-type: text/x-diff
+Content-disposition: attachment; filename="MTZ8MTc4NzY3ODE4N3xhZG1pbnwA"
+
+@@ -1,4 +1,4 @@
+ Content-type: text/plain
+ 
+-Revision A 1787678226.
++First revision.
+ Line two.
+
+--Citadel--Multipart--0007--6a8dce12--

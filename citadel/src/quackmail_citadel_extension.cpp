@@ -13,6 +13,7 @@
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
 #include "quackmail/util.hpp"
+#include "quackmail/wiki.hpp"
 
 #include <ctime>
 #include <string>
@@ -257,6 +258,104 @@ void HandleMsg0(Connection &con, net::ClientStream &stream, const std::vector<st
 		return;
 	}
 	WriteListing(stream, citadel::FormatMsg0(msg, mode), "msg:"); // msgbase.c
+}
+
+// WIKI — page history and old revisions, as serv_wiki.c defines them.
+//
+//   WIKI history|<page>                     one memo per line, newest first
+//   WIKI rev|<page>|<rev>|showrev|revert    a revision, or restore it
+//
+// This is the payoff for storing history in Citadel's own shape rather than in
+// a table of our own: a real WebCit or Citadel client can browse the history a
+// QuackCit user wrote, and this server can read theirs.
+void HandleWiki(Connection &con, Session &s, net::ClientStream &stream,
+                const std::vector<std::string> &p) {
+	if (!s.have_room) {
+		stream.WriteLine("540 Not in a room.");
+		return;
+	}
+	if (!quackmail::wiki::IsWikiView(s.room.default_view)) {
+		stream.WriteLine("550 '" + s.room.display_name + "' is not a Wiki room.");
+		return;
+	}
+	const std::string sub = util::Lower(Field(p, 0));
+	const std::string page = quackmail::wiki::NormalizeName(Field(p, 1));
+
+	if (sub == "history") {
+		auto revs = quackmail::wiki::History(con, s.room.room_num, page);
+		if (revs.empty()) {
+			stream.WriteLine("540 Revision history for '" + page + "' was not found.");
+			return;
+		}
+		// The memo, decoded, one per line — the same shape wiki_history_callback
+		// emits, so a client parses it the same way.
+		std::vector<std::string> lines;
+		for (const auto &r : revs) {
+			lines.push_back(std::to_string(r.rev) + "|" + std::to_string(r.timestamp) + "|" +
+			                r.author + "|");
+		}
+		WriteListing(stream, lines, "Revision history for '" + page + "'");
+		return;
+	}
+
+	if (sub == "rev") {
+		const int64_t rev = ToInt(Field(p, 2), 0);
+		const std::string op = util::Lower(Field(p, 3));
+		std::string raw;
+		std::string err;
+		if (!quackmail::wiki::RevisionRaw(con, s.room.room_num, page, rev, raw, err)) {
+			stream.WriteLine("540 " + err);
+			return;
+		}
+		if (op == "revert") {
+			if (!citadel::CanPost(con, s.username, s.room)) {
+				stream.WriteLine("550 You cannot write to this room.");
+				return;
+			}
+			citadel::Message msg;
+			msg.euid = page;
+			msg.subject = page;
+			msg.author = s.username;
+			msg.author_usernum = citadel::GetOrAssignUserNum(con, s.username);
+			msg.msgtime = (int64_t)std::time(nullptr);
+			msg.format_type = 4;
+			msg.origin_room = s.room.display_name;
+			msg.raw = raw;
+			std::string upsert_err;
+			// Saved as a new revision, never by rewriting history: a restore is
+			// an edit like any other and must itself be undoable.
+			int64_t num = citadel::UpsertByEuid(con, msg, s.room.room_num, upsert_err);
+			if (num < 0) {
+				stream.WriteLine("550 " + upsert_err);
+				return;
+			}
+			stream.WriteLine("200 " + std::to_string(num));
+			return;
+		}
+		// "showrev" (and the deprecated "fetch", which stashed the revision in a
+		// scratch room purely so the client could MSG0 it — pointless when the
+		// text can simply be sent).
+		std::vector<std::string> lines;
+		std::string cur;
+		for (char c : raw) {
+			if (c == '\n') {
+				if (!cur.empty() && cur.back() == '\r') {
+					cur.pop_back();
+				}
+				lines.push_back(cur);
+				cur.clear();
+			} else {
+				cur.push_back(c);
+			}
+		}
+		if (!cur.empty()) {
+			lines.push_back(cur);
+		}
+		WriteListing(stream, lines, "msg:");
+		return;
+	}
+
+	stream.WriteLine("500 Invalid subcommand.");
 }
 
 void HandleMsg2(Connection &con, net::ClientStream &stream, const std::vector<std::string> &p) {
@@ -796,6 +895,8 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			}
 		} else if (verb == "SETR") {
 			HandleSetr(con, s, stream, p);
+		} else if (verb == "WIKI") {
+			HandleWiki(con, s, stream, p);
 		} else if (verb == "RINF") {
 			if (s.have_room && !s.room.info.empty()) {
 				WriteListing(stream, {s.room.info}, "Info:");

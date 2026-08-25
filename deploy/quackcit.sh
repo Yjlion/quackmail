@@ -102,6 +102,19 @@ ensure_tls_material() {
         return 0
     fi
 
+    # An ACME certificate, if one has already been issued. This sits *between*
+    # the operator's own material and the self-signed pair on purpose: it is
+    # real and trusted, but it does not exist before the first successful order,
+    # and a listener that refused to start until then would be worse than one
+    # presenting a self-signed certificate for an hour.
+    if env_true "$QUACKCIT_ACME_ENABLE" &&
+       [ -r "$QUACKCIT_ACME_CERT" ] && [ -r "$QUACKCIT_ACME_KEY" ]; then
+        QUACKCIT_TLS_CERT=$QUACKCIT_ACME_CERT
+        QUACKCIT_TLS_KEY=$QUACKCIT_ACME_KEY
+        say info tls "using the ACME certificate at $QUACKCIT_ACME_CERT"
+        return 0
+    fi
+
     env_true "$QUACKCIT_TLS_AUTOGEN" || return 0
 
     # The "if no certs exist" test: generation happens once, and every restart
@@ -224,6 +237,32 @@ EOF
     done <<EOF
 $(quackcit_enabled_services)
 EOF
+
+    # ACME settings, applied on every start so quackcit.conf stays authoritative
+    # — the same rule QUACKCIT_FQDN follows. They have to be in place before the
+    # qm_acme worker below ticks.
+    if env_true "$QUACKCIT_ACME_ENABLE"; then
+        printf "SELECT ok FROM qm_config_set('qm_acme_enabled', '1');\n"
+        printf "SELECT ok FROM qm_config_set('qm_acme_directory', %s);\n" \
+            "$(sql_str "$QUACKCIT_ACME_DIRECTORY")"
+        printf "SELECT ok FROM qm_config_set('qm_acme_contact', %s);\n" \
+            "$(sql_str "$QUACKCIT_ACME_CONTACT")"
+        printf "SELECT ok FROM qm_config_set('qm_acme_cert_dir', %s);\n" \
+            "$(sql_str "$QUACKCIT_ACME_DIR")"
+        printf "SELECT ok FROM qm_config_set('qm_acme_ca_bundle', %s);\n" \
+            "$(sql_str "$QUACKCIT_ACME_CA_BUNDLE")"
+        printf "SELECT ok FROM qm_config_set('qm_acme_renew_days', %s);\n" \
+            "$(sql_str "$(sql_int "$QUACKCIT_ACME_RENEW_DAYS")")"
+        # Agreeing to the CA's terms is the operator's act, not ours, so it is
+        # tied to having set a contact address rather than defaulted on.
+        if [ -n "$QUACKCIT_ACME_CONTACT" ]; then
+            printf "SELECT ok FROM qm_config_set('qm_acme_tos_agreed', '1');\n"
+        fi
+        if [ -n "$QUACKCIT_ACME_DOMAINS" ]; then
+            printf 'SELECT ok FROM qm_acme_order(%s, %s);\n' \
+                "$(sql_str "$QUACKCIT_ACME_NAME")" "$(sql_str "$QUACKCIT_ACME_DOMAINS")"
+        fi
+    fi
 
     # Background workers, after the listeners: outbound relay, mailing-list
     # distribution. Each _start returns a row, so the log records what came up.

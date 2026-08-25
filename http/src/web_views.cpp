@@ -22,6 +22,29 @@ const RoomViewHandler kBoardView = {
 
 } // namespace
 
+std::vector<std::pair<std::string, std::string>> ViewOptions(Ctx &ctx) {
+	// Only the views that have a renderer. VIEW_QUEUE is in the enum because
+	// the wire numbering is Citadel's, not because we draw it; offering it here
+	// would set a room to a view that falls back to the plain message list,
+	// which reads as a bug rather than as a choice.
+	//
+	// There is one list, used by both the room settings page and the aide's
+	// room editor. Two copies had already drifted: the aide's stopped at Notes
+	// and could silently reset a Blog room to a message board on save.
+	std::vector<std::pair<std::string, std::string>> out = {
+	    {"0", "Message board"},      {"1", "Mailbox"},  {"2", "Address book"},
+	    {"3", "Calendar"},           {"7", "Calendar, as a list"},
+	    {"4", "Tasks"},              {"5", "Notes"},    {"6", "Wiki"},
+	    {"10", "Blog"},              {"8", "Journal"}};
+	// VIEW_WIKIMD is not a code current Citadel knows — see citadel_store.hpp.
+	// It renders here, but offering it would put a number on the wire that
+	// reads out of bounds in WebCit, so it takes a deliberate opt-in.
+	if (ConfigBool(ctx.con, "qm_wiki_markdown_view", false)) {
+		out.push_back({"12", "Wiki (Markdown view code)"});
+	}
+	return out;
+}
+
 const RoomViewHandler &ViewFor(int default_view) {
 	switch (default_view) {
 	case quackmail::citadel::VIEW_MAILBOX:
@@ -41,16 +64,14 @@ const RoomViewHandler &ViewFor(int default_view) {
 		return BlogView();
 	case quackmail::citadel::VIEW_JOURNAL:
 		return JournalView();
+	case quackmail::citadel::VIEW_WIKI:
+	case quackmail::citadel::VIEW_WIKIMD:
+		return WikiView();
 	default:
-		// VIEW_BBS, VIEW_WIKI, VIEW_WIKIMD, VIEW_QUEUE. The wikis need
-		// versioning and a markdown renderer, and the queue is Citadel's own
-		// spool view rather than a user one.
+		// VIEW_BBS and VIEW_QUEUE. The queue is Citadel's own spool view rather
+		// than a user one, and a board is what a board should look like.
 		return kBoardView;
 	}
-}
-
-bool HasCustomView(int default_view) {
-	return ViewFor(default_view).index != nullptr;
 }
 
 // ---- shared helpers ------------------------------------------------------

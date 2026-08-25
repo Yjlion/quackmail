@@ -14,6 +14,7 @@
 #include <sys/time.h>
 
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
 
 namespace quackmail {
 namespace net {
@@ -330,6 +331,10 @@ bool ClientStream::StartTls(SSL_CTX *ctx, std::string &err) {
 }
 
 bool ClientStream::ConnectTls(SSL_CTX *ctx, std::string &err) {
+	return ConnectTls(ctx, std::string(), err);
+}
+
+bool ClientStream::ConnectTls(SSL_CTX *ctx, const std::string &sni_host, std::string &err) {
 	if (!ctx) {
 		err = "no TLS context";
 		return false;
@@ -338,6 +343,25 @@ bool ClientStream::ConnectTls(SSL_CTX *ctx, std::string &err) {
 	if (!ssl_) {
 		err = "SSL_new failed";
 		return false;
+	}
+	if (!sni_host.empty()) {
+		// SNI is a name, never a literal address; sending one is a protocol
+		// violation that some servers reject outright.
+		const bool looks_numeric =
+		    sni_host.find_first_not_of("0123456789.") == std::string::npos ||
+		    sni_host.find(':') != std::string::npos;
+		if (!looks_numeric) {
+			SSL_set_tlsext_host_name(ssl_, sni_host.c_str());
+		}
+		if (SSL_CTX_get_verify_mode(ctx) != SSL_VERIFY_NONE && !looks_numeric) {
+			SSL_set_hostflags(ssl_, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+			if (SSL_set1_host(ssl_, sni_host.c_str()) != 1) {
+				err = "could not pin the peer name " + sni_host;
+				SSL_free(ssl_);
+				ssl_ = nullptr;
+				return false;
+			}
+		}
 	}
 	SSL_set_fd(ssl_, fd_);
 	int r = SSL_connect(ssl_);

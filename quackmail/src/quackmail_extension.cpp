@@ -13,9 +13,11 @@
 
 #include <functional>
 
+#include "quackmail/acme.hpp"
 #include "quackmail/auth.hpp"
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/davxml.hpp"
+#include "quackmail/diff.hpp"
 #include "quackmail/dkim.hpp"
 #include "quackmail/dmarc.hpp"
 #include "quackmail/citadel_msg.hpp"
@@ -29,6 +31,7 @@
 #include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
+#include "quackmail/markdown.hpp"
 #include "quackmail/mime.hpp"
 #include "quackmail/psl.hpp"
 #include "quackmail/rbl.hpp"
@@ -38,6 +41,7 @@
 #include "quackmail/util.hpp"
 #include "quackmail/vcard.hpp"
 #include "quackmail/vnote.hpp"
+#include "quackmail/wiki.hpp"
 
 #include <cstdlib>
 #include <ctime>
@@ -1229,6 +1233,169 @@ void PslOrgDomainScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	});
 }
 
+// ---- wiki: diff, patch, markdown, page names ------------------------------
+//
+// All four are pure functions of their arguments, which is what lets
+// test/sql/wiki.test assert the *format* — Citadel's, byte for byte — without a
+// server, a room or a message in the loop.
+
+// qm_diff(from, to) -> a unified diff turning `from` into `to`.
+void DiffScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t from, string_t to) {
+		    return StringVector::AddString(
+		        result, quackmail::diff::Unified(from.GetString(), to.GetString()));
+	    });
+}
+
+// qm_patch(text, patch) -> the patched text, or NULL when the patch does not
+// apply. NULL rather than an error: "this history is corrupt" is a row a test
+// asserts, not an exception it has to catch.
+void PatchScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t text, string_t patch, ValidityMask &mask, idx_t idx) {
+		    std::string out;
+		    std::string err;
+		    if (!quackmail::diff::Apply(text.GetString(), patch.GetString(), out, err)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, out);
+	    });
+}
+
+// qm_markdown(source) -> rendered HTML. Wiki links are rendered as plain text
+// here: resolving one needs a room, and this function has none.
+void MarkdownScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::markdown::Render(in.GetString()));
+	});
+}
+
+// qm_wiki_euid(name) -> the euid a wiki page name normalizes to.
+void WikiEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::wiki::NormalizeName(in.GetString()));
+	});
+}
+
+// qm_wiki_history_euid(page_euid) -> the euid of its history companion.
+void WikiHistoryEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::wiki::HistoryEuid(in.GetString()));
+	});
+}
+
+// ---- ACME: the pure half --------------------------------------------------
+//
+// JOSE is unforgiving and its failures are silent: a JWK whose members are in
+// the wrong order produces a thumbprint that is wrong in no visible way until a
+// CA says the challenge did not match. Both RFC 7638 §3.1 and RFC 8555 §8.1
+// publish known-answer vectors, and these scalars are how test/sql/acme.test
+// checks against them with no server and no network.
+
+// qm_b64url(text) -> unpadded base64url (RFC 4648 §5).
+void B64UrlScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(result, quackmail::util::Base64UrlEncode(in.GetString()));
+	});
+}
+
+// qm_sha256_b64url(text) -> base64url(SHA-256(text)), which is the shape a JWK
+// thumbprint and a key authorization are built out of. Separate from DuckDB's
+// sha256() because that returns hex, and hex is the wrong currency here.
+void Sha256B64UrlScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
+		return StringVector::AddString(
+		    result, quackmail::util::Base64UrlEncode(quackmail::util::Sha256Raw(in.GetString())));
+	});
+}
+
+// qm_acme_keygen(bits) -> a fresh RSA private key as PEM.
+void AcmeKeygenScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<int64_t, string_t>(
+	    args.data[0], result, args.size(), [&](int64_t bits, ValidityMask &mask, idx_t idx) {
+		    std::string pem;
+		    std::string err;
+		    if (!quackmail::acme::GenerateAccountKey((int)bits, pem, err)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, pem);
+	    });
+}
+
+// qm_acme_jwk(key_pem) -> the canonical JWK (RFC 7638 §3): required members
+// only, lexicographic, no whitespace. NULL if the key is unreadable.
+void AcmeJwkScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t pem, ValidityMask &mask, idx_t idx) {
+		    std::string jwk;
+		    std::string err;
+		    if (!quackmail::acme::JwkPublic(pem.GetString(), jwk, err)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, jwk);
+	    });
+}
+
+// qm_acme_thumbprint(key_pem) -> base64url(SHA-256(canonical JWK)).
+void AcmeThumbprintScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t pem, ValidityMask &mask, idx_t idx) {
+		    std::string thumb;
+		    std::string err;
+		    if (!quackmail::acme::JwkThumbprint(pem.GetString(), thumb, err)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, thumb);
+	    });
+}
+
+// qm_acme_key_auth(token, thumbprint) -> RFC 8555 §8.1.
+void AcmeKeyAuthScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t token, string_t thumb) {
+		    return StringVector::AddString(
+		        result, quackmail::acme::KeyAuthorization(token.GetString(), thumb.GetString()));
+	    });
+}
+
+// qm_acme_csr(domains, key_pem) -> base64url DER of a PKCS#10 request. NULL
+// when the names or the key are unusable.
+void AcmeCsrScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::ExecuteWithNulls<string_t, string_t, string_t>(
+	    args.data[0], args.data[1], result, args.size(),
+	    [&](string_t domains, string_t pem, ValidityMask &mask, idx_t idx) {
+		    std::vector<std::string> names;
+		    std::string cur;
+		    for (char c : domains.GetString()) {
+			    if (c == ',' || c == ' ') {
+				    if (!cur.empty()) {
+					    names.push_back(cur);
+					    cur.clear();
+				    }
+				    continue;
+			    }
+			    cur += c;
+		    }
+		    if (!cur.empty()) {
+			    names.push_back(cur);
+		    }
+		    std::string key = pem.GetString();
+		    std::string csr;
+		    std::string err;
+		    if (!quackmail::acme::MakeCsr(names, key, csr, err)) {
+			    mask.SetInvalid(idx);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, csr);
+	    });
+}
+
 // qm_psl_suffix(domain) -> just the public suffix ("co.uk" for "bbc.co.uk").
 void PslSuffixScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t in) {
@@ -2291,6 +2458,24 @@ void LoadInternal(ExtensionLoader &loader) {
 	// Public Suffix List lookups (pure).
 	loader.RegisterFunction(ScalarFunction("qm_psl_org_domain", {V}, V, PslOrgDomainScalar));
 	loader.RegisterFunction(ScalarFunction("qm_psl_suffix", {V}, V, PslSuffixScalar));
+
+	// Wiki: the pure half (diff/patch in Citadel's own format, the Markdown
+	// subset, page-name normalization).
+	loader.RegisterFunction(ScalarFunction("qm_diff", {V, V}, V, DiffScalar));
+	loader.RegisterFunction(ScalarFunction("qm_patch", {V, V}, V, PatchScalar));
+	loader.RegisterFunction(ScalarFunction("qm_markdown", {V}, V, MarkdownScalar));
+	loader.RegisterFunction(ScalarFunction("qm_wiki_euid", {V}, V, WikiEuidScalar));
+	loader.RegisterFunction(ScalarFunction("qm_wiki_history_euid", {V}, V, WikiHistoryEuidScalar));
+
+	// ACME: the pure half, so the JOSE can be checked against the RFCs' own
+	// vectors with no server in the loop.
+	loader.RegisterFunction(ScalarFunction("qm_b64url", {V}, V, B64UrlScalar));
+	loader.RegisterFunction(ScalarFunction("qm_sha256_b64url", {V}, V, Sha256B64UrlScalar));
+	loader.RegisterFunction(ScalarFunction("qm_acme_keygen", {LogicalType::BIGINT}, V, AcmeKeygenScalar));
+	loader.RegisterFunction(ScalarFunction("qm_acme_jwk", {V}, V, AcmeJwkScalar));
+	loader.RegisterFunction(ScalarFunction("qm_acme_thumbprint", {V}, V, AcmeThumbprintScalar));
+	loader.RegisterFunction(ScalarFunction("qm_acme_key_auth", {V, V}, V, AcmeKeyAuthScalar));
+	loader.RegisterFunction(ScalarFunction("qm_acme_csr", {V, V}, V, AcmeCsrScalar));
 
 	// Web codecs (pure; see the scalars above).
 	loader.RegisterFunction(ScalarFunction("qm_url_encode", {V}, V, UrlEncodeScalar));

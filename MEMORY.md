@@ -349,6 +349,120 @@ and the existing compose and read routes rather than growing an item/edit/save
 path. A second way to edit the same object would be a second place to keep
 correct.
 
+### Wiki history is Citadel's format, and the diffs run backwards
+
+A wiki page is an ordinary `format_type = 4` message whose euid is the
+normalized page name. Its history is a **second message**, euid
+`<page>_HISTORY_`, author "Citadel", holding a `multipart/mixed` whose parts are
+each a `text/x-diff`. New revisions are **prepended**, so parts run newest-first,
+and each part's `filename` is base64 of `<old msgnum>|<timestamp>|<author>|`
+**including the trailing NUL** — `ctdl_encode_base64(..., strlen(m)+1, 0)`.
+
+The diffs are **reverse**: each takes the text one revision *older*, so reading
+revision R means patching the current page until the memo names R.
+`serv_wiki.c:234` says so outright ("`new` and `old` appear to be backwards
+here"). Emitting them forwards produces a history that reconstructs from
+nothing, and nothing about the stored bytes would look wrong.
+
+A revision's identifier is the **old message number**; nothing is minted. An
+edit whose diff is empty is refused rather than stored.
+
+All of that was read from `serv_wiki.c` and `webcit/wiki.c`, not guessed, and it
+is the whole reason not to keep revisions in a table of our own: WebCit and the
+Citadel clients can read this, and `WIKI history|` / `WIKI rev|` serve it to
+them.
+
+`core/diff.cpp` produces and consumes it, and this was **verified against the
+oracle rather than reasoned about**: a page was edited three times on a real
+Citadel server, its history message captured, and every one of its four
+revisions replayed by our patcher — and the diff we produce for the same change
+is byte-identical to the one libxdiff produced. The bytes are pinned offline in
+`test/sql/wiki.test`; the transcript and the capture procedure are in
+`test/parity/PARITY_BASELINE.md`.
+
+The capture also confirmed the "unchanged save is refused" rule from the other
+side: posting identical text to the oracle answers `-3 Internal error`, because
+`wiki_upload_beforesave` returns nonzero. `UpsertByEuid` reproduces it as
+`err = "no changes"`.
+
+Two protocol details worth writing down, because both cost a session:
+`SETR`'s field order is **not** `GETR`'s (floor is index 5, listing order 6,
+view 7), and `ENT0`'s EUID is field **9** with `do_confirm` at 6 — with confirm
+off the server sends *no reply at all* after the `000`, which reads exactly like
+a hang.
+
+### Page names: `str_wiki_index` is stranger than it looks
+
+`StrBufSanitizeAscii(s, '_')` replaces every byte `< 0x20` or `> 0x7F` with `_`,
+then `StrBufLowerCase`. That is **all**. A space survives as a space, so
+`Front Page` is the euid `front page` — not `front_page`, which is what everyone
+assumes. 0x7F itself is not replaced. An empty name means `home`.
+
+### `VIEW_WIKIMD` is not a code Citadel has
+
+`ROOM_VIEWS` in current `libcitadel.h` ends `VIEW_QUEUE = 11, VIEW_MAX,
+VIEW_JSON_LIST`, so **12 is not free**. Worse, `webcit/roomviews.c` sizes
+`exchangeable_views[VIEW_MAX][VIEW_MAX]` from that and indexes it by the room's
+current view, so a room set to 12 reads out of bounds in the oracle's own web
+client. `cmd_setr` stores the int without validation, so it goes on the wire
+fine — it is WebCit that breaks.
+
+It existed once (commit `7d548835`, "Markdown: start adding markdown wiki mode")
+and was removed. The constant is kept here only so such a room still renders,
+and is behind `qm_wiki_markdown_view` in every picker. **Markdown is a property
+of the page's MIME type** (`text/x-markdown`), not of the room's view code,
+which is what upstream actually shipped for rendering and which works in a plain
+`VIEW_WIKI` room.
+
+### Wiki versioning hooks the store, not the web front-end
+
+`citadel::UpsertByEuid` calls `wiki::RecordRevision`. Citadel does this with a
+server-wide `EVT_BEFORESAVE` hook precisely so every front-end produces history
+— the same argument that keeps `CanPost` in the store and forbids re-deriving
+it. Note the limit of the claim: it hooks the **euid-keyed write path**, so a
+plain IMAP `APPEND`, which carries no euid, adds a message rather than a
+revision. That is what it asked for.
+
+### The ACME challenge must answer before the HTTPS redirect
+
+`/.well-known/acme-challenge/` is dispatched next to `/healthz` in
+`web_router.cpp`, *above* the `qm_web_force_https` gate. That gate redirects
+everything to `https://c_fqdn`, and at first issuance there is nothing there but
+the self-signed certificate being replaced — so a challenge routed through it
+cannot be answered. Let's Encrypt does follow redirects, but only to somewhere
+that already works. `test_acme.py` runs with the redirect deliberately **on**
+for exactly this reason.
+
+### A renewed certificate reaches a running listener because AcceptLoop re-reads
+
+`ServerController::AcceptLoop` calls `tls_ctx_.Get()` on **every accept** rather
+than caching it, which is what makes hot reload possible at all: swapping an
+`std::atomic<SSL_CTX*>` inside `TlsContext` takes effect on the next connection,
+with no listener restart and no dropped sockets.
+
+A retired `SSL_CTX` is **kept, not freed**, until the context is destroyed. A
+thread can be between `Get()` and `SSL_new`, and freeing underneath it is a
+crash; six renewals a year is a few kilobytes.
+
+`RegisterServerControls` registers `<prefix>_tls_reload()` for every listener
+from one place, and the worker discovers them through `duckdb_functions()` — the
+catalog is already an authoritative register of what is loaded, so there is no
+second list to keep in step. **The sweep must exclude itself**: the SQL wrapper
+was originally called `qm_acme_tls_reload`, matched its own `%_tls_reload`
+pattern, and recursed until the stack ran out. It is `qm_acme_reload` now *and*
+excluded by name.
+
+### `ClientContext` verifies nothing, and that is deliberate
+
+Its original caller is MX-to-MX transport, where relays commonly present
+self-signed or mismatched certificates and encryption-without-authentication is
+the norm. `ConnectTls` also sent no SNI. Both stayed exactly as they were; the
+verifying mode and the SNI-plus-hostname mode are **additive overloads**, taken
+only by callers whose peer identity actually matters. An ACME client is the
+first of those, and there is deliberately no way to switch verification off —
+`qm_acme_ca_bundle` replaces the trust store instead, which is also what makes a
+private ACME server work.
+
 ### `default_view` decides how a room renders, and `?view=raw` always escapes
 
 The view codes go on the wire in `GETR`/`SETR`, so they are transcribed from the
@@ -659,18 +773,46 @@ docker run -d --name citadel --restart unless-stopped \
   `leo`/`leo` with `CREU leo|leo|4` to reproduce the 1:1 diffing pair this file
   describes below.
 - The **text client** is at `/usr/local/bin/citadel` inside the container. The
-  container has **no source tree** — read the source from citadel.org or a
-  checkout when the spec matters.
+  container has **no source tree** — see "Reading the source" below.
+- On a host where `ai` is not in the `docker` group, every `docker` command here
+  needs `sudo`.
 - The container is disposable: `docker rm -f citadel && docker volume rm
   citadel-data` resets it completely, which is cheaper than restoring a box.
 
 Nothing else about parity changes — the protocol facts below were probed
 against the same server and still hold.
 
+## Reading the source: `code.citadel.org`
+
+**Source is the spec.** Neither the docker container nor this workstation has a
+Citadel checkout, so read it over HTTP from the project's own cgit:
+
+```bash
+curl -sS -b 'cgit_access=verified' \
+  https://code.citadel.org/citadel.git/plain/<path>
+```
+
+- The **`cgit_access=verified` cookie is required.** The site answers every
+  request with a JavaScript interstitial that sets it; without the cookie you
+  get the challenge page and not the file, which looks exactly like a 200 with
+  the wrong content.
+- `/citadel.git/tree/<dir>` browses, `/citadel.git/plain/<path>` returns raw,
+  `/citadel.git/patch/?id=<sha>` returns a commit. History matters more than it
+  sounds: features have been *removed* from Citadel, and a constant that exists
+  only in an old commit is a constant you must not use (see the `VIEW_WIKIMD`
+  note under room views).
+- Paths worth knowing: `citadel/server/modules/<proto>/` (protocol servers),
+  `citadel/server/msgbase.c` (message rendering), `libcitadel/lib/libcitadel.h`
+  (shared constants and enums), `textclient/` (the BBS client), `webcit/` and
+  `webcit-ng/` (the web clients).
+
 ## The test box: debian.lan
 
-Historical, and still accurate if you have it. The docker oracle above replaces
-the parity half of it on a machine that cannot reach this host.
+**Gone — `debian.lan` no longer resolves, and neither does the `quackcit` SSH
+alias.** Kept for the details that are still true if the box ever comes back,
+and for the `LD_PRELOAD` trick, which is about the client and not about the
+host. The docker oracle above replaces the parity half; `code.citadel.org`
+replaces the source half.
 
 - SSH: `ssh -i ~/.ssh/quackcit_dev leo@debian.lan` (config alias `quackcit`).
   `leo` has working sudo (an old `NOPASSED` sudoers typo was fixed on

@@ -130,6 +130,35 @@ cmd_dkim() {
     esac
 }
 
+cmd_acme() {
+    action=${1:-status}; shift 2>/dev/null || true
+    case "$action" in
+        status)  q "SELECT * FROM qm_acme_certs()" ;;
+        account) q "SELECT * FROM qm_acme_account()" ;;
+        order)
+            need 2 "$@"
+            q "SELECT ok, note FROM qm_acme_order($(sql_str "$1"), $(sql_str "$2"))"
+            echo
+            echo "Queued. The qm_acme worker performs the order; watch it with:"
+            echo "    quackcitadm.sh acme status"
+            echo "Every name must resolve to this server and reach it on port 80."
+            ;;
+        renew)
+            # force := true: "renew this now" is an explicit request, and it is
+            # the only thing here that ignores the renewal window.
+            need 1 "$@"
+            q "SELECT * FROM qm_acme_run(name := $(sql_str "$1"), force := true)" ;;
+        run)     q "SELECT * FROM qm_acme_run()" ;;
+        reload)  q "SELECT * FROM qm_acme_reload()" ;;
+        revoke)
+            need 1 "$@"
+            reason=$(sql_int "${2:-0}")
+            q "SELECT ok, note FROM qm_acme_revoke($(sql_str "$1"), reason => $reason)" ;;
+        forget)  need 1 "$@"; q "SELECT ok, note FROM qm_acme_forget($(sql_str "$1"))" ;;
+        *) die "unknown acme command '$action' (status|account|order|renew|run|reload|revoke|forget)" ;;
+    esac
+}
+
 cmd_ratelimit() {
     action=${1:-list}; shift 2>/dev/null || true
     case "$action" in
@@ -362,6 +391,14 @@ usage: quackcitadm.sh <object> <action> [arguments]
   rbl       add <zone> | remove <zone> | list | check <ip>
   dkim      keygen <domain> <selector> [bits] | list | remove <domain> <selector>
             verify <file>
+  acme      status | account | order <name> <domains> | renew <name> | run
+            reload | revoke <name> [reason] | forget <name>
+              obtain and renew certificates over http-01 (RFC 8555). <domains>
+              is comma or space separated and every name must resolve here and
+              be reachable on port 80. "order" queues the work; the qm_acme
+              worker performs it. "reload" puts a renewed certificate into
+              service without dropping a connection. The directory defaults to
+              Let's Encrypt *staging* — see QUACKCIT_ACME_* in quackcit.conf
   ratelimit set <user|''> <burst_max> <burst_secs> <daily_max> | list | status <user>
               the '' user is the default policy (100/300s, 500/24h)
   sieve     list <user> | get <user> <name> | set <user> <name> <file>
@@ -425,6 +462,7 @@ case "$object" in
     acl)       cmd_acl "$@" ;;
     rbl)       cmd_rbl "$@" ;;
     dkim)      cmd_dkim "$@" ;;
+    acme)      cmd_acme "$@" ;;
     ratelimit) cmd_ratelimit "$@" ;;
     sieve)     cmd_sieve "$@" ;;
     config)    cmd_config "$@" ;;

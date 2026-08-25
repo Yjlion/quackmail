@@ -28,6 +28,16 @@ public:
 	           const tls::TlsConfig &tls_config, ConnHandler handler, std::string &err);
 	bool Stop(std::string &err);
 
+	// Re-read the certificate and key from the paths Start was given and put
+	// the new material in service. Existing connections are untouched and the
+	// listening socket is not disturbed: AcceptLoop reads the context afresh on
+	// every accept, so the next connection gets the new certificate.
+	//
+	// False with `err` set when the listener was started without certificate
+	// paths, or when the new material does not load — in which case the old
+	// certificate stays in service rather than the listener losing TLS.
+	bool ReloadTls(std::string &err);
+
 	bool IsRunning();
 	std::string Host();
 	int Port();

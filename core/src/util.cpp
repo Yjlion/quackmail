@@ -125,21 +125,46 @@ std::string RandomHex(size_t bytes) {
 	return out;
 }
 
+std::string Base64UrlEncode(const std::string &in) {
+	std::string b64 = Base64Encode(in);
+	std::string out;
+	out.reserve(b64.size());
+	for (char c : b64) {
+		if (c == '=' || c == '\r' || c == '\n') {
+			continue; // unpadded, and never folded
+		}
+		out += (c == '+') ? '-' : (c == '/') ? '_' : c;
+	}
+	return out;
+}
+
+bool Base64UrlDecode(const std::string &in, std::string &out) {
+	std::string b64;
+	b64.reserve(in.size() + 3);
+	for (char c : in) {
+		if (c == '\r' || c == '\n') {
+			continue;
+		}
+		b64 += (c == '-') ? '+' : (c == '_') ? '/' : c;
+	}
+	while (b64.size() % 4 != 0) {
+		b64 += '=';
+	}
+	return Base64Decode(b64, out);
+}
+
 std::string RandomBase64Url(size_t bytes) {
 	std::string raw;
 	if (!RandomBytes(bytes, raw)) {
 		return std::string();
 	}
-	std::string b64 = Base64Encode(raw);
-	std::string out;
-	out.reserve(b64.size());
-	for (char c : b64) {
-		if (c == '=') {
-			continue; // unpadded: the token travels in a cookie
-		}
-		out += (c == '+') ? '-' : (c == '/') ? '_' : c;
-	}
-	return out;
+	return Base64UrlEncode(raw);
+}
+
+std::string Sha256Raw(const std::string &in) {
+	unsigned char digest[SHA256_DIGEST_LENGTH];
+	SHA256(reinterpret_cast<const unsigned char *>(in.data()), in.size(), digest);
+	return std::string(reinterpret_cast<const char *>(digest), sizeof(digest));
 }
 
 std::string Sha256Hex(const std::string &in) {

@@ -8,7 +8,7 @@ namespace quackmail {
 
 using namespace duckdb;
 
-enum class ServerAction { START, STOP, STATUS };
+enum class ServerAction { START, STOP, STATUS, TLS_RELOAD };
 
 // Carried to the generic bind via TableFunction.function_info so one set of
 // callbacks serves every extension's start/stop/status functions.
@@ -102,6 +102,18 @@ static unique_ptr<GlobalTableFunctionState> ControlInit(ClientContext &context, 
 	case ServerAction::STATUS:
 		note = ctrl->IsRunning() ? "running" : "stopped";
 		break;
+	case ServerAction::TLS_RELOAD: {
+		// Registered for every listener from one place, so a renewed
+		// certificate can be taken into use without stopping anything and so a
+		// listener added later cannot forget to offer it.
+		std::string err;
+		if (!ctrl->IsRunning()) {
+			note = "not running";
+		} else {
+			note = ctrl->ReloadTls(err) ? "reloaded" : ("error: " + err);
+		}
+		break;
+	}
 	}
 
 	gstate->action_name = info->action_name;
@@ -155,6 +167,8 @@ void RegisterServerControls(ExtensionLoader &loader, const std::string &prefix, 
 	            {LogicalType::VARCHAR, LogicalType::INTEGER}, true, default_port, controller, handler);
 	RegisterOne(loader, prefix + "_stop", ServerAction::STOP, {}, false, default_port, controller, handler);
 	RegisterOne(loader, prefix + "_status", ServerAction::STATUS, {}, false, default_port, controller, handler);
+	RegisterOne(loader, prefix + "_tls_reload", ServerAction::TLS_RELOAD, {}, false, default_port,
+	            controller, handler);
 }
 
 } // namespace quackmail

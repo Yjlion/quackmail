@@ -1,0 +1,219 @@
+# name: test/sql/wiki.test
+# description: wiki page names, the diff format Citadel stores history in, and the Markdown subset
+# group: [quackmail]
+#
+# The three pure pieces the wiki view rests on. They are asserted here rather
+# than through the web interface because the *format* is what matters: a page
+# euid we spell differently, or a diff a libxdiff patcher will not accept, is a
+# history real Citadel and WebCit cannot read — and that interoperability is the
+# only reason to store history this way instead of in a table of our own.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# ---- page names ------------------------------------------------------------
+#
+# str_wiki_index() in webcit/wiki.c: StrBufSanitizeAscii(s, '_') then lowercase.
+# StrBufSanitizeAscii replaces every byte below 0x20 or above 0x7F with the mute
+# character and nothing else — so a space survives as a space, which is the part
+# that surprises people. An empty name is the front page.
+
+query IIII
+SELECT qm_wiki_euid('HOME'), qm_wiki_euid('Front Page'),
+       qm_wiki_euid(''), qm_wiki_euid('  Padded  ');
+----
+home	front page	home	padded
+
+# Non-ASCII becomes '_', one per byte — "Café" is five bytes in UTF-8.
+
+query II
+SELECT qm_wiki_euid('Café'), qm_wiki_euid(E'tab\there');
+----
+caf__	tab_here
+
+# The history companion is the page euid plus "_HISTORY_", which is the euid the
+# server-side save hook looks for and refuses to recurse into.
+
+query II
+SELECT qm_wiki_history_euid('home'), qm_wiki_history_euid(qm_wiki_euid('Front Page'));
+----
+home_HISTORY_	front page_HISTORY_
+
+# ---- diff and patch --------------------------------------------------------
+#
+# Round trip: applying the diff of two texts to the first yields the second.
+# This is the property the whole history chain depends on.
+
+query I
+SELECT qm_patch(a, qm_diff(a, b)) = b
+  FROM (VALUES
+          (E'a\nb\nc\n',        E'a\nB\nc\n'),
+          (E'a\nb\nc\n',        E'a\nb\nc\nd\n'),
+          (E'a\nb\nc\n',        E''),
+          (E'',                 E'x\ny\n'),
+          (E'one\ntwo\nthree',  E'one\ntwo\nTHREE'),
+          (E'x\n',              E'x'),
+          (E'x',                E'x\n')
+       ) AS t(a, b);
+----
+true
+true
+true
+true
+true
+true
+true
+
+# Identical texts produce no diff at all. Citadel refuses a wiki save that
+# changes nothing rather than storing an empty change set, and an empty patch in
+# the chain would reconstruct to the wrong text.
+
+query I
+SELECT qm_diff(E'same\n', E'same\n') = '';
+----
+true
+
+# The emitted format is a plain unified diff with hunk headers and no file
+# header — what libxdiff emits and what xdl_patch accepts. Newlines are folded
+# to '|' so the whole thing is one comparable value.
+
+query I
+SELECT replace(qm_diff(E'a\nb\nc\n', E'a\nB\nc\n'), chr(10), '|');
+----
+@@ -1,3 +1,3 @@| a|-b|+B| c|
+
+# A missing final newline is marked the way every unified diff marks it, because
+# losing it would silently rewrite the page on each round trip.
+
+query I
+SELECT qm_diff(E'one\ntwo\nthree', E'one\ntwo\nTHREE') LIKE '%\ No newline at end of file%';
+----
+true
+
+# A patch that does not apply is refused rather than applied approximately.
+
+query I
+SELECT qm_patch(E'x\ny\nz\n', qm_diff(E'a\nb\nc\n', E'a\nB\nc\n')) IS NULL;
+----
+true
+
+# ---- markdown --------------------------------------------------------------
+
+query IIII
+SELECT replace(qm_markdown(E'# Title\n'), chr(10), '|'),
+       replace(qm_markdown(E'a **bold** b\n'), chr(10), '|'),
+       replace(qm_markdown(E'- one\n- two\n'), chr(10), '|'),
+       replace(qm_markdown(E'`code`\n'), chr(10), '|');
+----
+<h1>Title</h1>|	<p>a <strong>bold</strong> b</p>|	<ul>|<li>one</li>|<li>two</li>|</ul>|	<p><code>code</code></p>|
+
+# Raw HTML in the source is escaped rather than passed through. That is a
+# deliberate departure from CommonMark: it removes the injection surface at the
+# source instead of relying on a sanitizer downstream to catch it.
+
+query II
+SELECT qm_markdown(E'<script>alert(1)</script>\n') NOT LIKE '%<script>%',
+       qm_markdown(E'<script>alert(1)</script>\n') LIKE '%&lt;script&gt;%';
+----
+true	true
+
+# A javascript: URL never reaches an href, in a link or an image.
+
+query II
+SELECT qm_markdown(E'[click](javascript:alert(1))\n') NOT LIKE '%javascript:%',
+       qm_markdown(E'![x](javascript:alert(1))\n') NOT LIKE '%javascript:%';
+----
+true	true
+
+# A quote character in a URL cannot break out of the attribute.
+
+query I
+SELECT qm_markdown(E'[a](https://e.com/" onmouseover="alert(1))\n') NOT LIKE '%onmouseover="alert%';
+----
+true
+
+# Wiki links render as plain text without a resolver: this function has no room
+# to resolve them against, and inventing a URL here would be a broken link.
+
+query I
+SELECT qm_markdown(E'see [[glossary]]\n') NOT LIKE '%<a %';
+----
+true
+
+# Bounded on adversarial input — these must return, not hang. The values are not
+# asserted; that they complete is the assertion.
+
+query I
+SELECT length(qm_markdown(repeat('*', 20000))) >= 0
+   AND length(qm_markdown(repeat('[a](', 20000))) >= 0
+   AND length(qm_markdown(repeat('`a', 20000))) >= 0
+   AND length(qm_markdown(repeat('> ', 5000) || 'deep')) >= 0;
+----
+true
+
+# The same for the diff engine: two large, wholly different texts must degrade
+# to a whole-file change rather than explore an unbounded edit distance.
+
+query I
+SELECT qm_patch(a, qm_diff(a, b)) = b
+  FROM (SELECT string_agg('a' || i, E'\n') AS a, string_agg('b' || i, E'\n') AS b
+          FROM range(4000) t(i)) s;
+----
+true
+
+# ---- parity: bytes a real Citadel server wrote -----------------------------
+#
+# Captured from the oracle (Citadel in docker, a VIEW_WIKI room, one page edited
+# three times) and pinned here. These are libxdiff's own output and Citadel's
+# own memo encoding — the two things this whole storage format exists to
+# interoperate with, and the two that would fail silently if we drifted.
+#
+# The fixtures the transcript came from are in
+# test/parity/real_citadel/wiki_page.txt and wiki_history.txt.
+
+# The memo in each part's filename is "<old msgnum>|<timestamp>|<author>|"
+# base64'd **including its trailing NUL** — ctdl_encode_base64(m, strlen(m)+1).
+# Without that NUL the base64 differs, and a history we write is one WebCit
+# cannot read.
+
+query II
+SELECT qm_b64url('22|1787678250|admin|' || chr(0)) = 'MjJ8MTc4NzY3ODI1MHxhZG1pbnwA',
+       qm_b64url('20|1787678249|admin|' || chr(0)) = 'MjB8MTc4NzY3ODI0OXxhZG1pbnwA';
+----
+true	true
+
+# A diff the real server produced, applied by our patcher to the page it was
+# produced against. Note what it is a diff *of*: the whole stored blob, headers
+# included, which is why the hunk starts at line 3.
+
+query I
+SELECT qm_patch(
+  E'Content-type: text/plain\n\nRevision A 1787678249.\nLine two changed.\nLine three.\nLine four.\n',
+  E'@@ -3,4 +3,3 @@\n Revision A 1787678249.\n Line two changed.\n Line three.\n-Line four.\n')
+  = E'Content-type: text/plain\n\nRevision A 1787678249.\nLine two changed.\nLine three.\n';
+----
+true
+
+# And the one below it in the chain, which walks back another revision.
+
+query I
+SELECT qm_patch(
+  E'Content-type: text/plain\n\nRevision A 1787678249.\nLine two changed.\nLine three.\n',
+  E'@@ -1,5 +1,4 @@\n Content-type: text/plain\n \n Revision A 1787678249.\n-Line two changed.\n-Line three.\n+Line two.\n')
+  = E'Content-type: text/plain\n\nRevision A 1787678249.\nLine two.\n';
+----
+true
+
+# The other direction: a diff *we* produce for the same change is byte-identical
+# to the one libxdiff produced above. This is the assertion that says a history
+# written here is one the real server can replay.
+
+query I
+SELECT qm_diff(
+  E'Content-type: text/plain\n\nRevision A 1787678249.\nLine two changed.\nLine three.\nLine four.\n',
+  E'Content-type: text/plain\n\nRevision A 1787678249.\nLine two changed.\nLine three.\n')
+  = E'@@ -3,4 +3,3 @@\n Revision A 1787678249.\n Line two changed.\n Line three.\n-Line four.\n';
+----
+true

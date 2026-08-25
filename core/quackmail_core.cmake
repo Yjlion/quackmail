@@ -31,6 +31,17 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/websession.cpp
         ${QUACKMAIL_CORE_DIR}/src/telnet.cpp
         ${QUACKMAIL_CORE_DIR}/src/wildmat.cpp
+        # Wiki rooms: a line diff/patch pair in Citadel's own on-the-wire
+        # format, a bounded Markdown subset, and the page/history storage the
+        # two are for.
+        ${QUACKMAIL_CORE_DIR}/src/diff.cpp
+        ${QUACKMAIL_CORE_DIR}/src/markdown.cpp
+        ${QUACKMAIL_CORE_DIR}/src/wiki.cpp
+        # ACME (RFC 8555). The crypto is split from the state machine so the
+        # JWS, the JWK thumbprint and the CSR can be asserted from SQL against
+        # the RFCs' own known-answer vectors, with no server in the loop.
+        ${QUACKMAIL_CORE_DIR}/src/acme_crypto.cpp
+        ${QUACKMAIL_CORE_DIR}/src/acme.cpp
         ${QUACKMAIL_CORE_DIR}/src/xmlstream.cpp
         # The pure half of WebDAV: the XML document reader and writer built on
         # that tokenizer, plus the resource-name encoding.

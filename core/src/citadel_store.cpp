@@ -1,5 +1,7 @@
 #include "quackmail/citadel_store.hpp"
 
+#include "quackmail/wiki.hpp"
+
 #include "duckdb/main/materialized_query_result.hpp"
 
 #include <algorithm>
@@ -1772,6 +1774,33 @@ int64_t UpsertByEuid(Connection &con, const Message &msg, int64_t room_num, std:
 	}
 
 	int64_t old = FindByEuid(con, room_num, msg.euid);
+
+	// Wiki rooms keep version history, and it is recorded *here* rather than in
+	// the web front-end because Citadel does it with a server-wide save hook
+	// (wiki_upload_beforesave). An IMAP APPEND or a Citadel ENT0 into a wiki
+	// room has to produce history too, or the history is only as complete as
+	// one front-end's share of the edits — the same argument that keeps CanPost
+	// in the store and forbids re-deriving it.
+	if (old >= 0 && !wiki::IsHistoryEuid(msg.euid)) {
+		Room room;
+		if (GetRoomByNum(con, room_num, room) && wiki::IsWikiView(room.default_view)) {
+			std::string hist_err;
+			switch (wiki::RecordRevision(con, room_num, msg.euid, msg.raw, hist_err)) {
+			case wiki::RecordResult::Unchanged:
+				// Citadel refuses a save that changes nothing rather than
+				// storing an empty diff, and so must we: an empty patch in the
+				// chain reconstructs to the wrong text.
+				err = "no changes";
+				return -1;
+			case wiki::RecordResult::Error:
+				err = hist_err.empty() ? "the page history could not be written" : hist_err;
+				return -1;
+			case wiki::RecordResult::Recorded:
+			case wiki::RecordResult::NoPrevious:
+				break;
+			}
+		}
+	}
 
 	// InsertMessage runs its own transaction, so the replace cannot be wrapped
 	// in an outer one without nesting. Insert first and unlink second: the

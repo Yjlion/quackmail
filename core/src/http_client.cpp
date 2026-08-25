@@ -130,9 +130,25 @@ bool Url::Parse(const std::string &url) {
 	return !host.empty() && port > 0;
 }
 
+std::string Response::Header(const std::string &name) const {
+	const std::string want = util::Lower(name);
+	for (const auto &h : headers) {
+		if (h.first == want) {
+			return h.second;
+		}
+	}
+	return std::string();
+}
+
 Response Get(const std::string &url, const Options &opts) {
+	return Request(url, opts);
+}
+
+Response Request(const std::string &url, const Options &opts) {
 	Response res;
 	std::string current = url;
+	const std::string method = opts.method.empty() ? std::string("GET") : opts.method;
+	const bool is_get = method == "GET";
 
 	for (int hop = 0; hop <= opts.max_redirects; hop++) {
 		Url u;
@@ -152,16 +168,40 @@ Response Get(const std::string &url, const Options &opts) {
 
 		tls::ClientContext ctx;
 		if (u.scheme == "https") {
-			if (!ctx.Init(err) || !s.ConnectTls(ctx.Get(), err)) {
+			tls::ClientTlsConfig tls_config;
+			tls_config.verify_peer = opts.verify_peer;
+			tls_config.ca_bundle = opts.ca_bundle;
+			if (!ctx.Init(tls_config, err) || !s.ConnectTls(ctx.Get(), u.host, err)) {
 				res.error = "TLS handshake failed: " + err;
 				return res;
 			}
 		}
 
-		std::string req = "GET " + u.path + " HTTP/1.1\r\n";
+		std::string req = method + " " + u.path + " HTTP/1.1\r\n";
 		req += "Host: " + u.host + "\r\n";
 		req += "User-Agent: " + opts.user_agent + "\r\n";
-		req += "Accept: application/rss+xml, application/atom+xml, application/xml, text/xml, */*\r\n";
+		req += "Accept: " +
+		       (opts.accept.empty()
+		            ? std::string("application/rss+xml, application/atom+xml, application/xml, "
+		                          "text/xml, */*")
+		            : opts.accept) +
+		       "\r\n";
+		if (!opts.content_type.empty()) {
+			req += "Content-Type: " + opts.content_type + "\r\n";
+		}
+		for (const auto &h : opts.headers) {
+			// A header value carrying CR or LF is a request-splitting attempt,
+			// and there is no legitimate caller for one.
+			if (h.first.find_first_of("\r\n:") != std::string::npos ||
+			    h.second.find_first_of("\r\n") != std::string::npos) {
+				res.error = "invalid request header";
+				return res;
+			}
+			req += h.first + ": " + h.second + "\r\n";
+		}
+		if (!opts.body.empty() || !is_get) {
+			req += "Content-Length: " + std::to_string(opts.body.size()) + "\r\n";
+		}
 		// Only on the first hop: a redirect target is a different resource, and
 		// its cache validators are not the ones we hold.
 		if (hop == 0 && !opts.etag.empty()) {
@@ -173,6 +213,7 @@ Response Get(const std::string &url, const Options &opts) {
 		// One request per connection: keep-alive buys nothing for a poll that
 		// happens once every fifteen minutes, and costs connection-reuse bugs.
 		req += "Connection: close\r\n\r\n";
+		req += opts.body;
 		if (!s.Write(req)) {
 			res.error = "could not send the request";
 			return res;
@@ -188,10 +229,21 @@ Response Get(const std::string &url, const Options &opts) {
 
 		// 304 shares the 3xx range with the redirects but is not one: it is the
 		// success case for a conditional request, and has no Location to follow.
+		res.headers = headers;
+
 		if (status == 304) {
 			res.etag = Header(headers, "etag");
 			res.last_modified = Header(headers, "last-modified");
 			res.ok = true; // nothing changed, and no body to read
+			return res;
+		}
+
+		if (!is_get && (status == 301 || status == 302 || status == 303 || status == 307 ||
+		                status == 308)) {
+			// Deliberately not followed. Whether the body may be resent depends
+			// on which of these it is, and no caller here needs the answer; the
+			// Location is on the response for one that does.
+			res.ok = true;
 			return res;
 		}
 

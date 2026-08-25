@@ -86,3 +86,29 @@ mailbox rooms (no INBOX/ prefix, no floor path for public rooms).
 - **A** (seeding): add the 4 public rooms + 8 per-user rooms with correct views/flags; realign QR_*.
 - **B** (IMAP): STARTTLS/AUTHENTICATE, NAMESPACE, INBOX/ + floor-path LIST, STATUS/SEARCH/APPEND/COPY/MOVE, folder ops, real UIDVALIDITY.
 - **C** (Citadel): RWHO/SEXP/GEXP, MOVE/DELE, TIME, aide verbs, greeting/INFO fidelity.
+
+## Wiki rooms (VIEW_WIKI)
+
+Captured 2026-08-25 from the docker oracle: a room created with
+`CRE8 1|WikiParity|0||0|0|64|6`, its view set with
+`SETR WikiParity|||2|0|0|64|6|0` (SETR's field order is *not* GETR's — floor is
+index 5, order 6, view 7), and one page written three times with
+`ENT0 1||0|4|home||1|||home` (field 9 is the EUID; field 6 is do_confirm, and
+with it off the server sends no reply at all after the `000`).
+
+`wiki_page.txt` and `wiki_history.txt` are `MSG2` of the two messages. Note that
+`MSG2` prepends synthesized RFC822 headers; the *stored* blob begins at the
+`Content-type:` line, and that blob — headers included — is what Citadel diffs.
+
+What the capture confirmed, all of it now pinned offline in `test/sql/wiki.test`:
+
+- `WIKI history|home` returns one memo per line, newest first, as
+  `<old msgnum>|<timestamp>|<author>|`.
+- Each part's `filename` is that memo base64'd **including its trailing NUL**.
+- The preamble text and the `Citadel--Multipart--%04x--%08lx` boundary shape.
+- The diffs are **reverse** — the newest one removes the line most recently
+  added — and are ordinary 3-line-context unified diffs over the whole blob.
+- Our patcher replays every one of the oracle's four revisions, and the diff we
+  produce for the same change is byte-identical to libxdiff's.
+- **A save whose text is unchanged is rejected** (`-3 Internal error`), which is
+  the behaviour `UpsertByEuid` now reproduces as `err = "no changes"`.
