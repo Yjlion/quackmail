@@ -1,0 +1,173 @@
+# name: test/sql/acme.test
+# description: the pure half of the ACME client — JWK, thumbprint, key authorization, CSR
+# group: [quackmail]
+#
+# JOSE fails silently. A JWK whose members are in the wrong order, or a
+# thumbprint taken over a pretty-printed document, produces a key authorization
+# that is wrong in no visible way until a CA reports that the challenge did not
+# match — by which time the account has a failed validation against its hourly
+# limit. Both RFC 7638 §3.1 and RFC 8555 §8.1 publish worked examples, and this
+# checks against them with no server and no network.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# ---- base64url -------------------------------------------------------------
+#
+# RFC 4648 §5, unpadded: '+' and '/' become '-' and '_', and the '=' go.
+
+query III
+SELECT qm_b64url(''), qm_b64url('f'), qm_b64url('foobar');
+----
+(empty)	Zg	Zm9vYmFy
+
+# The two characters that differ from standard base64: '+' becomes '-' and '/'
+# becomes '_'. ("  >" is "ICA+" in standard base64, "  ?" is "ICA/".)
+
+query IIII
+SELECT qm_b64url('  >'), qm_b64url('  ?'),
+       qm_b64url('  >') NOT LIKE '%+%', qm_b64url('  ?') NOT LIKE '%/%';
+----
+ICA-	ICA_	true	true
+
+# Padding is never emitted: a JWS member is unpadded base64url.
+
+query I
+SELECT bool_and(qm_b64url(s) NOT LIKE '%=%')
+  FROM (VALUES ('a'), ('ab'), ('abc'), ('abcd'), ('abcde')) t(s);
+----
+true
+
+# ---- RFC 7638 §3.1: the published thumbprint -------------------------------
+#
+# The canonical JWK from the RFC, hashed and encoded here. This is the one part
+# of the chain that can be checked against an authority rather than against
+# itself, so it is worth spelling the whole modulus out.
+
+query I
+SELECT qm_sha256_b64url(
+  '{"e":"AQAB","kty":"RSA","n":"0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4' ||
+  'cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n' ||
+  '9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHz' ||
+  'u6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBn' ||
+  'iIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw"}');
+----
+NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs
+
+# ---- a real key ------------------------------------------------------------
+#
+# 2048 bits, generated once and reused across the assertions below.
+
+statement ok
+CREATE TEMP TABLE k AS SELECT qm_acme_keygen(2048) AS pem;
+
+query II
+SELECT pem LIKE '-----BEGIN PRIVATE KEY-----%', length(pem) > 1000 FROM k;
+----
+true	true
+
+# The JWK is exactly the required members, lexicographically, with no
+# whitespace. That spelling *is* the thumbprint's input, so it is not a matter
+# of taste — a space anywhere in here changes the answer.
+
+query II
+SELECT qm_acme_jwk(pem) LIKE '{"e":"%","kty":"RSA","n":"%"}',
+       qm_acme_jwk(pem) NOT LIKE '% %'
+  FROM k;
+----
+true	true
+
+# RSA's usual public exponent, 65537, is AQAB in this encoding.
+
+query I
+SELECT qm_acme_jwk(pem) LIKE '{"e":"AQAB",%' FROM k;
+----
+true
+
+# The thumbprint is base64url(SHA-256(that JWK)) — computed here through the
+# independent scalar rather than by asking the same code twice.
+
+query I
+SELECT qm_acme_thumbprint(pem) = qm_sha256_b64url(qm_acme_jwk(pem)) FROM k;
+----
+true
+
+# 32 bytes, base64url, unpadded: 43 characters.
+
+query II
+SELECT length(qm_acme_thumbprint(pem)) = 43,
+       qm_acme_thumbprint(pem) NOT LIKE '%=%'
+  FROM k;
+----
+true	true
+
+# ---- RFC 8555 §8.1: the key authorization ----------------------------------
+#
+# token || '.' || thumbprint, and nothing else. It is served verbatim at
+# /.well-known/acme-challenge/<token>.
+
+query I
+SELECT qm_acme_key_auth('evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ-PCt92wr-oA',
+                        'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs');
+----
+evaGxfADs6pSRb2LAv9IZf17Dt3juxGJ-PCt92wr-oA.NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs
+
+query I
+SELECT qm_acme_key_auth('tok', qm_acme_thumbprint(pem)) = 'tok.' || qm_acme_thumbprint(pem)
+  FROM k;
+----
+true
+
+# ---- the CSR ---------------------------------------------------------------
+
+query II
+SELECT length(qm_acme_csr('example.com,www.example.com', pem)) > 400,
+       qm_acme_csr('example.com', pem) NOT LIKE '%=%'
+  FROM k;
+----
+true	true
+
+# More names make a longer request: every name goes in the subjectAltName, not
+# just the first. A CN-only certificate has not been accepted by a browser in
+# years.
+
+query I
+SELECT length(qm_acme_csr('a.example.com,b.example.com,c.example.com', pem)) >
+       length(qm_acme_csr('a.example.com', pem))
+  FROM k;
+----
+true
+
+# A list may be separated by commas or spaces, so a space is a separator rather
+# than a bad character: "a.example.com b.example.com" is two names.
+
+query I
+SELECT qm_acme_csr('a.example.com b.example.com', pem) =
+       qm_acme_csr('a.example.com,b.example.com', pem)
+  FROM k;
+----
+true
+
+# Names come from configuration, never from a request — but a name that would
+# corrupt the request is refused rather than encoded, and so is an unusable key.
+
+query IIIII
+SELECT qm_acme_csr('', pem) IS NULL,
+       qm_acme_csr('a"b.example.com', pem) IS NULL,
+       qm_acme_csr(E'x\ny.example.com', pem) IS NULL,
+       qm_acme_csr(repeat('a', 300) || '.example.com', pem) IS NULL,
+       qm_acme_csr('ok.example.com', 'not a key') IS NULL
+  FROM k;
+----
+true	true	true	true	true
+
+# A key that is not RSA, or not a key at all, is refused rather than
+# half-handled: this client signs RS256 only and says so.
+
+query II
+SELECT qm_acme_jwk('-----BEGIN PRIVATE KEY-----\nnonsense\n-----END PRIVATE KEY-----') IS NULL,
+       qm_acme_thumbprint('') IS NULL;
+----
+true	true

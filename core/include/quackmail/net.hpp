@@ -65,6 +65,14 @@ public:
 	bool AcceptTls(SSL_CTX *ctx, std::string &err);
 	// Upgrade an outbound connection to TLS (client side, for the relay drainer).
 	bool ConnectTls(SSL_CTX *ctx, std::string &err);
+	// The same, but sending `sni_host` as SNI and — when `ctx` was built to
+	// verify — requiring the peer certificate to match that name.
+	//
+	// Both matter, and neither is optional for a service whose identity is the
+	// point. A CDN-fronted host (Let's Encrypt's directory, for one) will not
+	// even complete a handshake without SNI, and verification without a name
+	// check accepts any certificate the CA ever issued to anyone.
+	bool ConnectTls(SSL_CTX *ctx, const std::string &sni_host, std::string &err);
 
 	// Apply SO_RCVTIMEO / SO_SNDTIMEO, so a peer that opens a socket and then
 	// stops talking cannot hold a connection thread forever. Opt-in and off by

@@ -301,6 +301,72 @@ SELECT feed, status, error FROM qm_fetch_run(feed => 'nosuchfeed');
 ----
 nosuchfeed	error	no feed called 'nosuchfeed'
 
+# ---- the ACME worker -------------------------------------------------------
+#
+# The third worker in the spool extension. Its controls have the same shape as
+# the other two, and it has the one-shot run function every worker here gets.
+
+query II
+SELECT worker, running FROM qm_acme_start(poll_secs => 3600);
+----
+acme	true
+
+query I
+SELECT note FROM qm_acme_stop();
+----
+stopped
+
+# Off by default, and it says so rather than doing nothing quietly. Pointing a
+# fresh install at a real CA is an operator's decision.
+query II
+SELECT status, note FROM qm_acme_run();
+----
+disabled	qm_acme_enabled is off
+
+# The tables the worker and the HTTP challenge responder share. Asserted by
+# column list rather than by name: EnsureSchema does not check con.Query's
+# result, so a CREATE TABLE that will not parse fails in total silence.
+query I
+SELECT count(*) FROM (SELECT token, key_auth, name, expires FROM quackmail_acme_challenges);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT name, domains, status, attempts, next_attempt, error
+                        FROM quackmail_acme_orders);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT name, domains, cert_pem, key_pem, not_after, cert_path
+                        FROM quackmail_acme_certs);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT directory_url, account_url, key_pem, contact, tos_agreed
+                        FROM quackmail_acme_accounts);
+----
+0
+
+# A name that would become a file path, or an empty domain list, is refused
+# rather than filed.
+query IIII
+SELECT (SELECT ok FROM qm_acme_order('../etc/x', 'example.com')),
+       (SELECT ok FROM qm_acme_order('', 'example.com')),
+       (SELECT ok FROM qm_acme_order('web', '')),
+       (SELECT ok FROM qm_acme_order('web', 'example.com'));
+----
+false	false	false	true
+
+# The listener sweep finds the tls_reload functions that are actually loaded,
+# and **excludes its own wrapper** — a sweep that finds itself recurses until
+# the stack runs out, which is exactly what happened the first time.
+query I
+SELECT count(*) FROM qm_acme_reload() WHERE function_name LIKE 'qm_acme%';
+----
+0
+
 # The JMAP upload staging table.
 #
 # Asserted by column list rather than just by name, for the same reason

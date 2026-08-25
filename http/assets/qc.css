@@ -400,3 +400,49 @@ tr.taskdone td a { color: var(--muted); text-decoration: line-through; }
 .rule li { font-size: .92em; }
 .rule .actions { margin-bottom: 0; gap: var(--s1); }
 .rule .actions .btn { padding: .2rem .5rem; font-size: .85em; }
+
+/* ---- wiki --------------------------------------------------------------- */
+/* Wiki pages are the one place where the *content* is prose somebody wrote
+   rather than a form or a listing, so it gets a measure and real heading
+   rhythm. Everything here is inside .wiki so it cannot leak into a message
+   body, which is sanitized markup from somewhere else entirely. */
+
+.wiki { max-width: 46rem; }
+.wiki > :first-child { margin-top: 0; }
+.wiki h1, .wiki h2, .wiki h3, .wiki h4 { margin: var(--s4) 0 var(--s2); line-height: 1.25; }
+.wiki h2 { border-bottom: 1px solid var(--line); padding-bottom: var(--s1); }
+.wiki p, .wiki ul, .wiki ol, .wiki blockquote, .wiki table { margin: var(--s2) 0; }
+.wiki li { margin: .2rem 0; }
+.wiki pre {
+  background: var(--bg2); border: 1px solid var(--line); border-radius: var(--r1);
+  padding: var(--s2); overflow-x: auto;
+}
+.wiki code { background: var(--bg2); border-radius: var(--r1); padding: 0 .25em; }
+.wiki pre code { background: none; padding: 0; }
+.wiki blockquote {
+  margin-left: 0; padding-left: var(--s3);
+  border-left: 3px solid var(--line); color: var(--muted);
+}
+.wiki img { max-width: 100%; height: auto; }
+.wiki table { border-collapse: collapse; }
+.wiki th, .wiki td { border: 1px solid var(--line); padding: .3rem var(--s2); text-align: left; }
+
+/* A link to a page nobody has written yet. It goes to the create form, so the
+   styling is a promise the destination keeps rather than a decoration. */
+.wiki a.wanted { color: var(--danger, #b3261e); border-bottom-style: dotted; }
+.wiki a.wanted::after { content: "?"; font-size: .8em; vertical-align: super; }
+
+.pagelist { columns: 3 14rem; margin: var(--s2) 0; }
+.pagelist li { break-inside: avoid; }
+
+/* A rendered unified diff. Colour is not the only signal: the leading +/- is
+   still there in the text, which is what a reader without colour vision, or
+   with a stylesheet of their own, actually reads. */
+.diff {
+  background: var(--bg2); border: 1px solid var(--line); border-radius: var(--r1);
+  padding: var(--s2); overflow-x: auto; line-height: 1.4;
+}
+.diff span { display: block; min-height: 1.4em; white-space: pre-wrap; }
+.diff .add { background: color-mix(in srgb, #2e7d32 18%, transparent); }
+.diff .del { background: color-mix(in srgb, #b3261e 18%, transparent); }
+.diff .hunk { color: var(--muted); margin-top: var(--s1); }

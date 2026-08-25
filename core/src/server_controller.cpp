@@ -157,6 +157,19 @@ bool ServerController::Stop(std::string &err) {
 	return true;
 }
 
+bool ServerController::ReloadTls(std::string &err) {
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (!running_.load()) {
+		err = "listener is not running";
+		return false;
+	}
+	if (!tls::Enabled(tls_config_)) {
+		err = "listener has no TLS enabled";
+		return false;
+	}
+	return tls_ctx_.Reload(err);
+}
+
 bool ServerController::IsRunning() {
 	return running_.load();
 }

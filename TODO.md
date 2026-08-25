@@ -5,13 +5,134 @@ Live task list. Context in [MEMORY.md](MEMORY.md), working instructions in
 
 ## In flight
 
-Nothing. **v0.7.0** shipped DAV scheduling (CalDAV free/busy and iTIP/iMIP), IMAP
+Nothing. The wiki view, the ACME client, the screenshots and the `docs/` split
+all landed together — see the top of Shipped.
+
+**v0.7.0** shipped DAV scheduling (CalDAV free/busy and iTIP/iMIP), IMAP
 `IDLE`, scrypt password hashing, the `k` right, a real JMAP client's worth of
 fixes, webmail search and folder views, and Sieve past its core — `imap4flags`,
-`variables` and `vacation`. The backlog below leads with what that work left
-open.
+`variables` and `vacation`.
 
 ## Shipped
+
+- [x] **An ACME (Let's Encrypt) client**, http-01, so the server obtains and
+      renews its own certificate. Until now the only options were a self-signed
+      pair or a certificate obtained with some other tool — a whole second piece
+      of software to install, configure and remember to renew.
+  - [x] RFC 8555 end to end: directory, nonces, account, order, http-01
+        authorization, finalize with a CSR, download, and revoke. The challenge
+        is served by `qm_http` out of a table the worker writes, which is the
+        only thing crossing between the two extensions.
+  - [x] **The challenge route is dispatched beside `/healthz`, before the
+        `qm_web_force_https` redirect.** That redirect sends everything to
+        `https://c_fqdn`, and at first issuance there is nothing there but the
+        self-signed certificate being replaced — so a challenge routed through
+        it cannot be answered. This is the single placement the feature depends
+        on, and `test_acme.py` runs with the redirect deliberately left **on**.
+  - [x] **A renewed certificate reaches every listener without dropping a
+        connection.** `RegisterServerControls` now also registers
+        `<prefix>_tls_reload()`, so all twelve get one from one edit and a
+        thirteenth cannot forget; `TlsContext` swaps an `std::atomic<SSL_CTX*>`
+        that `AcceptLoop` already re-read on every accept. A retired context is
+        *kept*, not freed — a thread can be between `Get()` and `SSL_new`, and a
+        few kB a year beats a use-after-free. The worker finds the reload
+        functions in `duckdb_functions()`: the catalog is already an
+        authoritative register of what is loaded, so there is no second list.
+  - [x] **A verifying client TLS context, with SNI and a host-name check.**
+        `ClientContext::Init` verified nothing, deliberately, because its only
+        caller was opportunistic MX-to-MX transport — and `ConnectTls` sent no
+        SNI at all, which a CDN-fronted directory will not complete a handshake
+        without. Both are additive overloads, so the mail path is unchanged. An
+        ACME client that does not authenticate the CA is not an ACME client.
+  - [x] `httpc` grew a general `Request` — method, body, request headers, and
+        **response headers**, which `Replay-Nonce` and `Location` need and which
+        were previously parsed and discarded. A redirect on a non-GET is refused
+        rather than guessed at. `Get()` and the feed path are untouched.
+  - [x] **Staging by default, and `qm_acme_enabled` off.** A failed validation
+        counts against a small per-hostname hourly limit on the production
+        endpoint, and the first run of a new install is the one most likely to
+        have DNS wrong. Failures back off exponentially to a day; a
+        `rateLimited` problem document jumps straight there. `badNonce` is
+        retried exactly once (§6.5).
+  - [x] **No `insecure` flag.** `qm_acme_ca_bundle` points at a CA bundle
+        instead — which is what makes a private ACME server work, and which
+        means `test_acme.py` exercises the *verifying* path against a CA it
+        mints itself rather than leaving it the one path never run.
+  - [x] RS256 only, and EAB and dns-01 are out: `dns.hpp` resolves rather than
+        updates, so dns-01 would mean "publish this TXT record by hand in the
+        next few minutes", which is not automation.
+  - [x] No private key is returned by any function or rendered on any page; the
+        account's *thumbprint* is shown instead, and it is what the CA compares
+        against.
+  - [x] `/admin/acme`, `quackcitadm.sh acme`, `QUACKCIT_ACME_*`, and a tier in
+        `ensure_tls_material` between the operator's own certificate and the
+        self-signed pair — the self-signed one stays the bootstrap, because a
+        listener that refused to start until a CA answered would be worse.
+  - [x] `test/sql/acme.test` (against the RFC 7638 §3.1 and RFC 8555 §8.1
+        vectors) and `test/integration/test_acme.py`, which stands up a fake CA,
+        has it really fetch the token from the running listener, and asserts the
+        served certificate's serial changes without a restart.
+
+- [x] **The wiki room view** (`VIEW_WIKI`), the last user-facing view with no
+      renderer, and the largest single gap against WebCit.
+  - [x] **The storage convention is Citadel's, read from
+        `citadel/server/modules/wiki/serv_wiki.c` and `webcit/wiki.c` rather
+        than invented.** A page is an ordinary `format_type = 4` message whose
+        euid is the normalized page name; its history is a second message with
+        euid `<page>_HISTORY_`, author "Citadel", holding a `multipart/mixed`
+        whose parts are each a `text/x-diff`, newest first, with a base64 memo
+        (`<old msgnum>|<timestamp>|<author>|`, **including the trailing NUL**)
+        in each part's filename. A QuackCit-shaped revision table would have
+        been much easier and would have interoperated with nothing.
+  - [x] The diffs run **backwards** — each takes the text one revision older —
+        so reading revision R means patching the current page until the memo
+        names R. `serv_wiki.c:234` is explicit that the arguments are swapped
+        on purpose, and reversing it silently produces a history that
+        reconstructs from nothing.
+  - [x] `core/diff.{hpp,cpp}`: a line Myers diff, a unified emitter and a
+        hunk applier, ~500 lines, no dependency. Verified **byte-identical to
+        GNU `diff -U3`** in both directions, including the
+        `\ No newline at end of file` marker, which is the closest available
+        proxy for the libxdiff Citadel patches with. Bounded by construction:
+        line and edit-distance budgets, past which it emits one whole-file hunk
+        — still a valid patch. Degrade, never diverge.
+  - [x] `core/markdown.{hpp,cpp}`: a bounded subset, written rather than
+        vendored. **Raw HTML in the source is escaped, not passed through** — a
+        deliberate CommonMark deviation that deletes the injection surface at
+        the source — and the output still goes through
+        `html::SanitizeForCompose`, because generated markup is markup we store
+        and re-serve from our own origin.
+  - [x] Markdown is a property of the page's **MIME type** (`text/x-markdown`),
+        not of the room's view code. `VIEW_WIKIMD` is **not a code current
+        Citadel knows**: `ROOM_VIEWS` ends at `VIEW_QUEUE` and WebCit sizes
+        `exchangeable_views[VIEW_MAX][VIEW_MAX]` from that, so a room set to 12
+        reads out of bounds in the oracle's own web client. The constant exists
+        here so such a room still renders, and is kept out of every picker
+        behind `qm_wiki_markdown_view`.
+  - [x] **Versioning hooks `citadel::UpsertByEuid`, not the web front-end.**
+        Citadel does it with a server-wide `EVT_BEFORESAVE` hook precisely so
+        every front-end produces history — the same argument that keeps
+        `CanPost` in the store and forbids re-deriving it. A save that changes
+        nothing is refused rather than stored as an empty diff, as Citadel does.
+  - [x] `WIKI history|<page>` and `WIKI rev|<page>|<rev>|showrev|revert` on the
+        native protocol, which is what makes the shared storage pay: a real
+        WebCit or Citadel client can browse history written here.
+  - [x] The web view: a page index with recently-changed, `[[wiki links]]` that
+        mark a page nobody has written yet and lead to the create form, history,
+        a rendered diff, and revert — which is itself recorded as a revision,
+        never a rewrite of history.
+  - [x] `ViewOptions()` had **two divergent copies**; the aide's stopped at
+        Notes and would silently reset a Blog room to a message board on save.
+        Now one list. The telnet room editor's numeric prompt stopped at 5 for
+        the same reason and now offers the full set.
+  - [x] `HasCustomView()` had zero call sites and is deleted.
+  - [x] `test/sql/wiki.test` and `test/integration/test_wiki.py`.
+
+- [x] **Screenshots and a `docs/` tree.** `tools/screenshots.py` starts a
+      throwaway server, seeds a demo world, and captures both user interfaces —
+      the web pages through Chromium, and the telnet BBS by replaying a real
+      session into a terminal emulator and rendering that through the *same*
+      browser. The 983-line README is now a pitch and an index over `docs/`.
 
 - [x] **Sieve past its core: `imap4flags`, `variables` and `vacation`**, and a
       filter builder that can express them.
@@ -559,8 +680,8 @@ open.
         entries newest-first, reusing `RenderMessage` and the existing compose
         and read routes rather than growing a second edit path.
   - [x] `test/sql/vnote.test` and `test/integration/test_groupware.py`.
-  - [x] deliberately **not** wiki (`VIEW_WIKI`/`WIKIMD` need versioning, a
-        name→euid resolver and a markdown renderer — its own PR) or
+  - [x] deliberately **not** wiki (versioning, a name→euid resolver and a
+        markdown renderer — its own PR, and now shipped; see above) or
         `VIEW_QUEUE` (Citadel's internal spool view, not a user view). Drafts
         stay on the mailbox path under `/mail/`.
 
@@ -887,9 +1008,6 @@ The first came out of building 0.6.0 and is the one most likely to bite.
   `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the
   `calendar-query` filters past comp-name and time-range, and `expand` on a
   recurring event. Notes rooms stay out: vNote is not a DAV resource type.
-- Web: the wiki view (`VIEW_WIKI`/`WIKIMD`), which needs versioning, a
-  name→euid resolver and a markdown renderer — deferred out of phase 2b and
-  still the largest single gap against WebCit.
 - Telnet BBS, still to fill in from `citadel.rc`: file transfer (the
   `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR` room flags and the `.Read file` /
   `.Admin File` family), `C`hat, and help files.
@@ -913,3 +1031,14 @@ The first came out of building 0.6.0 and is the one most likely to bite.
   on the delivery path against text a sender chooses. Reconsider only with a
   regex implementation that is bounded by construction.
 - Hardening: SCRAM-SHA-256, charset transcoding beyond UTF-8/Latin-1.
+- **`core/src/wildmat.cpp` has no step budget.** `MatchItem` recurses over every
+  `*` split with no counter, so a pattern like `*a*a*a*a*b` against
+  sender-chosen text is exponential — exactly the property the Sieve `regex`
+  refusal above was written to avoid, and exactly what the 0.7.0 capture matcher
+  was given a budget for. NNTP wildmat patterns come from a client, so this is
+  reachable.
+- **The telnet front-end reads a spurious empty command when server-side echo is
+  on.** Accept its `WILL ECHO` (send `IAC DO ECHO`) and every real command is
+  followed by an empty line the BBS answers with "Unknown command. Press ? for
+  help." Reproducible with three lines of socket code; `tools/screenshots.py`
+  works around it by declining the offer and echoing locally.

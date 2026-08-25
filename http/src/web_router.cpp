@@ -61,11 +61,13 @@ const std::vector<Route> &Routes() {
 		// After the BBS routes: these share its /bbs/room/:n prefix.
 		RegisterRoomAdminRoutes(r);
 		RegisterViewRoutes(r);
+		RegisterWikiRoutes(r);
 		RegisterSearchRoutes(r);
 		RegisterPrefsRoutes(r);
 		RegisterAdminUserRoutes(r);
 		RegisterAdminPolicyRoutes(r);
 		RegisterAdminOpsRoutes(r);
+		RegisterAcmeAdminRoutes(r);
 		RegisterAdminListRoutes(r);
 		// Last: neither /dav/ nor /jmap/ collides with a page above it, and a
 		// programmatic client is a rare visitor next to a browser loading a
@@ -322,6 +324,13 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 	if (req.path == "/healthz") {
 		resp.Text("ok");
 		resp.SetHeader("Cache-Control", "no-store");
+		return;
+	}
+
+	// An ACME http-01 challenge, for the same reason /healthz is above: it has
+	// to answer before there is a certificate worth redirecting to.
+	if (IsAcmeChallengePath(req.path)) {
+		AcmeChallenge(ctx);
 		return;
 	}
 

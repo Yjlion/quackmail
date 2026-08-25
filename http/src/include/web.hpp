@@ -96,6 +96,7 @@ void RegisterPrefsRoutes(std::vector<Route> &out);
 void RegisterAdminUserRoutes(std::vector<Route> &out);
 void RegisterAdminPolicyRoutes(std::vector<Route> &out);
 void RegisterAdminOpsRoutes(std::vector<Route> &out);
+void RegisterAcmeAdminRoutes(std::vector<Route> &out);
 // Also contributes the anonymous /lists self-service pages, which live beside
 // the admin ones because they share the same model.
 void RegisterAdminListRoutes(std::vector<Route> &out);
@@ -109,6 +110,13 @@ void RegisterJmapRoutes(std::vector<Route> &out);
 // Handle one already-parsed request: resolve the session, apply the transport
 // and role gates, verify CSRF, dispatch. Always fills `resp`.
 void Dispatch(Connection &con, const http::Request &req, http::Response &resp);
+
+// The ACME http-01 responder. Not a Route: like /healthz it is dispatched
+// *before* the HTTPS redirect, because a challenge that gets redirected to a
+// listener holding the self-signed certificate we are trying to replace cannot
+// be answered. See web_acme.cpp.
+bool IsAcmeChallengePath(const std::string &path);
+void AcmeChallenge(Ctx &ctx);
 
 // "https://host:port" — this server's own origin, with no trailing slash.
 //

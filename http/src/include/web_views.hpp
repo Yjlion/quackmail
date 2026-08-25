@@ -37,14 +37,15 @@ struct RoomViewHandler {
 	void (*remove)(Ctx &ctx, const quackmail::citadel::Room &room);
 };
 
+// The room-view picker, for the room settings page and the aide's room editor.
+// One list: two copies had drifted, and the aide's could silently reset a room
+// to a view it had simply never heard of.
+std::vector<std::pair<std::string, std::string>> ViewOptions(Ctx &ctx);
+
 // The handler for a view code. Falls back to the message-board handler for any
 // view without one, which is always a truthful way to show a room: the objects
 // really are messages.
 const RoomViewHandler &ViewFor(int default_view);
-
-// Does this view have a renderer of its own? Used to decide whether the room's
-// toolbar should offer "add a contact" or "post a message".
-bool HasCustomView(int default_view);
 
 // Each view file contributes its handler.
 // Mail folders. Registered for VIEW_DRAFTS as well as VIEW_MAILBOX: a draft is
@@ -58,6 +59,10 @@ const RoomViewHandler &TasksView();
 const RoomViewHandler &NotesView();
 const RoomViewHandler &BlogView();
 const RoomViewHandler &JournalView();
+// Registered for VIEW_WIKIMD as well as VIEW_WIKI. See the note on that constant
+// in citadel_store.hpp: markdown is a property of a page's MIME type here, not
+// of the room's view code, so the two share every handler.
+const RoomViewHandler &WikiView();
 
 // The tasks list's one-click complete toggle. It is not part of RoomViewHandler
 // because no other view has an equivalent, and inventing a generic "toggle" slot
@@ -66,6 +71,10 @@ void TasksComplete(Ctx &ctx, const quackmail::citadel::Room &room);
 
 // The /bbs/room/:n/item/... routes, which every object view shares.
 void RegisterViewRoutes(std::vector<Route> &out);
+
+// The wiki's own routes. Separate because a wiki page is addressed by name
+// rather than by message number, so it does not fit the shared /item/ space.
+void RegisterWikiRoutes(std::vector<Route> &out);
 
 // ---- shared helpers for object views -------------------------------------
 

@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_views.hpp"
 
 #include "quackmail/fetch.hpp"
 #include "quackmail/listserv.hpp"
@@ -85,15 +86,7 @@ int64_t FlagsFromForm(Ctx &ctx, const Room &room) {
 	return (room.qr_flags & ~EditableFlagMask()) | chosen;
 }
 
-std::vector<std::pair<std::string, std::string>> ViewOptions() {
-	// Only the views that have a renderer. VIEW_WIKI and VIEW_QUEUE are in the
-	// enum because the wire numbering is Citadel's, not because we draw them;
-	// offering one here would set a room to a view that falls back to the plain
-	// message list, which reads as a bug rather than as a choice.
-	return {{"0", "Message board"}, {"2", "Address book"}, {"3", "Calendar"},
-	        {"7", "Calendar, as a list"}, {"4", "Tasks"},  {"5", "Notes"},
-	        {"10", "Blog"},              {"8", "Journal"}};
-}
+
 
 std::vector<std::pair<std::string, std::string>> FloorOptions(Ctx &ctx) {
 	std::vector<std::pair<std::string, std::string>> out;
@@ -384,7 +377,7 @@ void GetRoomSettings(Ctx &ctx) {
 	body += "<label class=\"field\"><span>Floor</span>" +
 	        Select("floor", FloorOptions(ctx), std::to_string(room.floor_num)) + "</label>";
 	body += "<label class=\"field\"><span>What this room holds</span>" +
-	        Select("view", ViewOptions(), std::to_string(room.default_view)) + "</label>";
+	        Select("view", ViewOptions(ctx), std::to_string(room.default_view)) + "</label>";
 	body += "<label class=\"field\"><span>Description</span>" + TextArea("info", room.info, 4) +
 	        "</label>";
 	body += "<label class=\"field\"><span>List order</span>" +
@@ -752,7 +745,7 @@ void GetNewRoom(Ctx &ctx) {
 	body += "<label class=\"field\"><span>Name</span>" + TextInput("display_name", "") + "</label>";
 	body += "<label class=\"field\"><span>Floor</span>" + Select("floor", floors, "0") +
 	        "</label>";
-	body += "<label class=\"field\"><span>What it holds</span>" + Select("view", ViewOptions(), "0") +
+	body += "<label class=\"field\"><span>What it holds</span>" + Select("view", ViewOptions(ctx), "0") +
 	        "</label>";
 	body += "<label class=\"field\"><span>Description</span>" + TextArea("info", "", 3) + "</label>";
 	body += "<label class=\"field\"><span>Password (only if you tick "

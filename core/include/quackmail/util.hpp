@@ -33,8 +33,18 @@ bool RandomBytes(size_t n, std::string &out);
 std::string RandomHex(size_t bytes);
 std::string RandomBase64Url(size_t bytes);
 
+// base64url (RFC 4648 §5) over arbitrary bytes, unpadded. RandomBase64Url above
+// is a *generator* and cannot encode anything you already have; JWS needs both
+// halves of this, and so does anything else that has to put bytes in a URL.
+std::string Base64UrlEncode(const std::string &in);
+bool Base64UrlDecode(const std::string &in, std::string &out);
+
 // Lowercase hex SHA-256 of the input.
 std::string Sha256Hex(const std::string &in);
+
+// The same digest as raw bytes. An RFC 7638 JWK thumbprint is base64url over
+// the digest, not over its hex spelling, so hex is the wrong currency there.
+std::string Sha256Raw(const std::string &in);
 
 // Constant-time comparison, for secrets. False for differing lengths.
 bool SecureEquals(const std::string &a, const std::string &b);

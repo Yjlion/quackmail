@@ -1126,7 +1126,11 @@ void EditRoom(Connection &con, Bbs &s, telnet::Session &t) {
 		return;
 	}
 	room.listorder = n;
-	if (!t.PromptInt("Default view (0 board, 1 mail, 2 contacts, 3 calendar, 4 tasks, 5 notes)",
+	// The full set the web interface offers. It used to stop at 5, so a room
+	// created here could not be made a blog, a journal or a wiki at all, and
+	// editing one that was silently offered a shorter list than it belonged to.
+	if (!t.PromptInt("Default view (0 board, 1 mail, 2 contacts, 3 calendar, 4 tasks,\n"
+	                 "              5 notes, 6 wiki, 7 calendar list, 8 journal, 10 blog)",
 	                 room.default_view, n)) {
 		return;
 	}

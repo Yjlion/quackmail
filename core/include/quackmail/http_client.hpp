@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace quackmail {
@@ -32,6 +33,24 @@ struct Options {
 	// difference between being a polite client and being a nuisance.
 	std::string etag;
 	std::string last_modified;
+
+	// ---- everything below is for callers other than the feed reader --------
+
+	// Request method, body and content type. Empty method means GET.
+	std::string method;
+	std::string body;
+	std::string content_type;
+	// Extra request headers, sent verbatim after the built-in ones.
+	std::vector<std::pair<std::string, std::string>> headers;
+	// Overrides the feed-flavoured default Accept.
+	std::string accept;
+
+	// **Verify the peer certificate and its host name.** Off by default so the
+	// feed reader's behaviour is unchanged; anything talking to a service whose
+	// identity matters has to ask for it. `ca_bundle` replaces the system trust
+	// store, which is what makes a private ACME server usable.
+	bool verify_peer = false;
+	std::string ca_bundle;
 };
 
 struct Response {
@@ -42,15 +61,33 @@ struct Response {
 	std::string etag;
 	std::string last_modified;
 	std::string content_type;
+	// Every response header, in order, with lowercased names. The feed reader
+	// needs three of them and they are broken out above; ACME needs
+	// Replay-Nonce and Location, and a client that discards what it does not
+	// recognise cannot be extended without editing this struct again.
+	std::vector<std::pair<std::string, std::string>> headers;
+
+	// Case-insensitive lookup; "" when absent.
+	std::string Header(const std::string &name) const;
 
 	bool NotModified() const {
 		return status == 304;
 	}
 };
 
-// GET `url`. Follows up to `max_redirects` redirects, and refuses to follow one
-// that leaves https for http — a feed URL is configuration, and silently
-// downgrading its transport is not the caller's decision to make.
+// Perform a request. `opts.method` (default GET), `opts.body` and
+// `opts.headers` decide what is sent.
+//
+// Follows up to `max_redirects` redirects for a GET, and refuses to follow one
+// that leaves https for http — a URL here is configuration, and silently
+// downgrading its transport is not this code's decision to make. A redirect on
+// a **non-GET is not followed at all**: whether the body is resent depends on
+// 303-versus-307 semantics that no caller here needs, and guessing wrong would
+// either drop a request or replay it.
+Response Request(const std::string &url, const Options &opts);
+
+// GET `url`. The original entry point, kept because it is what every feed call
+// site says and because a GET is worth spelling as a GET.
 Response Get(const std::string &url, const Options &opts);
 
 } // namespace httpc

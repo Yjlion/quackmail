@@ -104,6 +104,31 @@ fi
 # Subject of the generated certificate; resolved from the host name when empty.
 : "${QUACKCIT_TLS_CN:=}"
 
+# ---- ACME (Let's Encrypt) --------------------------------------------------
+#
+# With this on, the server obtains and renews its own certificate over http-01
+# and uses it in place of the self-signed pair above. Every name in
+# QUACKCIT_ACME_DOMAINS must resolve to this machine and reach it on port 80:
+# that reachability *is* what the CA checks.
+#
+# The directory deliberately defaults to Let's Encrypt **staging**, whose
+# certificates nothing trusts. Point it at production once an order has
+# succeeded — a failed validation counts against a small per-hostname hourly
+# limit there, and the first run of a new install is the one most likely to
+# have DNS or a firewall wrong.
+: "${QUACKCIT_ACME_ENABLE:=0}"
+: "${QUACKCIT_ACME_DIRECTORY:=https://acme-staging-v02.api.letsencrypt.org/directory}"
+: "${QUACKCIT_ACME_CONTACT:=}"
+: "${QUACKCIT_ACME_DOMAINS:=}"
+: "${QUACKCIT_ACME_NAME:=web}"
+: "${QUACKCIT_ACME_DIR:=$QUACKCIT_TLS_DIR/acme}"
+: "${QUACKCIT_ACME_CERT:=$QUACKCIT_ACME_DIR/$QUACKCIT_ACME_NAME.pem}"
+: "${QUACKCIT_ACME_KEY:=$QUACKCIT_ACME_DIR/$QUACKCIT_ACME_NAME.key}"
+# A CA bundle to trust instead of the system store. For a private ACME server
+# (step-ca, a lab Boulder); leave empty for a public CA.
+: "${QUACKCIT_ACME_CA_BUNDLE:=}"
+: "${QUACKCIT_ACME_RENEW_DAYS:=30}"
+
 # A DuckDB on PATH is the last resort; it must be the version the extensions
 # were built against or LOAD refuses them.
 if [ ! -x "$QUACKCIT_DUCKDB" ] && command -v duckdb >/dev/null 2>&1; then
@@ -387,6 +412,7 @@ quackcit_workers() {
 RELAY     quackmail_smtp_out  qm_smtp_relay  30
 LISTSERV  quackmail_spool     qm_listserv    60
 FETCH     quackmail_spool     qm_fetch       60
+ACME      quackmail_spool     qm_acme        3600
 EOF
 }
 

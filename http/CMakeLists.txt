@@ -34,6 +34,9 @@ set(EXTENSION_SOURCES
     src/web_tasks.cpp
     src/web_notes.cpp
     src/web_blog.cpp
+    src/web_wiki.cpp
+    src/web_acme.cpp
+    src/web_acme_admin.cpp
     src/web_mail.cpp
     src/web_mailbox.cpp
     src/web_search.cpp

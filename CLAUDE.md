@@ -10,7 +10,9 @@ are gateways over the same Citadel room store.
 instant messages), add a table, not a global.
 
 See [MEMORY.md](MEMORY.md) for project history and decisions, [TODO.md](TODO.md)
-for what's next.
+for what's next, and [docs/](docs/README.md) for the user-facing documentation
+(`docs/contributing.md` is this file written for a person — keep the two in
+step).
 
 ## Layout
 
@@ -82,7 +84,7 @@ Besides `<mod>/src/*` you must touch **four** files — the last one is easy to 
    `for ext in ...` packaging loop, or it won't ship in releases.
 
 Then add it to the `quackcit_services` table in `deploy/quackcit_common.sh`,
-`test/sql/quackmail.test`, and the README table.
+`test/sql/quackmail.test`, and the table in `docs/protocols.md`.
 
 ## Adding a background worker
 
@@ -198,11 +200,28 @@ smtp 2525, submission 2587, submissions 2465, pop3 1110, pop3s 1995, imap 1143,
 imaps 1993, xmpp 15222) or with the integration tests. `admin`/`citadel` exists
 already; `sendcommand` needs `-h/citadel-data` or it looks in the wrong place.
 
-`debian.lan` runs the same server on the standard ports and carries the **full
-Citadel source at `/root/citadel`** (read it with sudo —
-`citadel/server/modules/<proto>/` for protocol servers, `textclient/` for the
-BBS client). The container has no source tree. Details for both, including the
-`LD_PRELOAD` trick for the official client, are in [MEMORY.md](MEMORY.md).
+If the `ai` user is not in the `docker` group, every command above needs
+`sudo` (`sudo docker exec citadel ...`).
+
+The container has **no source tree**, and neither does this machine. Read the
+source over HTTP from **`https://code.citadel.org/citadel.git`** (cgit), which
+serves the whole tree, history and patches:
+
+```bash
+curl -sS -b 'cgit_access=verified' \
+  https://code.citadel.org/citadel.git/plain/libcitadel/lib/libcitadel.h
+```
+
+The `-b` cookie is not optional — the site gates on a JavaScript check that sets
+it, and without it every path returns the challenge page instead of the file.
+`citadel/server/modules/<proto>/` holds the protocol servers, `textclient/` the
+BBS client, `webcit/` and `webcit-ng/` the web clients, and
+`libcitadel/lib/libcitadel.h` the shared constants and enums.
+
+`debian.lan`, named throughout [MEMORY.md](MEMORY.md) as a second oracle
+carrying a checkout at `/root/citadel`, **no longer resolves** — do not spend a
+session trying to reach it. The `LD_PRELOAD` trick for pointing the official
+client at QuackCit is still recorded there and still works.
 
 The box is a disposable test machine: restarting Citadel and creating test
 rooms/users on it is fine and expected when exercising admin features.

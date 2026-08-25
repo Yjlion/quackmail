@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_views.hpp"
 
 #include "quackmail/auth.hpp"
 
@@ -63,7 +64,11 @@ std::string AdminNav() {
 	    {"Delivery",
 	     {{"/admin/queue", "Mail queue"}, {"/admin/inbound", "Audit log"}, {"/admin/sieve", "Filters"}}},
 	    {"Lists and feeds", {{"/admin/lists", "Mailing lists"}, {"/admin/feeds", "Feeds"}}},
-	    {"System", {{"/admin/", "Overview"}, {"/admin/prefs", "Settings"}, {"/admin/config", "Config"}}},
+	    {"System",
+	     {{"/admin/", "Overview"},
+	      {"/admin/acme", "Certificates"},
+	      {"/admin/prefs", "Settings"},
+	      {"/admin/config", "Config"}}},
 	};
 
 	std::string out = "<div class=\"adminnav\">";
@@ -297,11 +302,6 @@ const FlagBit kRoomFlags[] = {
     {"network", quackmail::citadel::QR_NETWORK, "Network shared"},
 };
 
-std::vector<std::pair<std::string, std::string>> ViewOptions() {
-	return {{"0", "Message board"}, {"1", "Mailbox"}, {"2", "Address book"},
-	        {"3", "Calendar"},      {"4", "Tasks"},   {"5", "Notes"}};
-}
-
 std::vector<std::pair<std::string, std::string>> FloorOptions(Ctx &ctx) {
 	std::vector<std::pair<std::string, std::string>> out;
 	for (auto &f : quackmail::citadel::ListFloors(ctx.con)) {
@@ -366,7 +366,7 @@ void GetRooms(Ctx &ctx) {
 		body += "<label class=\"field\"><span>Floor</span>" +
 		        Select("floor", FloorOptions(ctx), std::to_string(room.floor_num)) + "</label>";
 		body += "<label class=\"field\"><span>Default view</span>" +
-		        Select("view", ViewOptions(), std::to_string(room.default_view)) + "</label>";
+		        Select("view", ViewOptions(ctx), std::to_string(room.default_view)) + "</label>";
 		body += "<label class=\"field\"><span>List order</span>" +
 		        TextInput("listorder", std::to_string(room.listorder), "number") + "</label>";
 		body += "<label class=\"field\"><span>Room password</span>" + TextInput("password", room.password) +

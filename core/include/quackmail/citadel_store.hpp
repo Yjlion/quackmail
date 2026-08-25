@@ -86,6 +86,23 @@ enum RoomView {
 	VIEW_DRAFTS = 9,
 	VIEW_BLOG = 10,
 	VIEW_QUEUE = 11, // Citadel's own SMTP spool view, not a user view
+
+	// **Not a code current Citadel knows.** ROOM_VIEWS ends at VIEW_QUEUE and
+	// is immediately followed by VIEW_MAX, so 12 is not free: WebCit sizes
+	// `exchangeable_views[VIEW_MAX][VIEW_MAX]` from that and indexes it by the
+	// room's current view, so a room set to 12 reads out of bounds in the
+	// oracle's own web client.
+	//
+	// It existed once — commit 7d548835, "Markdown: start adding markdown wiki
+	// mode", rendering through libdiscount — and was removed. It is kept here
+	// only so a room somebody already set to 12 renders as a wiki instead of as
+	// a list of raw markup, and it is deliberately **not offered** in any room
+	// picker; `qm_wiki_markdown_view` has to be set to see it at all.
+	//
+	// Markdown does not need it: a wiki page is markdown when its MIME part is
+	// `text/x-markdown`, which works in an ordinary VIEW_WIKI room that real
+	// Citadel handles correctly.
+	VIEW_WIKIMD = 12,
 };
 
 struct Room {
