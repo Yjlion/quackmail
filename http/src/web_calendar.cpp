@@ -1,5 +1,6 @@
 #include "web_views.hpp"
 
+#include "quackmail/html_sanitize.hpp"
 #include "quackmail/ical.hpp"
 #include "quackmail/tz.hpp"
 #include "quackmail/util.hpp"
@@ -415,7 +416,12 @@ void Item(Ctx &ctx, const Room &room, int64_t msgnum) {
 	body += "</dl></div>";
 
 	if (!item.description.empty()) {
-		body += "<pre class=\"body\">" + T(item.description) + "</pre>";
+		// Absent desc_format is every event written before this field existed,
+		// or by any other CalDAV/Citadel client — stays plain, escaped text.
+		body += item.desc_format.empty()
+		            ? "<pre class=\"body\">" + T(item.description) + "</pre>"
+		            : "<div class=\"richnote\">" +
+		                  RawHtml(RenderFormattedBody(item.description, item.desc_format)) + "</div>";
 	}
 
 	std::string toolbar = "<div class=\"actions\">";
@@ -567,6 +573,12 @@ void Edit(Ctx &ctx, const Room &room, int64_t msgnum) {
 	}
 	body += "<label class=\"field\"><span>Description</span>" +
 	        TextArea("description", item.description, 6) + "</label>";
+	body += "<label class=\"field\"><span>Description format</span>" +
+	        Select("desc_format", {{"", "Plain text"},
+	                               {kHtmlContentType, "Formatted text (HTML)"},
+	                               {kMarkdownContentType, "Markdown"}},
+	               item.desc_format) +
+	        "</label>";
 	body += "<p>" + Button(editing ? "Save" : "Create event") + " " +
 	        Link(editing ? ItemHref(room, msgnum) : RoomHref(room), "Cancel") + "</p>";
 	body += FormEnd();
@@ -627,6 +639,18 @@ void Save(Ctx &ctx, const Room &room) {
 	item.summary = summary;
 	item.location = ctx.req.Form("location");
 	item.description = ctx.req.Form("description");
+	// A third state ResolveFormat() does not model: "" means plain text, kept
+	// on the wire as an ordinary DESCRIPTION every other client already reads.
+	std::string desc_format = ctx.req.Form("desc_format");
+	if (desc_format == kMarkdownContentType) {
+		item.desc_format = kMarkdownContentType;
+	} else if (desc_format == kHtmlContentType) {
+		item.desc_format = kHtmlContentType;
+		// Sanitized *before* storage, same as every other rich-text view.
+		item.description = quackmail::html::SanitizeForCompose(item.description);
+	} else {
+		item.desc_format = "";
+	}
 	item.rrule = ctx.req.Form("rrule");
 	item.start = ical::DateTime();
 	item.end = ical::DateTime();

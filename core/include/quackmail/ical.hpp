@@ -85,6 +85,14 @@ struct Item {
 	Kind kind = Event;
 	std::string uid;
 	std::string summary, description, location, organizer, status;
+	// "text/html" or "text/x-markdown" — a QuackCit extension (the
+	// X-QM-DESC-FORMAT property), never emitted for an item this field is
+	// empty on. DESCRIPTION stays plain text on the wire either way (RFC 5545
+	// has no notion of an HTML description), so this only changes how
+	// QuackCit's own web view renders it — every other client, and every item
+	// with no format set (which is every item written before this field
+	// existed), keeps reading and writing an ordinary plain-text DESCRIPTION.
+	std::string desc_format;
 	// TRANSP, **read only**. Not something a form edits, but free/busy has to
 	// know: an event marked TRANSPARENT occupies the calendar without occupying
 	// the person. ParseItems fills it and FoldItemInto deliberately does not
