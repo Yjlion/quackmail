@@ -411,6 +411,29 @@ def main():
         # server escaped first it would show the raw =?utf-8?B?...?= instead.
         assert page.count("&lt;script&gt;alert(1)") >= 2, "encoded-word subject was not decoded"
 
+        # ---- mail list density preference ----------------------------------
+        assert 'layout-' not in page, "a mail room carries a layout class before any preference is set"
+        _, _, prefs = request(op, BASE + "/prefs")
+        status, _, _ = request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "mail_layout": "compact"},
+        )
+        assert status == 303, "saving the mail layout returned " + str(status)
+        status, _, page = request(op, f"{BASE}/bbs/room/{mail_room}")
+        assert status == 200 and "layout-compact" in page, (
+            "the mail room did not pick up the compact layout class"
+        )
+        # A page that is not a mail room must not carry the class at all — it is
+        # scoped to VIEW_MAILBOX/VIEW_DRAFTS, not applied site-wide.
+        _, _, prefs_page = request(op, BASE + "/prefs")
+        assert "layout-" not in prefs_page, "the layout class leaked onto a non-mail page"
+        request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "mail_layout": "comfortable"},
+        )
+
         # ---- IDOR ---------------------------------------------------------
         # otheruser has to sign in first so their personal rooms exist. Without
         # that, deliver() files the message into no room at all and the 404

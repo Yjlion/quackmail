@@ -88,6 +88,12 @@ void GetPrefs(Ctx &ctx) {
 	        Select("tz", zones, quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_tz")) +
 	        "</label>";
 
+	body += "<label class=\"field\"><span>Mail list density</span>" +
+	        Select("mail_layout",
+	               {{"comfortable", "Comfortable"}, {"compact", "Compact"}, {"wide", "Wide"}},
+	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_mail_layout", "comfortable")) +
+	        "</label>";
+
 	body += "<p>" + Button("Save settings") + "</p>";
 	body += "<p class=\"muted\">These are the same preferences the BBS shell's "
 	        "<code>.Enter Configuration</code> edits.</p>";
@@ -189,6 +195,12 @@ void PostSettings(Ctx &ctx) {
 	std::string zone = ctx.req.Form("tz");
 	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_tz",
 	                                quackmail::tz::IsKnown(zone) ? zone : "");
+
+	// Same "only a known value is stored" rule as theme/tz.
+	std::string mail_layout = ctx.req.Form("mail_layout");
+	quackmail::citadel::SetUserPref(
+	    ctx.con, ctx.username, "web_mail_layout",
+	    (mail_layout == "compact" || mail_layout == "wide") ? mail_layout : "");
 
 	RedirectTo(ctx, "/prefs", "saved");
 }

@@ -589,6 +589,16 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	if (opts.view >= 0) {
 		body_class += " view-" + std::to_string(opts.view);
 	}
+	// Density is a mail-list thing, not a general page thing — scoping it to
+	// mail rooms (rather than a page-wide setting) keeps it from touching
+	// Notes/Tasks/Calendar/Wiki, which have their own layouts already.
+	if (ctx.Authed() &&
+	    (opts.view == quackmail::citadel::VIEW_MAILBOX || opts.view == quackmail::citadel::VIEW_DRAFTS)) {
+		std::string layout = quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_mail_layout");
+		if (layout == "compact" || layout == "wide") {
+			body_class += " layout-" + layout;
+		}
+	}
 	page += "<body" + (body_class.empty() ? "" : " class=\"" + A(body_class.substr(1)) + "\"") + ">";
 	page += "<a class=\"skip\" href=\"#main\">Skip to content</a>";
 	// The checkbox precedes .app so the stylesheet can reach the sidebar with a
