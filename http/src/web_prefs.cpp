@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_i18n.hpp"
 #include "quackmail/tz.hpp"
 
 #include "quackmail/auth.hpp"
@@ -74,6 +75,11 @@ void GetPrefs(Ctx &ctx) {
 	body += "<label class=\"field\"><span>Colour theme</span>" +
 	        Select("theme", ThemeOptions(),
 	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_theme", "auto")) +
+	        "</label>";
+
+	body += "<label class=\"field\"><span>Language</span>" +
+	        Select("locale", LocaleOptions(),
+	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_locale")) +
 	        "</label>";
 
 	// Every date on every page renders in this zone, and the calendar is
@@ -189,6 +195,16 @@ void PostSettings(Ctx &ctx) {
 	std::string zone = ctx.req.Form("tz");
 	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_tz",
 	                                quackmail::tz::IsKnown(zone) ? zone : "");
+
+	// Only a locale this build actually ships a catalog for; anything else
+	// clears the row rather than pinning the visitor to a typo.
+	std::string locale = ctx.req.Form("locale");
+	bool known_locale = false;
+	for (auto &opt : LocaleOptions()) {
+		known_locale = known_locale || opt.first == locale;
+	}
+	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_locale",
+	                                (known_locale && !locale.empty()) ? locale : "");
 
 	RedirectTo(ctx, "/prefs", "saved");
 }

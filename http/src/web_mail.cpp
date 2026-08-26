@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_i18n.hpp"
 
 #include "quackmail/citadel_msg.hpp"
 #include "quackmail/delivery.hpp"
@@ -269,10 +270,11 @@ void GetMailIndex(Ctx &ctx) {
 	}
 	auto stats = quackmail::citadel::RoomStatsBulk(ctx.con, ctx.username, nums);
 
-	std::string body = "<div class=\"actions\">" + Link("/mail/compose", "Write a message", "btn") +
-	                   "</div>";
-	body += "<div class=\"wrap\"><table><tr>" + Head("Folder") + "<th class=\"num\">Unread</th>"
-	                                                             "<th class=\"num\">Total</th></tr>";
+	std::string body =
+	    "<div class=\"actions\">" + Link("/mail/compose", Tr(ctx, "mail.write"), "btn") + "</div>";
+	body += "<div class=\"wrap\"><table><tr>" + Head(Tr(ctx, "mail.folder")) + "<th class=\"num\">" +
+	        T(Tr(ctx, "mail.unread")) + "</th><th class=\"num\">" + T(Tr(ctx, "mail.total")) +
+	        "</th></tr>";
 	for (size_t i = 0; i < folders.size(); i++) {
 		body += "<tr" + std::string(stats[i].new_count > 0 ? " class=\"unread\"" : "") + ">";
 		body += "<td>" + Link(RoomHref(folders[i]), folders[i].display_name) + "</td>";
@@ -281,12 +283,11 @@ void GetMailIndex(Ctx &ctx) {
 		body += "</tr>";
 	}
 	body += "</table></div>";
-	body += "<p class=\"muted\">These are ordinary Citadel rooms — the same messages are visible over "
-	        "IMAP, POP3 and the BBS.</p>";
+	body += "<p class=\"muted\">" + T(Tr(ctx, "mail.footer")) + "</p>";
 	PageOpts opts;
 	opts.active = "mail";
 	opts.wide = true;
-	Render(ctx, "Mail", body, opts);
+	Render(ctx, Tr(ctx, "mail.title"), body, opts);
 }
 
 // ---- message parts -------------------------------------------------------
@@ -519,24 +520,29 @@ void GetCompose(Ctx &ctx) {
 	// Filled in by the editor on submit; empty means "this message is plain
 	// text", which is the state of every submission from a browser without it.
 	body += Hidden("html_body", "");
-	body += "<label class=\"field\"><span>To</span>" + TextInput("to", to) + "</label>";
-	body += "<label class=\"field\"><span>Cc</span>" + TextInput("cc", cc) + "</label>";
-	body += "<label class=\"field\"><span>Subject</span>" + TextInput("subject", subject) + "</label>";
-	body += "<label class=\"field\"><span>Message</span>" + TextArea("body", quoted, 18) + "</label>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.to")) + "</span>" + TextInput("to", to) +
+	        "</label>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.cc")) + "</span>" + TextInput("cc", cc) +
+	        "</label>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.subject")) + "</span>" +
+	        TextInput("subject", subject) + "</label>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.message")) + "</span>" +
+	        TextArea("body", quoted, 18) + "</label>";
 	// Hidden until the editor loads and marks it available: offering "formatted
 	// text" to someone who will only ever get a textarea would be a lie.
-	body += "<label class=\"chk richopt\"><input type=\"checkbox\" name=\"rich\" value=\"1\"> "
-	        "Formatted text</label>";
-	body += "<label class=\"field\"><span>Attachment</span><input type=\"file\" name=\"attachment\" "
-	        "multiple></label>";
-	body += "<p>" + Button("Send") + " ";
-	body += "<button class=\"btn sec\" name=\"draft\" value=\"1\">Save as draft</button> ";
-	body += Link("/mail/", "Cancel") + "</p>";
+	body += "<label class=\"chk richopt\"><input type=\"checkbox\" name=\"rich\" value=\"1\"> " +
+	        T(Tr(ctx, "compose.formatted_text")) + "</label>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.attachment")) +
+	        "</span><input type=\"file\" name=\"attachment\" multiple></label>";
+	body += "<p>" + Button(Tr(ctx, "compose.send")) + " ";
+	body += "<button class=\"btn sec\" name=\"draft\" value=\"1\">" + T(Tr(ctx, "compose.save_draft")) +
+	        "</button> ";
+	body += Link("/mail/", Tr(ctx, "compose.cancel")) + "</p>";
 	body += "</form>";
 	PageOpts opts;
 	opts.active = "compose";
 	opts.script = "qc-compose.js";
-	Render(ctx, "Write a message", body, opts);
+	Render(ctx, Tr(ctx, "compose.title"), body, opts);
 }
 
 void PostSend(Ctx &ctx) {

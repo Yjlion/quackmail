@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_i18n.hpp"
 #include "web_views.hpp"
 
 #include "quackmail/auth.hpp"
@@ -608,6 +609,7 @@ const ConfigKey kConfigKeys[] = {
     {"qm_rbl_reject", "Reject listed clients (1/0)"},
     {"qm_quarantine_room", "Quarantine folder"},
     {"qm_web_theme", "Default colour theme"},
+    {"qm_default_locale", "Default language"},
     {"qm_room_create_axlevel", "Access level that may create rooms (0-6)"},
     {"qm_room_mail", "Accept mail for room addresses (1/0)"},
     {"qm_subaddress_sep", "Subaddress separator"},
@@ -623,7 +625,7 @@ const ConfigKey kConfigKeys[] = {
 struct PrefField {
 	const char *name;
 	const char *label;
-	enum Kind { Text, Bool, Theme, AxLevel } kind;
+	enum Kind { Text, Bool, Theme, AxLevel, Locale } kind;
 	const char *help;
 };
 
@@ -654,6 +656,10 @@ const PrefField kIdentityFields[] = {
 const PrefField kWebFields[] = {
     {"qm_web_theme", "Default colour theme", PrefField::Theme,
      "Used for signed-out visitors and anyone who has not chosen their own."},
+    {"qm_default_locale", "Default language", PrefField::Locale,
+     "Used for signed-out visitors (including the login screen itself) and anyone who has not chosen "
+     "their own in /prefs. Only \"en\" ships with a translation today; this exists so a second "
+     "language is a data change, not a new page."},
     {"qm_web_force_https", "Redirect HTTP to HTTPS", PrefField::Bool, ""},
     {"qm_web_hsts", "Send HSTS over TLS", PrefField::Bool,
      "Tells browsers to refuse plaintext for this host. Hard to undo once cached."},
@@ -712,6 +718,15 @@ void GetPrefsPage(Ctx &ctx) {
 				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
 				        Select(std::string("v_") + f.name, ThemeOptions(),
 				               value.empty() ? "auto" : value) +
+				        "</label>";
+				break;
+			case PrefField::Locale:
+				// Unlike the per-user picker, there is no "follow the site
+				// default" option here — this *is* the site default, and one
+				// has to be picked. Only "en" ships with a translation today.
+				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
+				        Select(std::string("v_") + f.name, {{"en", "English"}},
+				               value.empty() ? "en" : value) +
 				        "</label>";
 				break;
 			case PrefField::AxLevel:

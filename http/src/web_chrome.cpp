@@ -1,5 +1,6 @@
 #include "web.hpp"
 #include "web_assets.hpp"
+#include "web_i18n.hpp"
 
 #include "quackmail/mime.hpp"
 #include "quackmail/tz.hpp"
@@ -302,12 +303,14 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	}
 	std::string out = "<nav class=\"sidebar\" aria-label=\"Sections\">";
 
-	auto item = [&](const char *href, const char *label, const char *key) {
+	// `label_key` is a Tr() catalog key, not literal text — every static nav
+	// label in this sidebar goes through the message catalog.
+	auto item = [&](const char *href, const char *label_key, const char *key) {
 		std::string extra = (active == key) ? " aria-current=\"page\"" : "";
-		out += "<a href=\"" + A(href) + "\"" + extra + "><span>" + T(label) + "</span></a>";
+		out += "<a href=\"" + A(href) + "\"" + extra + "><span>" + T(Tr(ctx, label_key)) + "</span></a>";
 	};
-	auto group = [&](const char *label) {
-		out += "<div class=\"group\"><span class=\"label\">" + T(label) + "</span>";
+	auto group = [&](const char *label_key) {
+		out += "<div class=\"group\"><span class=\"label\">" + T(Tr(ctx, label_key)) + "</span>";
 	};
 	auto endgroup = [&]() { out += "</div>"; };
 
@@ -342,8 +345,8 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	// listing itself — see MailFoldersFrom.
 	std::vector<Room> folders = MailFoldersFrom(rooms);
 
-	group("Mail");
-	item("/mail/compose", "Compose", "compose");
+	group("nav.mail");
+	item("/mail/compose", "nav.compose", "compose");
 	{
 		std::vector<int64_t> nums;
 		for (auto &f : folders) {
@@ -355,12 +358,13 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 		auto unseen = UnseenCounts(ctx, nums);
 		for (size_t i = 0; i < folders.size(); i++) {
 			// "Mail" is what the store calls it and "Inbox" is what a person
-			// does. The other folders are already named the way they read.
-			std::string label = folders[i].display_name == "Mail" ? "Inbox" : folders[i].display_name;
+			// does. The other folders are already named the way they read — and
+			// are room names, not UI copy, so they do not go through Tr().
+			std::string label = folders[i].display_name == "Mail" ? Tr(ctx, "nav.inbox") : folders[i].display_name;
 			room_link(folders[i], label, unseen[i]);
 		}
 	}
-	item("/mail/", "All folders", "mail");
+	item("/mail/", "nav.all_folders", "mail");
 	endgroup();
 
 	// The user's own groupware rooms, linked by number because that is how rooms
@@ -387,13 +391,13 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 			}
 		}
 		if (!groupware.empty()) {
-			group("Groupware");
+			group("nav.groupware");
 			out += groupware;
 			endgroup();
 		}
 	}
 
-	group("Rooms");
+	group("nav.rooms");
 	{
 		// Rooms with something new in them, most unread first. Capped, because
 		// this is rendered on every page: `qm_web_sidebar_rooms` is the ceiling
@@ -433,29 +437,29 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 		}
 		std::string extra =
 		    (active == "bbs" || (in_a_room && !listed && room_key.empty())) ? " aria-current=\"page\"" : "";
-		out += "<a href=\"/bbs/\"" + extra + "><span>All rooms</span></a>";
+		out += "<a href=\"/bbs/\"" + extra + "><span>" + T(Tr(ctx, "nav.all_rooms")) + "</span></a>";
 		for (auto &u : unread) {
 			room_link(u.first, u.first.display_name, u.second);
 		}
 	}
-	item("/search", "Search", "search");
+	item("/search", "nav.search", "search");
 	if (MayCreateRooms(ctx)) {
-		item("/bbs/new", "Create a room", "newroom");
+		item("/bbs/new", "nav.create_room", "newroom");
 	}
-	item("/bbs/who", "Who is online", "who");
+	item("/bbs/who", "nav.who_online", "who");
 	endgroup();
 
-	group("You");
-	item("/prefs", "Preferences", "prefs");
-	item("/prefs/sieve", "Filters", "sieve");
-	item("/prefs/sessions", "Signed-in browsers", "sessions");
+	group("nav.you");
+	item("/prefs", "nav.preferences", "prefs");
+	item("/prefs/sieve", "nav.filters", "sieve");
+	item("/prefs/sessions", "nav.sessions", "sessions");
 	endgroup();
 
 	// Same gate as the router applies to every /admin route, so the link never
 	// points at a 403.
 	if (ctx.IsAide() && ConfigBool(ctx.con, "qm_web_admin_enabled", false)) {
-		group("System");
-		item("/admin/", "Admin console", "admin");
+		group("nav.system");
+		item("/admin/", "nav.admin", "admin");
 		endgroup();
 	}
 
@@ -565,7 +569,8 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	SecurityHeaders(ctx);
 
 	std::string node = ConfigStr(ctx.con, "c_humannode", "QuackCit");
-	std::string page = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">";
+	std::string page =
+	    "<!doctype html><html lang=\"" + A(EffectiveLocale(ctx)) + "\"><head><meta charset=\"utf-8\">";
 	page += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
 	page += "<title>" + T(title.empty() ? node : title + " — " + node) + "</title>";
 	// Order matters twice over. The external sheet comes first so the inline

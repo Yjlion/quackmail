@@ -919,6 +919,33 @@ def main():
         assert status == 200, "healthz must stay reachable for a load balancer"
         con.execute("CALL qm_config_set('qm_web_force_https', '0')")
 
+        # ---- i18n infra -----------------------------------------------------
+        # A fresh, signed-out opener: `op` is signed in by this point in the
+        # test, and GET /login while authenticated redirects instead of
+        # rendering the form.
+        _, _, page = request(opener(), BASE + "/login")
+        assert '<html lang="en">' in page, "the login page does not declare its language"
+        _, _, prefs = request(op, BASE + "/prefs")
+        assert '<html lang="en">' in prefs, "a signed-in page does not declare its language"
+        assert 'name="locale"' in prefs, "there is no language preference on /prefs"
+        status, _, _ = request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "locale": "en"},
+        )
+        assert status == 303, "saving the language returned " + str(status)
+        _, _, prefs = request(op, BASE + "/prefs")
+        assert 'value="en" selected' in prefs, "the language preference did not stick"
+        # A locale with no catalog entry must not be storable — the pref must
+        # clear rather than pin the visitor to something Tr() cannot serve.
+        request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto", "tz": "",
+             "locale": "xx"},
+        )
+        _, _, prefs = request(op, BASE + "/prefs")
+        assert 'value="xx" selected' not in prefs, "an unknown locale was stored"
+
         # ---- logout -------------------------------------------------------
         # Logout ends *this* session, not every session for the account — the
         # open-redirect check above signed webuser in a second time and that
