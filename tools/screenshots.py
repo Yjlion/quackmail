@@ -767,6 +767,11 @@ def main():
         sign_in(page2, ADMIN, ADMIN_PW)
         for stem, path in ADMIN_SHOTS:
             captured.append((shoot(page2, args.out, "web-" + stem, path, DESKTOP), path))
+
+        # A room's own settings page — reachable by whoever administers it, an
+        # aide always does. The RFC 4314 ACL grid is the thing worth showing.
+        captured.append((shoot(page2, args.out, "web-room-settings",
+                               lobby + "/settings", DESKTOP), lobby + "/settings"))
         ctx2.close()
 
         print("capturing the BBS shell")
