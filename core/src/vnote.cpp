@@ -43,6 +43,7 @@ void Project(Note &n) {
 	n.summary.clear();
 	n.body.clear();
 	n.color.clear();
+	n.content_type.clear();
 	for (auto &kv : n.props) {
 		if (kv.first == "UID") {
 			n.uid = Trim(kv.second);
@@ -52,6 +53,8 @@ void Project(Note &n) {
 			n.body = kv.second;
 		} else if (kv.first == "X-OUTLOOK-COLOR") {
 			n.color = Trim(kv.second);
+		} else if (kv.first == "X-QM-FORMAT") {
+			n.content_type = Trim(kv.second);
 		}
 	}
 }
@@ -134,6 +137,9 @@ std::string Emit(const Note &note) {
 	Put(n, "BODY", n.body);
 	if (!n.color.empty()) {
 		Put(n, "X-OUTLOOK-COLOR", n.color);
+	}
+	if (!n.content_type.empty()) {
+		Put(n, "X-QM-FORMAT", n.content_type);
 	}
 
 	std::string out;

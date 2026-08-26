@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_i18n.hpp"
 #include "quackmail/tz.hpp"
 
 #include "quackmail/auth.hpp"
@@ -76,6 +77,11 @@ void GetPrefs(Ctx &ctx) {
 	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_theme", "auto")) +
 	        "</label>";
 
+	body += "<label class=\"field\"><span>Language</span>" +
+	        Select("locale", LocaleOptions(),
+	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_locale")) +
+	        "</label>";
+
 	// Every date on every page renders in this zone, and the calendar is
 	// unusable without it. The empty option means "follow the site default",
 	// which is stored as a cleared row rather than today's value of it.
@@ -86,6 +92,12 @@ void GetPrefs(Ctx &ctx) {
 	}
 	body += "<label class=\"field\"><span>Time zone</span>" +
 	        Select("tz", zones, quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_tz")) +
+	        "</label>";
+
+	body += "<label class=\"field\"><span>Mail list density</span>" +
+	        Select("mail_layout",
+	               {{"comfortable", "Comfortable"}, {"compact", "Compact"}, {"wide", "Wide"}},
+	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_mail_layout", "comfortable")) +
 	        "</label>";
 
 	std::vector<std::pair<std::string, std::string>> date_formats = {
@@ -201,12 +213,28 @@ void PostSettings(Ctx &ctx) {
 	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_tz",
 	                                quackmail::tz::IsKnown(zone) ? zone : "");
 
+	// Same "only a known value is stored" rule as theme/tz.
+	std::string mail_layout = ctx.req.Form("mail_layout");
+	quackmail::citadel::SetUserPref(
+	    ctx.con, ctx.username, "web_mail_layout",
+	    (mail_layout == "compact" || mail_layout == "wide") ? mail_layout : "");
+
 	// Same "only a known value is stored" rule as theme/tz: anything else clears
 	// the row so the user follows the site default instead of a typo.
 	std::string date_format = ctx.req.Form("date_format");
 	quackmail::citadel::SetUserPref(
 	    ctx.con, ctx.username, "web_date_format",
 	    (date_format == "iso" || date_format == "us" || date_format == "eu") ? date_format : "");
+
+	// Only a locale this build actually ships a catalog for; anything else
+	// clears the row rather than pinning the visitor to a typo.
+	std::string locale = ctx.req.Form("locale");
+	bool known_locale = false;
+	for (auto &opt : LocaleOptions()) {
+		known_locale = known_locale || opt.first == locale;
+	}
+	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_locale",
+	                                (known_locale && !locale.empty()) ? locale : "");
 
 	RedirectTo(ctx, "/prefs", "saved");
 }
@@ -703,6 +731,13 @@ std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &acti
 		body += "<h2>Rules</h2>";
 		// One per page, shared by every action form below it.
 		body += RawHtml(FolderList(ctx, user));
+		// qc-sieve.js's boost targets this id: every add/delete/move/match/stop
+		// form in here posts, gets redirected back to this same page, and — with
+		// script — has its response's #rule-builder swapped in for this one
+		// instead of a full navigation. Without script, or if anything about that
+		// fails, the form's own normal submit already works exactly as it did
+		// before this existed, which is why the id is the only thing added here.
+		body += "<div id=\"rule-builder\">";
 		std::vector<quackmail::sieve::Rule> rules;
 		std::string why;
 		if (!quackmail::sieve::Decompose(current, rules, why)) {
@@ -718,6 +753,7 @@ std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &acti
 			body += RawHtml(RuleCards(ctx, action_prefix, user, editing, rules));
 		}
 		body += RawHtml(AddRuleForm(ctx, action_prefix, user, editing));
+		body += "</div>";
 	}
 
 	body += "<h2>" + T(editing.empty() ? "New script" : "Source of " + editing) + "</h2>";
@@ -1127,6 +1163,7 @@ void PostSieveRuleStop(Ctx &ctx) {
 void GetSieve(Ctx &ctx) {
 	PageOpts opts;
 	opts.active = "sieve";
+	opts.script = "qc-sieve.js";
 	Render(ctx, "Mail filters", SieveBody(ctx, ctx.username, "/prefs/sieve"), opts);
 }
 

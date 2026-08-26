@@ -207,6 +207,14 @@ pre.body {
   background: var(--panel); padding: var(--s3);
   border: 1px solid var(--line); border-radius: var(--r1);
 }
+/* A note/task/event body saved as HTML or Markdown (RenderFormattedBody) —
+   same box as pre.body, but ordinary flowed HTML rather than preformatted
+   text. */
+.richnote {
+  background: var(--panel); padding: var(--s3);
+  border: 1px solid var(--line); border-radius: var(--r1);
+}
+.richnote img { max-width: 100%; height: auto; }
 iframe.htmlpart {
   width: 100%; min-height: 24rem;
   border: 1px solid var(--line); border-radius: var(--r1); background: #fff;
@@ -222,6 +230,15 @@ iframe.htmlpart {
 .msghead dt { color: var(--muted); font-size: .85em; }
 .msghead dd { margin: 0; }
 
+/* Mail list density (web_mail_layout). Only ever applied alongside view-1
+   (mailbox) or view-9 (drafts), so these never reach Notes/Tasks/Calendar/
+   Wiki, which have their own layouts already. "Comfortable" is the default —
+   today's spacing — so it needs no rule of its own. */
+.layout-compact .wrap table td, .layout-compact .wrap table th {
+  padding: .15rem .5rem; font-size: .9em;
+}
+.layout-wide main > .inner { max-width: none; }
+
 /* The RFC 4314 rights legend on a room's settings page: one letter, one
    sentence. Same two-column grid as a message header, but keyed by a glyph. */
 dl.rights {
@@ -230,6 +247,10 @@ dl.rights {
 }
 dl.rights dt { font-family: var(--mono); }
 dl.rights dd { margin: 0; color: var(--muted); }
+
+/* One checkbox per RFC 4314 letter, on a room's settings page. The legend
+   above already spells out what each letter means, so these stay terse. */
+.rightbox { display: flex; flex-wrap: wrap; gap: 0 var(--s3); margin: var(--s2) 0; }
 
 /* ---- misc -------------------------------------------------------------- */
 

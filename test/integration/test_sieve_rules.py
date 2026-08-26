@@ -129,6 +129,10 @@ def main():
         _, page = c.get("/prefs/sieve?name=rules")
         assert "Add a rule" in page, "the rule builder is not offered"
         assert "This script has no rules yet" in page, "an empty script did not say so"
+        assert 'id="rule-builder"' in page, (
+            "the rule builder has no #rule-builder wrapper for qc-sieve.js to target"
+        )
+        assert "qc-sieve" in page, "the page does not load the rule-builder's JS enhancement"
         # The builder offers exactly the actions the evaluator implements — no
         # more, so a control cannot promise something the delivery path ignores,
         # and no fewer, so an implemented extension is not left unreachable.
