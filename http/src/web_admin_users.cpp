@@ -652,8 +652,10 @@ const PrefField kIdentityFields[] = {
     {"c_nodename", "Node name", PrefField::Text, "Short name this server calls itself on the wire."},
     {"c_fqdn", "Fully-qualified host name", PrefField::Text,
      "The domain mail is accepted for, and what appears in Received: and Message-ID."},
-    {"c_bbs_city", "Location", PrefField::Text, ""},
-    {"c_sysadm", "System administrator", PrefField::Text, ""},
+    {"c_bbs_city", "Location", PrefField::Text,
+     "Shown as the site's location in a few places a Citadel client asks for it. Cosmetic only."},
+    {"c_sysadm", "System administrator", PrefField::Text,
+     "The name shown as the person responsible for this system, e.g. in a Citadel client's info page."},
 };
 
 const PrefField kWebFields[] = {
@@ -661,21 +663,39 @@ const PrefField kWebFields[] = {
      "Used for signed-out visitors and anyone who has not chosen their own."},
     {"qm_default_date_format", "Default date format", PrefField::DateFormat,
      "Used for signed-out visitors and anyone who has not chosen their own in /prefs."},
-    {"qm_web_force_https", "Redirect HTTP to HTTPS", PrefField::Bool, ""},
+    {"qm_web_force_https", "Redirect HTTP to HTTPS", PrefField::Bool,
+     "On by default. Every plain-HTTP request gets redirected to HTTPS instead of served — refused "
+     "outright if c_fqdn is empty, since the redirect target must never be built from the client's own "
+     "Host header. Turn this off only when a reverse proxy in front of this server terminates TLS "
+     "itself and forwards X-Forwarded-Proto."},
     {"qm_web_hsts", "Send HSTS over TLS", PrefField::Bool,
      "Tells browsers to refuse plaintext for this host. Hard to undo once cached."},
     {"qm_web_admin_enabled", "Enable this admin console", PrefField::Bool,
      "Turning this off locks everyone out of /admin, including you."},
-    {"qm_web_admin_require_tls", "Admin console requires TLS", PrefField::Bool, ""},
-    {"qm_web_origins", "Allowed form origins", PrefField::Text, ""},
+    {"qm_web_admin_require_tls", "Admin console requires TLS", PrefField::Bool,
+     "On by default. Refuses /admin over plaintext HTTP even if qm_web_force_https is off, so an "
+     "operator's own session and password are never sent unencrypted. Leave this on unless the console "
+     "is only ever reached over a trusted private network."},
+    {"qm_web_origins", "Allowed form origins", PrefField::Text,
+     "A comma-separated allow-list of origins (wildcards allowed) a form POST may come from, checked "
+     "against the Origin/Referer header as a second layer on top of the CSRF token. Empty — the "
+     "default — leaves this check off; localhost is always accepted regardless."},
     {"qm_web_trusted_proxies", "Trusted reverse proxies", PrefField::Text, "CIDR list."},
 };
 
 const PrefField kMailFields[] = {
-    {"qm_spf_reject", "Reject on SPF failure", PrefField::Bool, ""},
-    {"qm_dkim_reject", "Reject on DKIM failure", PrefField::Bool, ""},
-    {"qm_dmarc_enforce", "Honour the sender's DMARC policy", PrefField::Bool, ""},
-    {"qm_rbl_reject", "Reject listed clients", PrefField::Bool, ""},
+    {"qm_spf_reject", "Reject on SPF failure", PrefField::Bool,
+     "Off by default. A hard SPF fail refuses the message outright instead of just being scored and "
+     "logged — a forwarded or misconfigured sender can trip this even when the mail is legitimate."},
+    {"qm_dkim_reject", "Reject on DKIM failure", PrefField::Bool,
+     "Off by default. A broken or missing DKIM signature refuses the message outright instead of just "
+     "being scored and logged."},
+    {"qm_dmarc_enforce", "Honour the sender's DMARC policy", PrefField::Bool,
+     "On by default. When the sending domain publishes p=reject or p=quarantine and both SPF and DKIM "
+     "fail alignment, act on it instead of only recording what DMARC would have done."},
+    {"qm_rbl_reject", "Reject listed clients", PrefField::Bool,
+     "On by default. A connecting client listed on one of the configured DNSBL zones is refused "
+     "outright instead of only being logged — see /admin/rbl for the zone list."},
     {"qm_quarantine_room", "Quarantine folder", PrefField::Text,
      "Where a DMARC quarantine files mail, overriding the user's own filter."},
 };
@@ -692,7 +712,10 @@ const PrefField kRoomFields[] = {
     {"qm_subaddress_create", "Create subaddressed folders on demand", PrefField::Bool,
      "Off by default: the sender chooses the folder name, so this lets anyone "
      "create rooms in a user's account."},
-    {"qm_aide_log", "Post system messages to the Aide room", PrefField::Bool, ""},
+    {"qm_aide_log", "Post system messages to the Aide room", PrefField::Bool,
+     "On by default. Routine server events — new users, config changes made here — get posted to the "
+     "Aide room so anyone reading it sees an audit trail. Turning this off does not stop the "
+     "underlying action, only the notice about it."},
     {"qm_aide_log_rejects", "Also post refused inbound mail", PrefField::Bool,
      "Noisy on a public MX. The audit log records refusals either way."},
 };
