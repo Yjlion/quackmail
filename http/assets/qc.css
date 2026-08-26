@@ -207,6 +207,14 @@ pre.body {
   background: var(--panel); padding: var(--s3);
   border: 1px solid var(--line); border-radius: var(--r1);
 }
+/* A note/task/event body saved as HTML or Markdown (RenderFormattedBody) —
+   same box as pre.body, but ordinary flowed HTML rather than preformatted
+   text. */
+.richnote {
+  background: var(--panel); padding: var(--s3);
+  border: 1px solid var(--line); border-radius: var(--r1);
+}
+.richnote img { max-width: 100%; height: auto; }
 iframe.htmlpart {
   width: 100%; min-height: 24rem;
   border: 1px solid var(--line); border-radius: var(--r1); background: #fff;

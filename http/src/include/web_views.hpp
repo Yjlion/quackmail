@@ -108,5 +108,33 @@ int64_t SaveObjectRaw(Ctx &ctx, const quackmail::citadel::Room &room, const std:
                       const std::string &subject, const std::string &content_type,
                       const std::string &body, int &status, std::string &err);
 
+// ---- rich text (Markdown/HTML), shared across object views ---------------
+// Wiki pages were the first view to store a body as either Markdown or HTML
+// (web_wiki.cpp) rather than plain text. These are the reusable pieces of
+// that pipeline, factored out so Notes/Tasks/Calendar/Blog/Journal can offer
+// the same choice without each re-deriving it. Wiki itself still layers its
+// own [[Link]] resolution on top in web_wiki.cpp; everything else uses these
+// exactly as they are.
+
+// The two content-type strings a stored body's format is recorded as.
+extern const char *const kHtmlContentType;
+extern const char *const kMarkdownContentType;
+
+// The "Format" <select> every edit form offering rich text shares.
+std::string FormatSelect(const std::string &field_name, const std::string &current);
+
+// Render a stored body to safe HTML for display. Markdown is rendered then
+// sanitized; HTML is sanitized directly — both go through the same allow-list
+// sanitizer, because generated markup gets no special trust either.
+std::string RenderFormattedBody(const std::string &body, const std::string &content_type);
+
+// Given what an edit form posted for "format" and "body" (or an equivalent
+// text field), decide the content type to store under and the body to store.
+// HTML is sanitized *before* it is stored, so what is kept is already safe
+// rather than depending on every future reader to clean it; Markdown is kept
+// as typed, since it is rendered fresh on every view.
+void ResolveFormat(const std::string &posted_format, const std::string &posted_body,
+                   std::string &content_type, std::string &stored_body);
+
 } // namespace qmweb
 } // namespace duckdb

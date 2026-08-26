@@ -21,9 +21,6 @@ namespace mime = quackmail::mime;
 
 namespace {
 
-const char *kHtmlType = "text/html";
-const char *kMarkdownType = "text/x-markdown";
-
 // A page's URL. The name is a *query parameter* rather than a path segment
 // because NormalizeName leaves '/' alone — a page really can be called
 // "Protocols/NNTP" — and http::NormalizePath percent-decodes before the router
@@ -42,7 +39,7 @@ struct Loaded {
 	std::string euid;
 	std::string title;
 	std::string body;         // the page source
-	std::string content_type; // kHtmlType or kMarkdownType
+	std::string content_type; // kHtmlContentType or kMarkdownContentType
 	std::string author;
 	int64_t msgtime = 0;
 	std::string raw;
@@ -58,22 +55,22 @@ bool Decompose(const Message &msg, Loaded &out) {
 	out.msgtime = msg.msgtime;
 	out.raw = msg.raw;
 
-	std::string md = qmweb::ObjectBody(msg, kMarkdownType);
+	std::string md = qmweb::ObjectBody(msg, kMarkdownContentType);
 	if (!md.empty()) {
 		out.body = md;
-		out.content_type = kMarkdownType;
+		out.content_type = kMarkdownContentType;
 		return true;
 	}
-	std::string html = qmweb::ObjectBody(msg, kHtmlType);
+	std::string html = qmweb::ObjectBody(msg, kHtmlContentType);
 	if (!html.empty()) {
 		out.body = html;
-		out.content_type = kHtmlType;
+		out.content_type = kHtmlContentType;
 		return true;
 	}
 	// A page written by something that did not use a part we recognise — or by
 	// a Citadel client — is still a page. Serve its text rather than a 404.
 	out.body = quackmail::citadel::BodyText(msg);
-	out.content_type = kHtmlType;
+	out.content_type = kHtmlContentType;
 	return !out.body.empty();
 }
 
@@ -101,8 +98,8 @@ std::string PageParam(Ctx &ctx) {
 // server stores and re-serves from its own origin.
 std::string RenderBody(Ctx &ctx, const Room &room, const Loaded &page,
                        const std::set<std::string> &existing) {
-	if (page.content_type != kMarkdownType) {
-		return quackmail::html::SanitizeForCompose(page.body);
+	if (page.content_type != kMarkdownContentType) {
+		return RenderFormattedBody(page.body, page.content_type);
 	}
 	// Wiki links are **absolute**. SanitizeForCompose keeps href only for
 	// http/https/mailto — it exists for markup arriving in mail, where a
@@ -276,9 +273,7 @@ void Edit(Ctx &ctx) {
 	body += "<p class=\"muted\">The name is lower-cased to form the page's identifier, so "
 	        "<code>Front Page</code> and <code>front page</code> are the same page.</p>";
 	body += "<label class=\"field\"><span>Format</span>" +
-	        Select("format",
-	               {{kHtmlType, "Formatted text (HTML)"}, {kMarkdownType, "Markdown"}},
-	               exists ? loaded.content_type : std::string(kMarkdownType)) +
+	        FormatSelect("format", exists ? loaded.content_type : std::string(kMarkdownContentType)) +
 	        "</label>";
 	// The *source* goes into the textarea, never the rendered HTML: round-
 	// tripping generated markup back through the editor is how a page slowly
@@ -310,14 +305,8 @@ void Save(Ctx &ctx) {
 		BadRequest(ctx, "A page cannot be called that: names ending in _HISTORY_ are reserved.");
 		return;
 	}
-	std::string source = ctx.req.Form("body");
-	std::string format = ctx.req.Form("format");
-	if (format != kMarkdownType) {
-		format = kHtmlType;
-		// HTML is sanitized *before* it is stored, so what is kept is already
-		// safe rather than depending on every future reader to clean it.
-		source = quackmail::html::SanitizeForCompose(source);
-	}
+	std::string format, source;
+	ResolveFormat(ctx.req.Form("format"), ctx.req.Form("body"), format, source);
 	if (source.empty()) {
 		BadRequest(ctx, "A page needs some text.");
 		return;

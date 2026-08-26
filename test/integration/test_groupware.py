@@ -327,6 +327,24 @@ def main():
         _, page = c.get(notes)
         assert "url(x)" not in page, "an unvalidated colour reached the page"
 
+        # ---- a note in Markdown, rendered rather than escaped ----------------
+        existing_nums = item_numbers(page, notes)
+        _, form = c.get(notes + "/item/new")
+        status, _ = c.post(notes + "/item/save", {
+            "_csrf": csrf(form), "summary": "Formatted", "body": "**bold** and a list:\n\n- one\n- two",
+            "format": "text/x-markdown",
+        })
+        assert status == 303, f"saving a markdown note returned {status}"
+        _, page = c.get(notes)
+        md_num = [n for n in item_numbers(page, notes) if n not in existing_nums]
+        assert md_num, "the markdown note does not link to a detail page"
+        status, detail = c.get(f"{notes}/item/{md_num[0]}")
+        assert status == 200 and "<strong>bold</strong>" in detail, (
+            "the markdown note did not render as HTML"
+        )
+        assert "richnote" in detail, "the rendered note is not in a richnote box"
+        assert "<li>one</li>" in detail, "the markdown list did not render"
+
         # ---- blog -----------------------------------------------------------
         # No personal blog room exists by default, so make one and post to it.
         con.execute("CALL cit_room_add('Web log')")

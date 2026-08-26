@@ -41,6 +41,12 @@ struct Note {
 	std::string body;
 	// "#RRGGBB", as Outlook and Citadel write it. Empty when unset.
 	std::string color;
+	// "text/html" or "text/x-markdown" — a QuackCit extension (X-QM-FORMAT),
+	// absent from every note some other Citadel client or an older QuackCit
+	// wrote. Empty means "plain text", rendered escaped rather than through a
+	// sanitizer: an existing note's body must not suddenly start rendering as
+	// HTML just because this field was added.
+	std::string content_type;
 
 	// Every property, in the order it arrived, so emitting preserves what this
 	// struct does not model. The four fields above are projections of it.
