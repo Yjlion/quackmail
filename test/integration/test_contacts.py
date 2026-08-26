@@ -204,6 +204,15 @@ def main():
         assert "Subject: " in body, "the message has no subject to list it by"
         im.logout()
 
+        # ---- the compose form offers this contact ----------------------------
+        status, page = c.get("/mail/compose")
+        assert status == 200
+        assert '<datalist id="addressbook">' in page, "compose has no address-book datalist"
+        assert "Augusta Ada Lovelace &lt;ada@example.org&gt;" in page, (
+            "the contact's address is not offered in the address-book picker"
+        )
+        assert 'list="addressbook"' in page, "the To field is not wired to the datalist"
+
         # ---- delete ---------------------------------------------------------
         _, page = c.get(f"{room_path}/item/{msgnum}")
         status, _ = c.post(room_path + "/item/delete",

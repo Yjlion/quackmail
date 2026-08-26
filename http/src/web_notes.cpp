@@ -76,6 +76,39 @@ std::string ColorStyle(const std::string &color) {
 	return " style=\"--note:" + color + "\"";
 }
 
+// The Post-it palette. A vector rather than a fixed array because Edit()
+// hands it straight to the swatch renderer, which needs to know how many
+// there are.
+const std::vector<std::pair<std::string, std::string>> &NoteColors() {
+	static const std::vector<std::pair<std::string, std::string>> kColors = {
+	    {"", "Default"},          {"#ffff88", "Yellow"}, {"#aaffaa", "Green"},
+	    {"#aaccff", "Blue"},      {"#ffccaa", "Orange"}, {"#ffaacc", "Pink"},
+	    {"#e0c8ff", "Lavender"},  {"#d9d9d9", "Grey"},
+	};
+	return kColors;
+}
+
+// A row of colour swatches rather than a <select>: which colour a note is sits
+// on the same "pick one visually" footing as choosing a highlighter, and a
+// dropdown of colour *names* makes you read before you can compare. Plain
+// radio inputs, each hidden behind a styled <span> sibling — the same
+// checked-sibling-selector trick as the mobile nav toggle, so this needs no
+// script.
+std::string ColorSwatches(const std::string &selected) {
+	std::string out = "<div class=\"swatches\">";
+	for (auto &c : NoteColors()) {
+		bool checked = c.first == selected;
+		out += "<label class=\"swatch" + std::string(c.first.empty() ? " swatch-default" : "") +
+		       "\" title=\"" + A(c.second) + "\">";
+		out += "<input type=\"radio\" name=\"color\" value=\"" + A(c.first) + "\"" +
+		       (checked ? " checked" : "") + ">";
+		out += "<span" + RawHtml(ColorStyle(c.first)) + "></span>";
+		out += "<span class=\"vh\">" + T(c.second) + "</span>";
+		out += "</label>";
+	}
+	return out + "</div>";
+}
+
 void Index(Ctx &ctx, const Room &room) {
 	auto notes = LoadNotes(ctx, room);
 	bool may_post = quackmail::citadel::CanPost(ctx.con, ctx.username, room);
@@ -174,16 +207,7 @@ void Edit(Ctx &ctx, const Room &room, int64_t msgnum) {
 	                {kMarkdownContentType, "Markdown"}},
 	               note.content_type) +
 	        "</label>";
-	body += "<label class=\"field\"><span>Colour</span>" +
-	        Select("color",
-	                {{"", "Default"},
-	                 {"#ffff88", "Yellow"},
-	                 {"#aaffaa", "Green"},
-	                 {"#aaccff", "Blue"},
-	                 {"#ffccaa", "Orange"},
-	                 {"#ffaacc", "Pink"}},
-	                note.color) +
-	        "</label>";
+	body += "<div class=\"field\"><span>Colour</span>" + ColorSwatches(note.color) + "</div>";
 	body += "<p>" + Button(editing ? "Save" : "Add note") + " " +
 	        Link(editing ? ItemHref(room, msgnum) : RoomHref(room), "Cancel") + "</p>";
 	body += FormEnd();

@@ -453,6 +453,7 @@ bool ParseItems(const std::string &text, std::vector<Item> &out) {
 		it.uid = c.Get("UID");
 		it.summary = c.Get("SUMMARY");
 		it.description = c.Get("DESCRIPTION");
+		it.desc_format = c.Get("X-QM-DESC-FORMAT");
 		it.location = c.Get("LOCATION");
 		it.organizer = c.Get("ORGANIZER");
 		it.status = c.Get("STATUS");
@@ -749,6 +750,11 @@ void FoldItemInto(Component &c, const Item &item) {
 		c.Remove("DESCRIPTION");
 	} else {
 		c.Set("DESCRIPTION", item.description);
+	}
+	if (item.desc_format.empty()) {
+		c.Remove("X-QM-DESC-FORMAT");
+	} else {
+		c.Set("X-QM-DESC-FORMAT", item.desc_format);
 	}
 	if (item.location.empty()) {
 		c.Remove("LOCATION");

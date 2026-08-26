@@ -261,6 +261,27 @@ def main():
             "end_date": "2026-05-01", "end_time": "09:00"})
         assert status == 400, f"an event ending before it starts returned {status}, not 400"
 
+        # An event description saved as Markdown renders rather than escapes.
+        _, form = c.get(cal + "/item/new")
+        status, _ = c.post(cal + "/item/save", {
+            "_csrf": csrf(form), "summary": "Rich description", "date": "2026-11-01", "time": "09:00",
+            "end_date": "2026-11-01", "end_time": "10:00", "description": "See the **agenda**.",
+            "desc_format": "text/x-markdown",
+        })
+        assert status == 303, f"saving an event with a markdown description returned {status}"
+        _, page = c.get(cal + "?y=2026&m=11")
+        # Not item_numbers()[0]: November also carries occurrences of the
+        # recurring "Weekly sync" event from earlier in this test, so the
+        # first link on the page is not necessarily the new one.
+        m = re.search(
+            r'href="' + re.escape(cal) + r'/item/(\d+)"[^>]*>[^<]*Rich description', page
+        )
+        assert m, "the new event does not link to a detail page"
+        status, detail = c.get(f"{cal}/item/{m.group(1)}")
+        assert status == 200 and "<strong>agenda</strong>" in detail, (
+            "the event's markdown description did not render as HTML"
+        )
+
         # ---- tasks ----------------------------------------------------------
         status, page = c.get(tasks)
         assert status == 200 and "Nothing to do here" in page, f"tasks returned {status}"
@@ -297,10 +318,32 @@ def main():
         assert "Write the docs" in page and "completed task hidden" not in page, \
             "the task did not reopen"
 
+        # A task's notes saved as Markdown render rather than escape.
+        _, form = c.get(tasks + "/item/new")
+        status, _ = c.post(tasks + "/item/save", {
+            "_csrf": csrf(form), "summary": "Rich task", "due": "2026-04-02",
+            "priority": "1", "percent": "0", "description": "See `README.md` for *details*.",
+            "desc_format": "text/x-markdown",
+        })
+        assert status == 303, f"saving a task with a markdown description returned {status}"
+        _, page = c.get(tasks)
+        # Not a numeric diff against tnums: reopening "Write the docs" above
+        # replaced it with a new message number too (Persist always upserts),
+        # so the task's *title* is the only reliable way to find this one.
+        m = re.search(
+            r'href="' + re.escape(tasks) + r'/item/(\d+)"[^>]*>[^<]*Rich task', page
+        )
+        assert m, "the new task does not link to a detail page"
+        status, detail = c.get(f"{tasks}/item/{m.group(1)}")
+        assert status == 200 and "<em>details</em>" in detail and "<code>README.md</code>" in detail, (
+            "the task's markdown notes did not render as HTML"
+        )
+
         # ---- notes ----------------------------------------------------------
         status, page = c.get(notes)
         assert status == 200 and "No notes here yet" in page, f"notes returned {status}"
         _, form = c.get(notes + "/item/new")
+        assert 'class="swatch' in form, "the note colour picker did not render as swatches"
         status, _ = c.post(notes + "/item/save", {
             "_csrf": csrf(form), "summary": "Remember", "body": "Milk, bread, a new BBS.",
             "color": "#ffff88",
@@ -412,7 +455,7 @@ def main():
         im.login(USER, PASSWORD)
         n, body = imap_body(im, "Calendar", "text/calendar")
         assert "BEGIN:VCALENDAR" in body, "the calendar part is not iCalendar"
-        assert n == 2, f"IMAP sees {n} calendar objects, not 2"
+        assert n == 3, f"IMAP sees {n} calendar objects, not 3"
         _, body = imap_body(im, "Tasks", "text/calendar")
         assert "BEGIN:VTODO" in body, f"the task is not a VTODO: {body[:200]}"
         _, body = imap_body(im, "Notes", "text/vnote")
