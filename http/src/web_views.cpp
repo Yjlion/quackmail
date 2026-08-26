@@ -1,6 +1,8 @@
 #include "web_views.hpp"
 
 #include "quackmail/citadel_msg.hpp"
+#include "quackmail/html_sanitize.hpp"
+#include "quackmail/markdown.hpp"
 #include "quackmail/mime.hpp"
 #include "quackmail/util.hpp"
 
@@ -140,6 +142,39 @@ bool SaveObject(Ctx &ctx, const Room &room, const std::string &euid, const std::
 		BadRequest(ctx, err);
 	}
 	return false;
+}
+
+// ---- rich text (Markdown/HTML) --------------------------------------------
+
+const char *const kHtmlContentType = "text/html";
+const char *const kMarkdownContentType = "text/x-markdown";
+
+std::string FormatSelect(const std::string &field_name, const std::string &current) {
+	return Select(field_name,
+	              {{kHtmlContentType, "Formatted text (HTML)"}, {kMarkdownContentType, "Markdown"}},
+	              current);
+}
+
+std::string RenderFormattedBody(const std::string &body, const std::string &content_type) {
+	if (content_type != kMarkdownContentType) {
+		return quackmail::html::SanitizeForCompose(body);
+	}
+	// The plain Options(): no [[Wiki Link]] resolution here, unlike
+	// web_wiki.cpp's own RenderBody. That syntax only means something inside a
+	// wiki room.
+	return quackmail::html::SanitizeForCompose(
+	    quackmail::markdown::Render(body, quackmail::markdown::Options()));
+}
+
+void ResolveFormat(const std::string &posted_format, const std::string &posted_body,
+                   std::string &content_type, std::string &stored_body) {
+	if (posted_format == kMarkdownContentType) {
+		content_type = kMarkdownContentType;
+		stored_body = posted_body;
+		return;
+	}
+	content_type = kHtmlContentType;
+	stored_body = quackmail::html::SanitizeForCompose(posted_body);
 }
 
 // ---- routes --------------------------------------------------------------

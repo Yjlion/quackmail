@@ -261,6 +261,27 @@ def main():
             "end_date": "2026-05-01", "end_time": "09:00"})
         assert status == 400, f"an event ending before it starts returned {status}, not 400"
 
+        # An event description saved as Markdown renders rather than escapes.
+        _, form = c.get(cal + "/item/new")
+        status, _ = c.post(cal + "/item/save", {
+            "_csrf": csrf(form), "summary": "Rich description", "date": "2026-11-01", "time": "09:00",
+            "end_date": "2026-11-01", "end_time": "10:00", "description": "See the **agenda**.",
+            "desc_format": "text/x-markdown",
+        })
+        assert status == 303, f"saving an event with a markdown description returned {status}"
+        _, page = c.get(cal + "?y=2026&m=11")
+        # Not item_numbers()[0]: November also carries occurrences of the
+        # recurring "Weekly sync" event from earlier in this test, so the
+        # first link on the page is not necessarily the new one.
+        m = re.search(
+            r'href="' + re.escape(cal) + r'/item/(\d+)"[^>]*>[^<]*Rich description', page
+        )
+        assert m, "the new event does not link to a detail page"
+        status, detail = c.get(f"{cal}/item/{m.group(1)}")
+        assert status == 200 and "<strong>agenda</strong>" in detail, (
+            "the event's markdown description did not render as HTML"
+        )
+
         # ---- tasks ----------------------------------------------------------
         status, page = c.get(tasks)
         assert status == 200 and "Nothing to do here" in page, f"tasks returned {status}"
@@ -297,10 +318,32 @@ def main():
         assert "Write the docs" in page and "completed task hidden" not in page, \
             "the task did not reopen"
 
+        # A task's notes saved as Markdown render rather than escape.
+        _, form = c.get(tasks + "/item/new")
+        status, _ = c.post(tasks + "/item/save", {
+            "_csrf": csrf(form), "summary": "Rich task", "due": "2026-04-02",
+            "priority": "1", "percent": "0", "description": "See `README.md` for *details*.",
+            "desc_format": "text/x-markdown",
+        })
+        assert status == 303, f"saving a task with a markdown description returned {status}"
+        _, page = c.get(tasks)
+        # Not a numeric diff against tnums: reopening "Write the docs" above
+        # replaced it with a new message number too (Persist always upserts),
+        # so the task's *title* is the only reliable way to find this one.
+        m = re.search(
+            r'href="' + re.escape(tasks) + r'/item/(\d+)"[^>]*>[^<]*Rich task', page
+        )
+        assert m, "the new task does not link to a detail page"
+        status, detail = c.get(f"{tasks}/item/{m.group(1)}")
+        assert status == 200 and "<em>details</em>" in detail and "<code>README.md</code>" in detail, (
+            "the task's markdown notes did not render as HTML"
+        )
+
         # ---- notes ----------------------------------------------------------
         status, page = c.get(notes)
         assert status == 200 and "No notes here yet" in page, f"notes returned {status}"
         _, form = c.get(notes + "/item/new")
+        assert 'class="swatch' in form, "the note colour picker did not render as swatches"
         status, _ = c.post(notes + "/item/save", {
             "_csrf": csrf(form), "summary": "Remember", "body": "Milk, bread, a new BBS.",
             "color": "#ffff88",
@@ -326,6 +369,24 @@ def main():
         _, page = c.get(notes)
         assert "url(x)" not in page, "an unvalidated colour reached the page"
 
+        # ---- a note in Markdown, rendered rather than escaped ----------------
+        existing_nums = item_numbers(page, notes)
+        _, form = c.get(notes + "/item/new")
+        status, _ = c.post(notes + "/item/save", {
+            "_csrf": csrf(form), "summary": "Formatted", "body": "**bold** and a list:\n\n- one\n- two",
+            "format": "text/x-markdown",
+        })
+        assert status == 303, f"saving a markdown note returned {status}"
+        _, page = c.get(notes)
+        md_num = [n for n in item_numbers(page, notes) if n not in existing_nums]
+        assert md_num, "the markdown note does not link to a detail page"
+        status, detail = c.get(f"{notes}/item/{md_num[0]}")
+        assert status == 200 and "<strong>bold</strong>" in detail, (
+            "the markdown note did not render as HTML"
+        )
+        assert "richnote" in detail, "the rendered note is not in a richnote box"
+        assert "<li>one</li>" in detail, "the markdown list did not render"
+
         # ---- blog -----------------------------------------------------------
         # No personal blog room exists by default, so make one and post to it.
         con.execute("CALL cit_room_add('Web log')")
@@ -348,6 +409,41 @@ def main():
         assert 'class="entry"' in page, "the blog did not use the entry layout"
         assert "Write an entry" in page
 
+        # A Markdown entry renders through the same iframe-sandboxed HTML path
+        # as any other HTML mail part — RenderMessage does not need to know
+        # this came from a blog room rather than an inbox.
+        _, form = c.get(blog + "/compose")
+        assert 'name="format"' in form, "a blog room's compose form offers no format choice"
+        status, _ = c.post(blog + "/post", {
+            "_csrf": csrf(form), "subject": "Formatted post",
+            "body": "Some **bold** news.", "format": "text/x-markdown",
+        })
+        assert status == 303, f"posting a markdown entry returned {status}"
+        _, page = c.get(blog)
+        assert "Formatted post" in page, "the markdown entry is not listed"
+        assert "HTML version" in page, "the markdown entry was not stored as an HTML part"
+        m = re.search(r'<iframe[^>]*\bsrc="([^"]+/html)"', page)
+        assert m, "the markdown entry's HTML part has no route"
+        status, rendered = c.get(m.group(1))
+        assert status == 200 and "<strong>bold</strong>" in rendered, (
+            "the markdown entry did not render as HTML"
+        )
+
+        # A plain-text entry is untouched: still format_type 0, not wrapped.
+        rn = re.search(r'href="' + re.escape(blog) + r'/msg/(\d+)"[^>]*>Formatted post', page)
+        assert rn, "the markdown entry's own permalink could not be found"
+        rich_num = int(rn.group(1))
+        plain_msg = con.execute(
+            "SELECT m.format_type FROM citadel_room_msgs rm JOIN citadel_messages m "
+            "ON m.msgnum = rm.msgnum WHERE rm.room_num = ? AND m.subject = 'First post'",
+            [blog_num],
+        ).fetchone()[0]
+        assert plain_msg == 0, "a plain blog post was not stored as format_type 0"
+        rich_msg = con.execute(
+            "SELECT format_type FROM citadel_messages WHERE msgnum = ?", [rich_num]
+        ).fetchone()[0]
+        assert rich_msg == 4, "the markdown blog post was not stored as format_type 4"
+
         # ---- the escape hatch works for every view --------------------------
         for path in (cal, tasks, notes, blog):
             status, page = c.get(path + "?view=raw")
@@ -359,7 +455,7 @@ def main():
         im.login(USER, PASSWORD)
         n, body = imap_body(im, "Calendar", "text/calendar")
         assert "BEGIN:VCALENDAR" in body, "the calendar part is not iCalendar"
-        assert n == 2, f"IMAP sees {n} calendar objects, not 2"
+        assert n == 3, f"IMAP sees {n} calendar objects, not 3"
         _, body = imap_body(im, "Tasks", "text/calendar")
         assert "BEGIN:VTODO" in body, f"the task is not a VTODO: {body[:200]}"
         _, body = imap_body(im, "Notes", "text/vnote")

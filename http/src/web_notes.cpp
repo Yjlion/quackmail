@@ -1,5 +1,6 @@
 #include "web_views.hpp"
 
+#include "quackmail/html_sanitize.hpp"
 #include "quackmail/vnote.hpp"
 
 #include <algorithm>
@@ -75,6 +76,39 @@ std::string ColorStyle(const std::string &color) {
 	return " style=\"--note:" + color + "\"";
 }
 
+// The Post-it palette. A vector rather than a fixed array because Edit()
+// hands it straight to the swatch renderer, which needs to know how many
+// there are.
+const std::vector<std::pair<std::string, std::string>> &NoteColors() {
+	static const std::vector<std::pair<std::string, std::string>> kColors = {
+	    {"", "Default"},          {"#ffff88", "Yellow"}, {"#aaffaa", "Green"},
+	    {"#aaccff", "Blue"},      {"#ffccaa", "Orange"}, {"#ffaacc", "Pink"},
+	    {"#e0c8ff", "Lavender"},  {"#d9d9d9", "Grey"},
+	};
+	return kColors;
+}
+
+// A row of colour swatches rather than a <select>: which colour a note is sits
+// on the same "pick one visually" footing as choosing a highlighter, and a
+// dropdown of colour *names* makes you read before you can compare. Plain
+// radio inputs, each hidden behind a styled <span> sibling — the same
+// checked-sibling-selector trick as the mobile nav toggle, so this needs no
+// script.
+std::string ColorSwatches(const std::string &selected) {
+	std::string out = "<div class=\"swatches\">";
+	for (auto &c : NoteColors()) {
+		bool checked = c.first == selected;
+		out += "<label class=\"swatch" + std::string(c.first.empty() ? " swatch-default" : "") +
+		       "\" title=\"" + A(c.second) + "\">";
+		out += "<input type=\"radio\" name=\"color\" value=\"" + A(c.first) + "\"" +
+		       (checked ? " checked" : "") + ">";
+		out += "<span" + RawHtml(ColorStyle(c.first)) + "></span>";
+		out += "<span class=\"vh\">" + T(c.second) + "</span>";
+		out += "</label>";
+	}
+	return out + "</div>";
+}
+
 void Index(Ctx &ctx, const Room &room) {
 	auto notes = LoadNotes(ctx, room);
 	bool may_post = quackmail::citadel::CanPost(ctx.con, ctx.username, room);
@@ -120,7 +154,13 @@ void Item(Ctx &ctx, const Room &room, int64_t msgnum) {
 		NotFound(ctx);
 		return;
 	}
-	std::string body = "<pre class=\"body\">" + T(note.body) + "</pre>";
+	// Absent content_type is a note no client marked as HTML or Markdown —
+	// including every note written before this field existed — and stays the
+	// escaped plain text it has always rendered as.
+	std::string body = note.content_type.empty()
+	                       ? "<pre class=\"body\">" + T(note.body) + "</pre>"
+	                       : "<div class=\"richnote\">" +
+	                             RawHtml(RenderFormattedBody(note.body, note.content_type)) + "</div>";
 
 	std::string toolbar = "<div class=\"actions\">";
 	toolbar += Link(RoomHref(room), "Back to notes", "btn sec");
@@ -160,16 +200,14 @@ void Edit(Ctx &ctx, const Room &room, int64_t msgnum) {
 	body += "<label class=\"field\"><span>Title</span>" + TextInput("summary", note.summary) +
 	        "</label>";
 	body += "<label class=\"field\"><span>Note</span>" + TextArea("body", note.body, 14) + "</label>";
-	body += "<label class=\"field\"><span>Colour</span>" +
-	        Select("color",
-	                {{"", "Default"},
-	                 {"#ffff88", "Yellow"},
-	                 {"#aaffaa", "Green"},
-	                 {"#aaccff", "Blue"},
-	                 {"#ffccaa", "Orange"},
-	                 {"#ffaacc", "Pink"}},
-	                note.color) +
+	body += "<label class=\"field\"><span>Format</span>" +
+	        Select("format",
+	               {{"", "Plain text"},
+	                {kHtmlContentType, "Formatted text (HTML)"},
+	                {kMarkdownContentType, "Markdown"}},
+	               note.content_type) +
 	        "</label>";
+	body += "<div class=\"field\"><span>Colour</span>" + ColorSwatches(note.color) + "</div>";
 	body += "<p>" + Button(editing ? "Save" : "Add note") + " " +
 	        Link(editing ? ItemHref(room, msgnum) : RoomHref(room), "Cancel") + "</p>";
 	body += FormEnd();
@@ -197,6 +235,20 @@ void Save(Ctx &ctx, const Room &room) {
 	if (note.summary.empty() && note.body.empty()) {
 		BadRequest(ctx, "A note needs a title or some text.");
 		return;
+	}
+	// A third state FormatSelect()/ResolveFormat() do not model: "" means plain
+	// text, rendered escaped rather than through a sanitizer — the only choice
+	// that existed before this field did, and still the default.
+	std::string format = ctx.req.Form("format");
+	if (format == kMarkdownContentType) {
+		note.content_type = kMarkdownContentType;
+	} else if (format == kHtmlContentType) {
+		note.content_type = kHtmlContentType;
+		// Sanitized *before* storage, so what is kept is already safe rather
+		// than depending on every future reader to clean it.
+		note.body = quackmail::html::SanitizeForCompose(note.body);
+	} else {
+		note.content_type = "";
 	}
 	std::string color = ctx.req.Form("color");
 	// Only a colour we offer; anything else clears it rather than being stored.

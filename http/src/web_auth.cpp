@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_i18n.hpp"
 
 #include "quackmail/auth.hpp"
 
@@ -45,14 +46,14 @@ void LoginPage(Ctx &ctx, const std::string &problem, int status) {
 	}
 	body += FormStart(ctx, "/login");
 	body += Hidden("next", SafeNext(ctx.req));
-	body += "<label class=\"field\"><span>User name</span>" +
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "login.username")) + "</span>" +
 	        TextInput("username", ctx.req.Form("username")) + "</label>";
-	body += "<label class=\"field\"><span>Password</span>" + TextInput("password", "", "password") +
-	        "</label>";
-	body += "<p>" + Button("Sign in") + "</p>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "login.password")) + "</span>" +
+	        TextInput("password", "", "password") + "</label>";
+	body += "<p>" + Button(Tr(ctx, "login.signin")) + "</p>";
 	body += FormEnd();
 	body += "</div>";
-	Render(ctx, "Sign in to " + node, body, status);
+	Render(ctx, Tr(ctx, "login.title_prefix") + node, body, status);
 }
 
 void GetLogin(Ctx &ctx) {
