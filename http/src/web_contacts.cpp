@@ -385,5 +385,34 @@ const RoomViewHandler &ContactsView() {
 	return kContacts;
 }
 
+// Every e-mail address in the signed-in user's own Contacts room, as
+// "Name <address>" strings ready for a compose-form <datalist> — the same
+// vCard enumeration the Contacts page itself renders, so this can never drift
+// out of sync with what that page shows.
+std::vector<std::string> ContactAddressOptions(Ctx &ctx) {
+	std::vector<std::string> out;
+	if (!ctx.Authed()) {
+		return out;
+	}
+	int64_t room_num = quackmail::citadel::FindUserRoom(ctx.con, ctx.username, "Contacts");
+	if (room_num < 0) {
+		return out;
+	}
+	Room room;
+	if (!quackmail::citadel::GetRoomByNum(ctx.con, room_num, room)) {
+		return out;
+	}
+	for (auto &e : LoadContacts(ctx, room)) {
+		std::string name = e.card.Fn();
+		for (auto &email : e.card.Emails()) {
+			if (email.empty()) {
+				continue;
+			}
+			out.push_back(name.empty() ? email : name + " <" + email + ">");
+		}
+	}
+	return out;
+}
+
 } // namespace qmweb
 } // namespace duckdb
