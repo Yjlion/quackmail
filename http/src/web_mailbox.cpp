@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_i18n.hpp"
 #include "web_views.hpp"
 
 #include "quackmail/citadel_msg.hpp"
@@ -96,7 +97,7 @@ bool HasAttachment(const Message &msg) {
 	return false;
 }
 
-std::string PagerHtml(const Room &room, const std::string &filter, int64_t page, int64_t per,
+std::string PagerHtml(Ctx &ctx, const Room &room, const std::string &filter, int64_t page, int64_t per,
                       int64_t total_pages) {
 	if (total_pages <= 1) {
 		return std::string();
@@ -106,12 +107,12 @@ std::string PagerHtml(const Room &room, const std::string &filter, int64_t page,
 	};
 	std::string out = "<div class=\"pager\">";
 	if (page > 1) {
-		out += Link(href(page - 1), "Newer");
+		out += Link(href(page - 1), Tr(ctx, "pager.newer"));
 	}
-	out += "<span class=\"muted\">Page " + std::to_string(page) + " of " + std::to_string(total_pages) +
-	       "</span>";
+	out += "<span class=\"muted\">" + T(Tr(ctx, "pager.page")) + " " + std::to_string(page) + " " +
+	       T(Tr(ctx, "pager.of")) + " " + std::to_string(total_pages) + "</span>";
 	if (page < total_pages) {
-		out += Link(href(page + 1), "Older");
+		out += Link(href(page + 1), Tr(ctx, "pager.older"));
 	}
 	return out + "</div>";
 }
@@ -136,13 +137,14 @@ void Index(Ctx &ctx, const Room &room) {
 	size_t end = std::min(nums.size(), begin + (size_t)per);
 
 	std::string toolbar = "<div class=\"actions\">";
-	toolbar += Link("/mail/compose", "Write a message", "btn");
-	toolbar += Link("/mail/", "All folders", "btn sec");
-	toolbar += Link("/search?room=" + std::to_string(room.room_num), "Search this folder", "btn sec");
-	toolbar += Link(RoomHref(room) + "?f=new", "Unread", "btn sec");
-	toolbar += Link(RoomHref(room) + "?f=all", "All", "btn sec");
-	toolbar += FormStart(ctx, RoomHref(room, "/markread"), "inline") + Button("Mark all read", "sec") +
-	           FormEnd();
+	toolbar += Link("/mail/compose", Tr(ctx, "mail.write"), "btn");
+	toolbar += Link("/mail/", Tr(ctx, "nav.all_folders"), "btn sec");
+	toolbar += Link("/search?room=" + std::to_string(room.room_num), Tr(ctx, "mailbox.search_folder"),
+	                "btn sec");
+	toolbar += Link(RoomHref(room) + "?f=new", Tr(ctx, "mail.unread"), "btn sec");
+	toolbar += Link(RoomHref(room) + "?f=all", Tr(ctx, "mailbox.all"), "btn sec");
+	toolbar += FormStart(ctx, RoomHref(room, "/markread"), "inline") +
+	           Button(Tr(ctx, "mailbox.mark_all_read"), "sec") + FormEnd();
 	toolbar += "</div>";
 
 	PageOpts opts;
@@ -153,7 +155,7 @@ void Index(Ctx &ctx, const Room &room) {
 	opts.toolbar = toolbar;
 
 	if (nums.empty()) {
-		Render(ctx, room.display_name, "<p class=\"muted\">This folder is empty.</p>", opts);
+		Render(ctx, room.display_name, "<p class=\"muted\">" + T(Tr(ctx, "mailbox.empty")) + "</p>", opts);
 		return;
 	}
 
@@ -175,7 +177,8 @@ void Index(Ctx &ctx, const Room &room) {
 	        "aria-label=\"Select every message on this page\"></span></th>";
 	body += "<th class=\"mark\" title=\"Flagged\">&#9873;</th>";
 	body += "<th class=\"mark\" title=\"Attachment\">&#128206;</th>";
-	body += Head("Subject") + Head("From") + Head("Date") + "<th class=\"num\">Size</th></tr>";
+	body += Head(Tr(ctx, "mailbox.subject")) + Head(Tr(ctx, "mailbox.from")) + Head(Tr(ctx, "mailbox.date")) +
+	        "<th class=\"num\">" + T(Tr(ctx, "mailbox.size")) + "</th></tr>";
 
 	for (size_t i = begin; i < end; i++) {
 		Message msg;
@@ -232,7 +235,7 @@ void Index(Ctx &ctx, const Room &room) {
 	body += "</div>";
 	body += FormEnd();
 
-	body += PagerHtml(room, filter, page, per, total_pages);
+	body += PagerHtml(ctx, room, filter, page, per, total_pages);
 
 	Render(ctx, room.display_name, body, opts);
 }
