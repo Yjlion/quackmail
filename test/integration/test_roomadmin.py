@@ -83,6 +83,12 @@ def post(op, path, fields, csrf_from=None):
     return request(op, BASE + path, body)
 
 
+def rights_fields(rights_str):
+    """The settings/acl form now posts one checkbox per RFC 4314 letter
+    (right_l, right_r, ...) instead of a free-typed "rights" string."""
+    return {f"right_{c}": "1" for c in rights_str}
+
+
 def rights(con, room, user):
     row = con.execute(
         "SELECT rights, can_post, can_administer FROM cit_room_rights(?, ?)", [room, user]
@@ -198,7 +204,7 @@ def main():
 
         # ---- delegating, one right at a time -----------------------------
         settings = f"/bbs/room/{room_num}/settings"
-        status, _, _ = post(owner, settings + "/acl", {"identifier": "member", "rights": "lrswi"},
+        status, _, _ = post(owner, settings + "/acl", {"identifier": "member", **rights_fields("lrswi")},
                             csrf_from=settings)
         assert status == 303, f"granting access returned {status}"
         assert rights(con, "Project X", "member") == ("lrswi", True, False)
@@ -215,7 +221,7 @@ def main():
                             csrf_from=f"/bbs/room/{room_num}")
         assert status == 403, "a member without `a` could save room settings"
 
-        status, _, _ = post(owner, settings + "/acl", {"identifier": "member", "rights": "lrswia"},
+        status, _, _ = post(owner, settings + "/acl", {"identifier": "member", **rights_fields("lrswia")},
                             csrf_from=settings)
         assert status == 303
         status, _, _ = request(member, BASE + settings)
@@ -223,19 +229,20 @@ def main():
 
         # A delegate cannot drop their own administration: only an aide could
         # give it back, and that is a support request rather than a choice.
-        status, _, _ = post(member, settings + "/acl", {"identifier": "member", "rights": "lrswi"},
+        status, _, _ = post(member, settings + "/acl", {"identifier": "member", **rights_fields("lrswi")},
                             csrf_from=settings)
         assert status == 403, "a delegate locked themselves out"
         assert rights(con, "Project X", "member")[2] is True
 
         # "anyone" covers callers who are not signed in, so it can never hold
         # `a`. This is the entry somebody types by accident.
-        status, _, body = post(owner, settings + "/acl", {"identifier": "anyone", "rights": "lrsa"},
+        status, _, body = post(owner, settings + "/acl", {"identifier": "anyone", **rights_fields("lrsa")},
                                csrf_from=settings)
         assert status == 400 and "anyone" in body, f"anyone was granted `a`: {status}"
 
-        # An aide, though, may take a delegate's rights away.
-        status, _, _ = post(boss, settings + "/acl", {"identifier": "member", "rights": ""},
+        # An aide, though, may take a delegate's rights away — no right_X
+        # fields at all, same as unchecking every box.
+        status, _, _ = post(boss, settings + "/acl", {"identifier": "member"},
                             csrf_from=settings)
         assert status == 303
         assert rights(con, "Project X", "member") == ("", False, False)
@@ -256,7 +263,7 @@ def main():
         status, _, _ = request(stranger, BASE + "/bbs/new")
         assert status == 403, f"a plain user reached /bbs/new with the gate raised: {status}"
 
-        status, _, _ = post(owner, settings + "/acl", {"identifier": "stranger", "rights": "lk"},
+        status, _, _ = post(owner, settings + "/acl", {"identifier": "stranger", **rights_fields("lk")},
                             csrf_from=settings)
         assert status == 303, f"granting k returned {status}"
 
@@ -280,7 +287,7 @@ def main():
         con.execute("CALL cit_room_kill('Delegated Room')")
 
         # Taking `k` away closes the door again.
-        status, _, _ = post(owner, settings + "/acl", {"identifier": "stranger", "rights": "l"},
+        status, _, _ = post(owner, settings + "/acl", {"identifier": "stranger", **rights_fields("l")},
                             csrf_from=settings)
         assert status == 303
         status, _, _ = request(stranger, BASE + "/bbs/new")

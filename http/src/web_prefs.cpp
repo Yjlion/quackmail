@@ -94,6 +94,17 @@ void GetPrefs(Ctx &ctx) {
 	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_mail_layout", "comfortable")) +
 	        "</label>";
 
+	std::vector<std::pair<std::string, std::string>> date_formats = {
+	    {"", "Follow the server (" + ConfigStr(ctx.con, "qm_default_date_format", "iso") + ")"},
+	    {"iso", "2026-08-25 (ISO)"},
+	    {"us", "08/25/2026 (US)"},
+	    {"eu", "25/08/2026 (European)"},
+	};
+	body += "<label class=\"field\"><span>Date format</span>" +
+	        Select("date_format", date_formats,
+	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_date_format")) +
+	        "</label>";
+
 	body += "<p>" + Button("Save settings") + "</p>";
 	body += "<p class=\"muted\">These are the same preferences the BBS shell's "
 	        "<code>.Enter Configuration</code> edits.</p>";
@@ -201,6 +212,13 @@ void PostSettings(Ctx &ctx) {
 	quackmail::citadel::SetUserPref(
 	    ctx.con, ctx.username, "web_mail_layout",
 	    (mail_layout == "compact" || mail_layout == "wide") ? mail_layout : "");
+
+	// Same "only a known value is stored" rule as theme/tz: anything else clears
+	// the row so the user follows the site default instead of a typo.
+	std::string date_format = ctx.req.Form("date_format");
+	quackmail::citadel::SetUserPref(
+	    ctx.con, ctx.username, "web_date_format",
+	    (date_format == "iso" || date_format == "us" || date_format == "eu") ? date_format : "");
 
 	RedirectTo(ctx, "/prefs", "saved");
 }
