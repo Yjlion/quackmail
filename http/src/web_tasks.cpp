@@ -1,5 +1,6 @@
 #include "web_views.hpp"
 
+#include "quackmail/html_sanitize.hpp"
 #include "quackmail/ical.hpp"
 #include "quackmail/tz.hpp"
 
@@ -217,7 +218,10 @@ void Item(Ctx &ctx, const Room &room, int64_t msgnum) {
 	row("Completed", s.item.completed.valid ? DateOnly(zone, s.item.completed) : "");
 	body += "</dl></div>";
 	if (!s.item.description.empty()) {
-		body += "<pre class=\"body\">" + T(s.item.description) + "</pre>";
+		body += s.item.desc_format.empty()
+		            ? "<pre class=\"body\">" + T(s.item.description) + "</pre>"
+		            : "<div class=\"richnote\">" +
+		                  RawHtml(RenderFormattedBody(s.item.description, s.item.desc_format)) + "</div>";
 	}
 
 	std::string toolbar = "<div class=\"actions\">";
@@ -286,6 +290,12 @@ void Edit(Ctx &ctx, const Room &room, int64_t msgnum) {
 	        TextInput("percent", std::to_string(item.percent_complete), "number") + "</label>";
 	body += "<label class=\"field\"><span>Notes</span>" + TextArea("description", item.description, 6) +
 	        "</label>";
+	body += "<label class=\"field\"><span>Notes format</span>" +
+	        Select("desc_format", {{"", "Plain text"},
+	                               {kHtmlContentType, "Formatted text (HTML)"},
+	                               {kMarkdownContentType, "Markdown"}},
+	               item.desc_format) +
+	        "</label>";
 	body += "<p>" + Button(editing ? "Save" : "Add task") + " " +
 	        Link(editing ? ItemHref(room, msgnum) : RoomHref(room), "Cancel") + "</p>";
 	body += FormEnd();
@@ -332,6 +342,18 @@ void Save(Ctx &ctx, const Room &room) {
 	}
 	item.summary = summary;
 	item.description = ctx.req.Form("description");
+	// A third state ResolveFormat() does not model: "" means plain text, kept
+	// on the wire as an ordinary DESCRIPTION every other client already reads.
+	std::string desc_format = ctx.req.Form("desc_format");
+	if (desc_format == kMarkdownContentType) {
+		item.desc_format = kMarkdownContentType;
+	} else if (desc_format == kHtmlContentType) {
+		item.desc_format = kHtmlContentType;
+		// Sanitized *before* storage, same as every other rich-text view.
+		item.description = quackmail::html::SanitizeForCompose(item.description);
+	} else {
+		item.desc_format = "";
+	}
 	item.priority = (int)ctx.FormInt("priority", 0);
 	if (item.priority < 0 || item.priority > 9) {
 		item.priority = 0;
