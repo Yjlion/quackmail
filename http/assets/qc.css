@@ -231,6 +231,10 @@ dl.rights {
 dl.rights dt { font-family: var(--mono); }
 dl.rights dd { margin: 0; color: var(--muted); }
 
+/* One checkbox per RFC 4314 letter, on a room's settings page. The legend
+   above already spells out what each letter means, so these stay terse. */
+.rightbox { display: flex; flex-wrap: wrap; gap: 0 var(--s3); margin: var(--s2) 0; }
+
 /* ---- misc -------------------------------------------------------------- */
 
 .roomgrid {
