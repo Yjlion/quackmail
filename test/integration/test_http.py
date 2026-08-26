@@ -335,6 +335,7 @@ def main():
         op = opener()
         _, _, page = request(op, BASE + "/login")
         tok = csrf_of(page)
+        assert 'class="anon"' in page, "the signed-out login page carries no anon body class"
         s1, h1, b1 = request(op, BASE + "/login", {"_csrf": tok, "username": "webuser", "password": "wrong"})
         s2, h2, b2 = request(op, BASE + "/login", {"_csrf": tok, "username": "nobody", "password": "wrong"})
         assert "Set-Cookie" not in h1 and "Set-Cookie" not in h2, "a failed login minted a session"
@@ -353,6 +354,9 @@ def main():
         cookie = [c for c in jar if c.name == "qcsid"]
         assert cookie, "no session cookie"
         raw_token = cookie[0].value
+
+        _, _, page = request(op, BASE + "/prefs")
+        assert 'class="anon"' not in page, "a signed-in page still carries the anon body class"
 
         rows = con.execute(
             "SELECT token_hash, username, tls FROM quackmail_web_sessions"

@@ -289,6 +289,11 @@ header.top { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:basel
 main { padding:1.2rem 1.1rem 4rem; min-width:0; }
 main > .inner { max-width:62rem; }
 body.wide main > .inner { max-width:none; }
+/* Signed out, SidebarFor() emits no <nav> at all, so without this the grid's
+   first (15rem) column is the only free cell and main — login form included —
+   collapses into that narrow gutter instead of the full page. */
+body.anon .app { grid-template-columns: 1fr; }
+body.anon main { display:flex; align-items:center; justify-content:center; }
 )CSS";
 
 // The sidebar. Grouped, because a flat list stopped scaling somewhere around
@@ -583,6 +588,9 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	page += "</head>";
 
 	std::string body_class;
+	if (!ctx.Authed()) {
+		body_class += " anon";
+	}
 	if (opts.wide) {
 		body_class += " wide";
 	}
