@@ -2,6 +2,7 @@
 #include "web_views.hpp"
 
 #include "quackmail/citadel_msg.hpp"
+#include "quackmail/html_sanitize.hpp"
 #include "quackmail/mime.hpp"
 
 #include <algorithm>
@@ -21,6 +22,16 @@ namespace {
 int64_t CapNum(const Ctx &ctx, size_t i) {
 	std::string s = ctx.Cap(i);
 	return s.empty() ? -1 : (int64_t)std::strtoll(s.c_str(), nullptr, 10);
+}
+
+// Blog and Journal entries are the only ordinary (format_type 0) messages
+// offered a rich-text choice. A plain message-board room's posts still come
+// from whatever the sender's client sent — this is not a general "compose in
+// HTML" feature for every room, only for the two views that read like
+// articles rather than a conversation.
+bool IsRichRoom(const Room &room) {
+	return room.default_view == quackmail::citadel::VIEW_BLOG ||
+	      room.default_view == quackmail::citadel::VIEW_JOURNAL;
 }
 
 // Shell options for any page that belongs to a room. Carrying default_view onto
@@ -459,6 +470,14 @@ void GetBbsCompose(Ctx &ctx) {
 	body += Hidden("refs", refs);
 	body += "<label class=\"field\"><span>Subject</span>" + TextInput("subject", subject) + "</label>";
 	body += "<label class=\"field\"><span>Message</span>" + TextArea("body", quoted, 16) + "</label>";
+	if (IsRichRoom(room)) {
+		body += "<label class=\"field\"><span>Format</span>" +
+		        Select("format", {{"", "Plain text"},
+		                          {kHtmlContentType, "Formatted text (HTML)"},
+		                          {kMarkdownContentType, "Markdown"}},
+		               "") +
+		        "</label>";
+	}
 	body += "<p>" + Button("Post") + " " + Link(RoomHref(room), "Cancel") + "</p>";
 	body += FormEnd();
 	Render(ctx, "Post to " + room.display_name, body, RoomPage(room));
@@ -488,14 +507,30 @@ void PostBbsPost(Ctx &ctx) {
 	msg.author = ctx.username;
 	msg.author_usernum = quackmail::citadel::GetOrAssignUserNum(ctx.con, ctx.username);
 	msg.msgtime = (int64_t)std::time(nullptr);
-	// format_type 0 is a native Citadel message, so a post made here reads back
-	// over the Citadel protocol, telnet, NNTP, IMAP and POP3 unchanged.
-	msg.format_type = 0;
 	msg.subject = ctx.req.Form("subject");
 	msg.references = ctx.req.Form("refs");
 	msg.origin_room = room.display_name;
 	msg.node = ConfigStr(ctx.con, "c_nodename", "quackcit");
-	msg.raw = text;
+
+	// Only Blog/Journal offer a format at all (see IsRichRoom), so every other
+	// room's posts keep coming through exactly as they do today: format_type 0,
+	// a native Citadel message that reads back over the Citadel protocol,
+	// telnet, NNTP, IMAP and POP3 unchanged.
+	std::string format = IsRichRoom(room) ? ctx.req.Form("format") : std::string();
+	if (format == kMarkdownContentType || format == kHtmlContentType) {
+		// Rendered (and, for Markdown, sanitized as part of rendering) *before*
+		// storage: there is no edit path for a blog/journal entry to come back
+		// through, so keeping the source around would serve no reader and
+		// storing unsanitized HTML would not either.
+		std::string html = format == kMarkdownContentType
+		                       ? RenderFormattedBody(text, kMarkdownContentType)
+		                       : quackmail::html::SanitizeForCompose(text);
+		msg.format_type = 4;
+		msg.raw = WrapObject(ctx, kHtmlContentType, html, msg.subject, "");
+	} else {
+		msg.format_type = 0;
+		msg.raw = text;
+	}
 
 	std::string err;
 	std::vector<int64_t> rooms = {room.room_num};
