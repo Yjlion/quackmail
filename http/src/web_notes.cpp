@@ -1,5 +1,6 @@
 #include "web_views.hpp"
 
+#include "quackmail/html_sanitize.hpp"
 #include "quackmail/vnote.hpp"
 
 #include <algorithm>
@@ -120,7 +121,13 @@ void Item(Ctx &ctx, const Room &room, int64_t msgnum) {
 		NotFound(ctx);
 		return;
 	}
-	std::string body = "<pre class=\"body\">" + T(note.body) + "</pre>";
+	// Absent content_type is a note no client marked as HTML or Markdown —
+	// including every note written before this field existed — and stays the
+	// escaped plain text it has always rendered as.
+	std::string body = note.content_type.empty()
+	                       ? "<pre class=\"body\">" + T(note.body) + "</pre>"
+	                       : "<div class=\"richnote\">" +
+	                             RawHtml(RenderFormattedBody(note.body, note.content_type)) + "</div>";
 
 	std::string toolbar = "<div class=\"actions\">";
 	toolbar += Link(RoomHref(room), "Back to notes", "btn sec");
@@ -160,6 +167,13 @@ void Edit(Ctx &ctx, const Room &room, int64_t msgnum) {
 	body += "<label class=\"field\"><span>Title</span>" + TextInput("summary", note.summary) +
 	        "</label>";
 	body += "<label class=\"field\"><span>Note</span>" + TextArea("body", note.body, 14) + "</label>";
+	body += "<label class=\"field\"><span>Format</span>" +
+	        Select("format",
+	               {{"", "Plain text"},
+	                {kHtmlContentType, "Formatted text (HTML)"},
+	                {kMarkdownContentType, "Markdown"}},
+	               note.content_type) +
+	        "</label>";
 	body += "<label class=\"field\"><span>Colour</span>" +
 	        Select("color",
 	                {{"", "Default"},
@@ -197,6 +211,20 @@ void Save(Ctx &ctx, const Room &room) {
 	if (note.summary.empty() && note.body.empty()) {
 		BadRequest(ctx, "A note needs a title or some text.");
 		return;
+	}
+	// A third state FormatSelect()/ResolveFormat() do not model: "" means plain
+	// text, rendered escaped rather than through a sanitizer — the only choice
+	// that existed before this field did, and still the default.
+	std::string format = ctx.req.Form("format");
+	if (format == kMarkdownContentType) {
+		note.content_type = kMarkdownContentType;
+	} else if (format == kHtmlContentType) {
+		note.content_type = kHtmlContentType;
+		// Sanitized *before* storage, so what is kept is already safe rather
+		// than depending on every future reader to clean it.
+		note.body = quackmail::html::SanitizeForCompose(note.body);
+	} else {
+		note.content_type = "";
 	}
 	std::string color = ctx.req.Form("color");
 	// Only a colour we offer; anything else clears it rather than being stored.
