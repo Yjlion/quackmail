@@ -88,6 +88,12 @@ void GetPrefs(Ctx &ctx) {
 	        Select("tz", zones, quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_tz")) +
 	        "</label>";
 
+	body += "<label class=\"field\"><span>Mail list density</span>" +
+	        Select("mail_layout",
+	               {{"comfortable", "Comfortable"}, {"compact", "Compact"}, {"wide", "Wide"}},
+	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_mail_layout", "comfortable")) +
+	        "</label>";
+
 	std::vector<std::pair<std::string, std::string>> date_formats = {
 	    {"", "Follow the server (" + ConfigStr(ctx.con, "qm_default_date_format", "iso") + ")"},
 	    {"iso", "2026-08-25 (ISO)"},
@@ -200,6 +206,12 @@ void PostSettings(Ctx &ctx) {
 	std::string zone = ctx.req.Form("tz");
 	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_tz",
 	                                quackmail::tz::IsKnown(zone) ? zone : "");
+
+	// Same "only a known value is stored" rule as theme/tz.
+	std::string mail_layout = ctx.req.Form("mail_layout");
+	quackmail::citadel::SetUserPref(
+	    ctx.con, ctx.username, "web_mail_layout",
+	    (mail_layout == "compact" || mail_layout == "wide") ? mail_layout : "");
 
 	// Same "only a known value is stored" rule as theme/tz: anything else clears
 	// the row so the user follows the site default instead of a typo.
