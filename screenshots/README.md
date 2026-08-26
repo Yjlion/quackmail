@@ -129,6 +129,10 @@ throwaway server seeded with a demo world. Regenerate them with:
 
 ![web-admin-queue](web-admin-queue.png)
 
+### `/bbs/room/0/settings`
+
+![web-room-settings](web-room-settings.png)
+
 ## The BBS shell (telnet)
 
 `quackmail_telnet` *is* the Citadel text client, running server-side,
