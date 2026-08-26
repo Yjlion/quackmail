@@ -153,22 +153,46 @@ std::string RightsLegend() {
 	return out + "</dl>";
 }
 
+// One checkbox per RFC 4314 letter, in kAclRights order, so the widget and
+// SetRights agree on what a right even is without a second list to keep in
+// sync. Each grant renders its own <form>, so the "right_x" field names never
+// collide between rows.
+std::string RightsCheckboxes(const std::string &rights) {
+	std::string out = "<div class=\"rightbox\">";
+	for (const char *p = quackmail::citadel::kAclRights; *p; p++) {
+		std::string letter(1, *p);
+		const char *what = "";
+		for (auto &d : kRightDocs) {
+			if (d.letter == *p) {
+				what = d.what;
+				break;
+			}
+		}
+		bool checked = rights.find(*p) != std::string::npos;
+		out += "<label class=\"chk\" title=\"" + A(what) + "\"><input type=\"checkbox\" name=\"right_" +
+		       A(letter) + "\" value=\"1\"" + (checked ? " checked" : "") + "> <code>" + T(letter) +
+		       "</code></label>";
+	}
+	return out + "</div>";
+}
+
 std::string AclSection(Ctx &ctx, const Room &room) {
 	std::string base = SettingsHref(room);
 	std::string out = "<h2>Who may do what</h2>";
+	out += RawHtml(RightsLegend());
 
 	auto acl = quackmail::citadel::ListRights(ctx.con, room);
-	out += "<div class=\"wrap\"><table><tr>" + Head("Who") + Head("Rights") + Head("") + "</tr>";
 	for (auto &e : acl) {
-		out += "<tr>";
-		out += Cell(e.first);
-		out += "<td>" + FormStart(ctx, base + "/acl", "inline") + Hidden("identifier", e.first) +
-		       TextInput("rights", e.second) + Button("Save", "sec") + FormEnd() + "</td>";
-		out += "<td>" + FormStart(ctx, base + "/acl", "inline") + Hidden("identifier", e.first) +
-		       Hidden("rights", "") + Button("Remove", "danger") + FormEnd() + "</td>";
-		out += "</tr>";
+		out += "<div class=\"card\">";
+		out += "<h3>" + T(e.first) + "</h3>";
+		out += FormStart(ctx, base + "/acl", "inline") + Hidden("identifier", e.first) +
+		       RightsCheckboxes(e.second) + Button("Save", "sec") + FormEnd();
+		// No right_X fields at all — same as unchecking every box on the form
+		// above, which PostRoomAcl already treats as "grant nothing".
+		out += FormStart(ctx, base + "/acl", "inline") + Hidden("identifier", e.first) +
+		       Button("Remove", "danger") + FormEnd();
+		out += "</div>";
 	}
-	out += "</table></div>";
 	if (acl.empty()) {
 		out += "<p class=\"muted\">No explicit grants. Access follows the room's own attributes: an aide "
 		       "may do anything, and everyone else reads and posts unless the room is private, "
@@ -179,11 +203,9 @@ std::string AclSection(Ctx &ctx, const Room &room) {
 	out += FormStart(ctx, base + "/acl");
 	out += "<label class=\"field\"><span>User name, or <code>anyone</code></span>" +
 	       TextInput("identifier", "") + "</label>";
-	out += "<label class=\"field\"><span>Rights</span>" +
-	       TextInput("rights", "lrswi", "text", "lrswi") + "</label>";
+	out += RightsCheckboxes("lrswi");
 	out += "<p>" + Button("Grant") + "</p>";
 	out += FormEnd();
-	out += RawHtml(RightsLegend());
 	out += "<p class=\"muted\">These are RFC 4314 access rights, the same ones an IMAP client reads with "
 	       "<code>GETACL</code> and writes with <code>SETACL</code>. A grant can only widen access: to "
 	       "take reading away from everybody, make the room invitation-only above and then invite the "
@@ -450,7 +472,15 @@ void PostRoomAcl(Ctx &ctx) {
 		return;
 	}
 	std::string identifier = ctx.req.Form("identifier");
-	std::string rights = ctx.req.Form("rights");
+	// Built from whichever right_X checkboxes came back checked, in kAclRights
+	// order — never from a free-typed string, so a click here cannot land on
+	// a letter the widget does not offer.
+	std::string rights;
+	for (const char *p = quackmail::citadel::kAclRights; *p; p++) {
+		if (!ctx.req.Form(std::string("right_") + *p).empty()) {
+			rights += *p;
+		}
+	}
 	// "anyone" covers unauthenticated callers, so granting it `a` would hand
 	// room administration to the whole internet. Nothing legitimate wants that,
 	// and it is exactly the entry somebody types by accident while trying to

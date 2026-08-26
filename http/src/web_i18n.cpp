@@ -88,6 +88,7 @@ const Msg kMessages[] = {
     {"compose.send", "Send"},
     {"compose.save_draft", "Save as draft"},
     {"compose.cancel", "Cancel"},
+    {"compose.address_book", "Address book"},
 };
 
 } // namespace

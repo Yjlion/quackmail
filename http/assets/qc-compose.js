@@ -206,3 +206,39 @@
     }
   });
 })();
+
+// ---- the address-book picker ----------------------------------------------
+//
+// Same enhancement-only rule as the editor above: the To/Cc fields are plain
+// <input list=addressbook> already, so typing still autocompletes with no
+// script at all. This only adds a click-to-insert panel on top of that.
+(function () {
+  "use strict";
+
+  var toggle = document.getElementById("addressbook-toggle");
+  var panel = document.getElementById("addressbook-panel");
+  if (!toggle || !panel) return;
+
+  var to = document.getElementById("compose-to");
+  var cc = document.getElementById("compose-cc");
+  var target = to;
+  [to, cc].forEach(function (el) {
+    if (el) el.addEventListener("focus", function () { target = el; });
+  });
+
+  toggle.addEventListener("click", function () {
+    panel.hidden = !panel.hidden;
+  });
+
+  panel.querySelectorAll("button[data-addr]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var field = target || to;
+      if (!field) return;
+      var addr = btn.getAttribute("data-addr") || "";
+      var existing = field.value.replace(/,\s*$/, "");
+      field.value = existing ? existing + ", " + addr : addr;
+      panel.hidden = true;
+      field.focus();
+    });
+  });
+})();

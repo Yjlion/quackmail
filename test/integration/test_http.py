@@ -335,6 +335,7 @@ def main():
         op = opener()
         _, _, page = request(op, BASE + "/login")
         tok = csrf_of(page)
+        assert 'class="anon"' in page, "the signed-out login page carries no anon body class"
         s1, h1, b1 = request(op, BASE + "/login", {"_csrf": tok, "username": "webuser", "password": "wrong"})
         s2, h2, b2 = request(op, BASE + "/login", {"_csrf": tok, "username": "nobody", "password": "wrong"})
         assert "Set-Cookie" not in h1 and "Set-Cookie" not in h2, "a failed login minted a session"
@@ -353,6 +354,9 @@ def main():
         cookie = [c for c in jar if c.name == "qcsid"]
         assert cookie, "no session cookie"
         raw_token = cookie[0].value
+
+        _, _, page = request(op, BASE + "/prefs")
+        assert 'class="anon"' not in page, "a signed-in page still carries the anon body class"
 
         rows = con.execute(
             "SELECT token_hash, username, tls FROM quackmail_web_sessions"
@@ -410,6 +414,29 @@ def main():
         # The encoded-word one proves the decode-then-escape ordering: if the
         # server escaped first it would show the raw =?utf-8?B?...?= instead.
         assert page.count("&lt;script&gt;alert(1)") >= 2, "encoded-word subject was not decoded"
+
+        # ---- mail list density preference ----------------------------------
+        assert 'layout-' not in page, "a mail room carries a layout class before any preference is set"
+        _, _, prefs = request(op, BASE + "/prefs")
+        status, _, _ = request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "mail_layout": "compact"},
+        )
+        assert status == 303, "saving the mail layout returned " + str(status)
+        status, _, page = request(op, f"{BASE}/bbs/room/{mail_room}")
+        assert status == 200 and "layout-compact" in page, (
+            "the mail room did not pick up the compact layout class"
+        )
+        # A page that is not a mail room must not carry the class at all — it is
+        # scoped to VIEW_MAILBOX/VIEW_DRAFTS, not applied site-wide.
+        _, _, prefs_page = request(op, BASE + "/prefs")
+        assert "layout-" not in prefs_page, "the layout class leaked onto a non-mail page"
+        request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "mail_layout": "comfortable"},
+        )
 
         # ---- IDOR ---------------------------------------------------------
         # otheruser has to sign in first so their personal rooms exist. Without
@@ -878,6 +905,21 @@ def main():
         status, _, _ = request(op, BASE + "/admin/users")
         assert status == 403, "a non-aide reached the admin console"
 
+        # ---- /admin/prefs shows a description for every field --------------
+        status, _, page = request(admin_op, BASE + "/admin/prefs")
+        assert status == 200
+        for muted in ("c_bbs_city", "c_sysadm", "qm_web_force_https", "qm_web_admin_require_tls",
+                     "qm_web_origins", "qm_aide_log", "qm_spf_reject", "qm_dkim_reject",
+                     "qm_dmarc_enforce", "qm_rbl_reject"):
+            # Each field's help immediately follows its <input>/<select>, so a
+            # muted paragraph within a short window of the field name is good
+            # evidence this specific field has one, not just some other field
+            # on the page.
+            i = page.index(f'name="v_{muted}"')
+            assert '<p class="muted">' in page[i:i + 400], (
+                f"{muted} still has no description on /admin/prefs"
+            )
+
         # Re-authentication guards the sharpest actions.
         status, _, _ = request(
             admin_op,
@@ -919,6 +961,32 @@ def main():
         assert status == 200, "healthz must stay reachable for a load balancer"
         con.execute("CALL qm_config_set('qm_web_force_https', '0')")
 
+        # ---- date format preference ----------------------------------------
+        _, _, prefs = request(op, BASE + "/prefs")
+        status, _, _ = request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "date_format": "us"},
+        )
+        assert status == 303, "saving the date format returned " + str(status)
+        _, _, prefs = request(op, BASE + "/prefs")
+        assert 'value="us" selected' in prefs, "the date format preference did not stick"
+        # "Last call" on this same page is FormatTime(ctx, user.last_call) — the
+        # most direct proof the preference actually changes rendering, not just
+        # what /prefs itself echoes back.
+        assert re.search(r"Last call</dt><dd>\d{2}/\d{2}/\d{4} \d{2}:\d{2}", prefs), (
+            "the last-call timestamp did not switch to MM/DD/YYYY"
+        )
+        status, _, _ = request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "date_format": "iso"},
+        )
+        assert status == 303
+        _, _, prefs = request(op, BASE + "/prefs")
+        assert re.search(r"Last call</dt><dd>\d{4}-\d{2}-\d{2} \d{2}:\d{2}", prefs), (
+            "switching back to iso did not take"
+        )
         # ---- i18n infra -----------------------------------------------------
         # A fresh, signed-out opener: `op` is signed in by this point in the
         # test, and GET /login while authenticated redirects instead of

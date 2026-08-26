@@ -1,4 +1,6 @@
 #include "web.hpp"
+#include "web_views.hpp"
+
 #include "web_i18n.hpp"
 
 #include "quackmail/citadel_msg.hpp"
@@ -520,10 +522,33 @@ void GetCompose(Ctx &ctx) {
 	// Filled in by the editor on submit; empty means "this message is plain
 	// text", which is the state of every submission from a browser without it.
 	body += Hidden("html_body", "");
-	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.to")) + "</span>" + TextInput("to", to) +
-	        "</label>";
-	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.cc")) + "</span>" + TextInput("cc", cc) +
-	        "</label>";
+
+	// A <datalist> works with no script at all — the browser's own
+	// autocomplete offers a match as you type. The click-to-insert panel below
+	// (qc-compose.js) is the enhancement on top of that, not a replacement.
+	auto addresses = ContactAddressOptions(ctx);
+	if (!addresses.empty()) {
+		body += "<datalist id=\"addressbook\">";
+		for (auto &a : addresses) {
+			body += "<option value=\"" + A(a) + "\">";
+		}
+		body += "</datalist>";
+	}
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.to")) +
+	        "</span><input type=\"text\" name=\"to\" id=\"compose-to\" value=\"" + A(to) +
+	        "\" list=\"addressbook\"></label>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.cc")) +
+	        "</span><input type=\"text\" name=\"cc\" id=\"compose-cc\" value=\"" + A(cc) +
+	        "\" list=\"addressbook\"></label>";
+	if (!addresses.empty()) {
+		body += "<button type=\"button\" class=\"btn sec jsonly\" id=\"addressbook-toggle\">" +
+		        T(Tr(ctx, "compose.address_book")) + "</button>";
+		body += "<div id=\"addressbook-panel\" class=\"addressbook-panel\" hidden><ul>";
+		for (auto &a : addresses) {
+			body += "<li><button type=\"button\" data-addr=\"" + A(a) + "\">" + T(a) + "</button></li>";
+		}
+		body += "</ul></div>";
+	}
 	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.subject")) + "</span>" +
 	        TextInput("subject", subject) + "</label>";
 	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.message")) + "</span>" +
