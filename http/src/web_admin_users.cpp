@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_i18n.hpp"
 #include "web_views.hpp"
 
 #include "quackmail/auth.hpp"
@@ -609,6 +610,7 @@ const ConfigKey kConfigKeys[] = {
     {"qm_quarantine_room", "Quarantine folder"},
     {"qm_web_theme", "Default colour theme"},
     {"qm_default_date_format", "Default date format (iso/us/eu)"},
+    {"qm_default_locale", "Default language"},
     {"qm_room_create_axlevel", "Access level that may create rooms (0-6)"},
     {"qm_room_mail", "Accept mail for room addresses (1/0)"},
     {"qm_subaddress_sep", "Subaddress separator"},
@@ -624,7 +626,7 @@ const ConfigKey kConfigKeys[] = {
 struct PrefField {
 	const char *name;
 	const char *label;
-	enum Kind { Text, Bool, Theme, AxLevel, DateFormat } kind;
+	enum Kind { Text, Bool, Theme, AxLevel, DateFormat, Locale } kind;
 	const char *help;
 };
 
@@ -663,6 +665,10 @@ const PrefField kWebFields[] = {
      "Used for signed-out visitors and anyone who has not chosen their own."},
     {"qm_default_date_format", "Default date format", PrefField::DateFormat,
      "Used for signed-out visitors and anyone who has not chosen their own in /prefs."},
+    {"qm_default_locale", "Default language", PrefField::Locale,
+     "Used for signed-out visitors (including the login screen itself) and anyone who has not chosen "
+     "their own in /prefs. Only \"en\" ships with a translation today; this exists so a second "
+     "language is a data change, not a new page."},
     {"qm_web_force_https", "Redirect HTTP to HTTPS", PrefField::Bool,
      "On by default. Every plain-HTTP request gets redirected to HTTPS instead of served — refused "
      "outright if c_fqdn is empty, since the redirect target must never be built from the client's own "
@@ -748,6 +754,15 @@ void GetPrefsPage(Ctx &ctx) {
 				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
 				        Select(std::string("v_") + f.name, DateFormatOptions(),
 				               value.empty() ? "iso" : value) +
+				        "</label>";
+				break;
+			case PrefField::Locale:
+				// Unlike the per-user picker, there is no "follow the site
+				// default" option here — this *is* the site default, and one
+				// has to be picked. Only "en" ships with a translation today.
+				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
+				        Select(std::string("v_") + f.name, {{"en", "English"}},
+				               value.empty() ? "en" : value) +
 				        "</label>";
 				break;
 			case PrefField::AxLevel:
