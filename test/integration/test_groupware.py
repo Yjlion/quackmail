@@ -366,6 +366,41 @@ def main():
         assert 'class="entry"' in page, "the blog did not use the entry layout"
         assert "Write an entry" in page
 
+        # A Markdown entry renders through the same iframe-sandboxed HTML path
+        # as any other HTML mail part — RenderMessage does not need to know
+        # this came from a blog room rather than an inbox.
+        _, form = c.get(blog + "/compose")
+        assert 'name="format"' in form, "a blog room's compose form offers no format choice"
+        status, _ = c.post(blog + "/post", {
+            "_csrf": csrf(form), "subject": "Formatted post",
+            "body": "Some **bold** news.", "format": "text/x-markdown",
+        })
+        assert status == 303, f"posting a markdown entry returned {status}"
+        _, page = c.get(blog)
+        assert "Formatted post" in page, "the markdown entry is not listed"
+        assert "HTML version" in page, "the markdown entry was not stored as an HTML part"
+        m = re.search(r'<iframe[^>]*\bsrc="([^"]+/html)"', page)
+        assert m, "the markdown entry's HTML part has no route"
+        status, rendered = c.get(m.group(1))
+        assert status == 200 and "<strong>bold</strong>" in rendered, (
+            "the markdown entry did not render as HTML"
+        )
+
+        # A plain-text entry is untouched: still format_type 0, not wrapped.
+        rn = re.search(r'href="' + re.escape(blog) + r'/msg/(\d+)"[^>]*>Formatted post', page)
+        assert rn, "the markdown entry's own permalink could not be found"
+        rich_num = int(rn.group(1))
+        plain_msg = con.execute(
+            "SELECT m.format_type FROM citadel_room_msgs rm JOIN citadel_messages m "
+            "ON m.msgnum = rm.msgnum WHERE rm.room_num = ? AND m.subject = 'First post'",
+            [blog_num],
+        ).fetchone()[0]
+        assert plain_msg == 0, "a plain blog post was not stored as format_type 0"
+        rich_msg = con.execute(
+            "SELECT format_type FROM citadel_messages WHERE msgnum = ?", [rich_num]
+        ).fetchone()[0]
+        assert rich_msg == 4, "the markdown blog post was not stored as format_type 4"
+
         # ---- the escape hatch works for every view --------------------------
         for path in (cal, tasks, notes, blog):
             status, page = c.get(path + "?view=raw")
