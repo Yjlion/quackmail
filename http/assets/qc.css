@@ -387,6 +387,21 @@ tr.taskdone td a { color: var(--muted); text-decoration: line-through; }
 .richopt { display: none; }
 .richopt.richavailable { display: inline-flex; }
 
+/* ---- the compose address-book picker ----------------------------------- */
+/* The To/Cc fields already autocomplete from the addressbook <datalist> with
+   no script at all; this panel (qc-compose.js) is a click-to-insert
+   enhancement on top of that, so the toggle button is .jsonly. */
+.addressbook-panel {
+  max-height: 14rem; overflow-y: auto; margin: var(--s1) 0 var(--s2);
+  border: 1px solid var(--line); border-radius: var(--r1); background: var(--panel);
+}
+.addressbook-panel ul { list-style: none; margin: 0; padding: 0; }
+.addressbook-panel button {
+  display: block; width: 100%; text-align: left; font: inherit;
+  padding: .35rem var(--s3); border: 0; background: none; color: inherit; cursor: pointer;
+}
+.addressbook-panel button:hover { background: var(--bg); }
+
 /* ---- the Sieve rule builder -------------------------------------------- */
 /* Every control is a plain form that posts, so this needs no script — which is
    also why the cards can be styled independently of any state. */

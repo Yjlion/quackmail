@@ -64,6 +64,11 @@ const RoomViewHandler &JournalView();
 // of the room's view code, so the two share every handler.
 const RoomViewHandler &WikiView();
 
+// Every e-mail address in the signed-in user's own Contacts room, as
+// "Name <address>" strings — for a compose-form address-book picker. Empty
+// when signed out or there is no Contacts room yet.
+std::vector<std::string> ContactAddressOptions(Ctx &ctx);
+
 // The tasks list's one-click complete toggle. It is not part of RoomViewHandler
 // because no other view has an equivalent, and inventing a generic "toggle" slot
 // for one caller would be worse than one extra route.
