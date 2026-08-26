@@ -608,6 +608,7 @@ const ConfigKey kConfigKeys[] = {
     {"qm_rbl_reject", "Reject listed clients (1/0)"},
     {"qm_quarantine_room", "Quarantine folder"},
     {"qm_web_theme", "Default colour theme"},
+    {"qm_default_date_format", "Default date format (iso/us/eu)"},
     {"qm_room_create_axlevel", "Access level that may create rooms (0-6)"},
     {"qm_room_mail", "Accept mail for room addresses (1/0)"},
     {"qm_subaddress_sep", "Subaddress separator"},
@@ -623,9 +624,13 @@ const ConfigKey kConfigKeys[] = {
 struct PrefField {
 	const char *name;
 	const char *label;
-	enum Kind { Text, Bool, Theme, AxLevel } kind;
+	enum Kind { Text, Bool, Theme, AxLevel, DateFormat } kind;
 	const char *help;
 };
+
+std::vector<std::pair<std::string, std::string>> DateFormatOptions() {
+	return {{"iso", "2026-08-25 (ISO)"}, {"us", "08/25/2026 (US)"}, {"eu", "25/08/2026 (European)"}};
+}
 
 // Citadel's axdefs[] — the seven access levels, by their canonical names. A
 // level is a number on the wire and in citadel_users, but nobody remembers
@@ -656,6 +661,8 @@ const PrefField kIdentityFields[] = {
 const PrefField kWebFields[] = {
     {"qm_web_theme", "Default colour theme", PrefField::Theme,
      "Used for signed-out visitors and anyone who has not chosen their own."},
+    {"qm_default_date_format", "Default date format", PrefField::DateFormat,
+     "Used for signed-out visitors and anyone who has not chosen their own in /prefs."},
     {"qm_web_force_https", "Redirect HTTP to HTTPS", PrefField::Bool,
      "On by default. Every plain-HTTP request gets redirected to HTTPS instead of served — refused "
      "outright if c_fqdn is empty, since the redirect target must never be built from the client's own "
@@ -735,6 +742,12 @@ void GetPrefsPage(Ctx &ctx) {
 				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
 				        Select(std::string("v_") + f.name, ThemeOptions(),
 				               value.empty() ? "auto" : value) +
+				        "</label>";
+				break;
+			case PrefField::DateFormat:
+				body += "<label class=\"field\"><span>" + T(f.label) + "</span>" +
+				        Select(std::string("v_") + f.name, DateFormatOptions(),
+				               value.empty() ? "iso" : value) +
 				        "</label>";
 				break;
 			case PrefField::AxLevel:

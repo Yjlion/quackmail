@@ -301,6 +301,7 @@ def main():
         status, page = c.get(notes)
         assert status == 200 and "No notes here yet" in page, f"notes returned {status}"
         _, form = c.get(notes + "/item/new")
+        assert 'class="swatch' in form, "the note colour picker did not render as swatches"
         status, _ = c.post(notes + "/item/save", {
             "_csrf": csrf(form), "summary": "Remember", "body": "Milk, bread, a new BBS.",
             "color": "#ffff88",

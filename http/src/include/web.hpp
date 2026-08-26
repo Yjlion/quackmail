@@ -310,6 +310,10 @@ std::string WebSessionTable(Ctx &ctx, const std::vector<quackmail::web::SessionR
 // preference, else the site's `qm_default_tz`, else UTC. Never empty and always
 // a zone the bundled database knows.
 std::string EffectiveTz(Ctx &ctx);
+// The date format this user's times should be rendered in: their
+// `web_date_format` preference ("iso"/"us"/"eu"), else the site's
+// `qm_default_date_format`, else "iso". Never empty and always one of the three.
+std::string EffectiveDateFormat(Ctx &ctx);
 
 // Human-readable helpers used across pages.
 //
@@ -318,8 +322,10 @@ std::string EffectiveTz(Ctx &ctx);
 // process happened to be in — invisible to an operator whose server and desk are
 // in the same place, and wrong for everyone else.
 std::string FormatTime(Ctx &ctx, int64_t epoch_seconds);
-// The same, in an explicit zone. Pass "" for UTC.
-std::string FormatTimeIn(int64_t epoch_seconds, const std::string &tzid);
+// The same, in an explicit zone and date format ("iso"/"us"/"eu"). Pass "" for
+// UTC and "iso" (or "") for YYYY-MM-DD.
+std::string FormatTimeIn(int64_t epoch_seconds, const std::string &tzid,
+                          const std::string &date_format = "iso");
 std::string FormatBytes(int64_t bytes);
 // The subject/author of a message, RFC 2047-decoded. Decode first, escape
 // second: the other order lets "=?utf-8?B?PHNjcmlwdD4=?=" turn back into a tag

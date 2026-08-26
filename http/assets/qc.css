@@ -222,6 +222,15 @@ iframe.htmlpart {
 .msghead dt { color: var(--muted); font-size: .85em; }
 .msghead dd { margin: 0; }
 
+/* Mail list density (web_mail_layout). Only ever applied alongside view-1
+   (mailbox) or view-9 (drafts), so these never reach Notes/Tasks/Calendar/
+   Wiki, which have their own layouts already. "Comfortable" is the default —
+   today's spacing — so it needs no rule of its own. */
+.layout-compact .wrap table td, .layout-compact .wrap table th {
+  padding: .15rem .5rem; font-size: .9em;
+}
+.layout-wide main > .inner { max-width: none; }
+
 /* The RFC 4314 rights legend on a room's settings page: one letter, one
    sentence. Same two-column grid as a message header, but keyed by a glyph. */
 dl.rights {
@@ -230,6 +239,10 @@ dl.rights {
 }
 dl.rights dt { font-family: var(--mono); }
 dl.rights dd { margin: 0; color: var(--muted); }
+
+/* One checkbox per RFC 4314 letter, on a room's settings page. The legend
+   above already spells out what each letter means, so these stay terse. */
+.rightbox { display: flex; flex-wrap: wrap; gap: 0 var(--s3); margin: var(--s2) 0; }
 
 /* ---- misc -------------------------------------------------------------- */
 
@@ -346,6 +359,25 @@ tr.taskdone td a { color: var(--muted); text-decoration: line-through; }
   font-family: inherit; font-size: .9em;
 }
 
+/* The colour picker on the note edit form: swatches, not a <select> of colour
+   names. Each radio is visually hidden behind its own <span>, styled from the
+   same --note variable a saved note renders with — the checked-sibling
+   selector is the same no-script trick the mobile nav toggle uses. */
+.swatches { display: flex; flex-wrap: wrap; gap: var(--s2); margin: .3rem 0; }
+.swatch { position: relative; cursor: pointer; }
+.swatch input {
+  position: absolute; opacity: 0; width: 1.8rem; height: 1.8rem; margin: 0; cursor: pointer;
+}
+.swatch span:not(.vh) {
+  display: block; width: 1.8rem; height: 1.8rem; border-radius: 50%;
+  background: var(--note, var(--panel)); border: 2px solid var(--line);
+}
+.swatch-default span:not(.vh) {
+  background: repeating-linear-gradient(45deg, var(--line), var(--line) 3px, var(--panel) 3px, var(--panel) 7px);
+}
+.swatch input:checked + span { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.swatch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* ---- blog and journal entries ------------------------------------------ */
 
 .entry {
@@ -386,6 +418,21 @@ tr.taskdone td a { color: var(--muted); text-decoration: line-through; }
    it to someone who will only ever get a textarea would be a lie. */
 .richopt { display: none; }
 .richopt.richavailable { display: inline-flex; }
+
+/* ---- the compose address-book picker ----------------------------------- */
+/* The To/Cc fields already autocomplete from the addressbook <datalist> with
+   no script at all; this panel (qc-compose.js) is a click-to-insert
+   enhancement on top of that, so the toggle button is .jsonly. */
+.addressbook-panel {
+  max-height: 14rem; overflow-y: auto; margin: var(--s1) 0 var(--s2);
+  border: 1px solid var(--line); border-radius: var(--r1); background: var(--panel);
+}
+.addressbook-panel ul { list-style: none; margin: 0; padding: 0; }
+.addressbook-panel button {
+  display: block; width: 100%; text-align: left; font: inherit;
+  padding: .35rem var(--s3); border: 0; background: none; color: inherit; cursor: pointer;
+}
+.addressbook-panel button:hover { background: var(--bg); }
 
 /* ---- the Sieve rule builder -------------------------------------------- */
 /* Every control is a plain form that posts, so this needs no script — which is
