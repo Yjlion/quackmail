@@ -878,6 +878,21 @@ def main():
         status, _, _ = request(op, BASE + "/admin/users")
         assert status == 403, "a non-aide reached the admin console"
 
+        # ---- /admin/prefs shows a description for every field --------------
+        status, _, page = request(admin_op, BASE + "/admin/prefs")
+        assert status == 200
+        for muted in ("c_bbs_city", "c_sysadm", "qm_web_force_https", "qm_web_admin_require_tls",
+                     "qm_web_origins", "qm_aide_log", "qm_spf_reject", "qm_dkim_reject",
+                     "qm_dmarc_enforce", "qm_rbl_reject"):
+            # Each field's help immediately follows its <input>/<select>, so a
+            # muted paragraph within a short window of the field name is good
+            # evidence this specific field has one, not just some other field
+            # on the page.
+            i = page.index(f'name="v_{muted}"')
+            assert '<p class="muted">' in page[i:i + 400], (
+                f"{muted} still has no description on /admin/prefs"
+            )
+
         # Re-authentication guards the sharpest actions.
         status, _, _ = request(
             admin_op,
