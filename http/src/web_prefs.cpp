@@ -685,6 +685,13 @@ std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &acti
 		body += "<h2>Rules</h2>";
 		// One per page, shared by every action form below it.
 		body += RawHtml(FolderList(ctx, user));
+		// qc-sieve.js's boost targets this id: every add/delete/move/match/stop
+		// form in here posts, gets redirected back to this same page, and — with
+		// script — has its response's #rule-builder swapped in for this one
+		// instead of a full navigation. Without script, or if anything about that
+		// fails, the form's own normal submit already works exactly as it did
+		// before this existed, which is why the id is the only thing added here.
+		body += "<div id=\"rule-builder\">";
 		std::vector<quackmail::sieve::Rule> rules;
 		std::string why;
 		if (!quackmail::sieve::Decompose(current, rules, why)) {
@@ -700,6 +707,7 @@ std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &acti
 			body += RawHtml(RuleCards(ctx, action_prefix, user, editing, rules));
 		}
 		body += RawHtml(AddRuleForm(ctx, action_prefix, user, editing));
+		body += "</div>";
 	}
 
 	body += "<h2>" + T(editing.empty() ? "New script" : "Source of " + editing) + "</h2>";
@@ -1109,6 +1117,7 @@ void PostSieveRuleStop(Ctx &ctx) {
 void GetSieve(Ctx &ctx) {
 	PageOpts opts;
 	opts.active = "sieve";
+	opts.script = "qc-sieve.js";
 	Render(ctx, "Mail filters", SieveBody(ctx, ctx.username, "/prefs/sieve"), opts);
 }
 
