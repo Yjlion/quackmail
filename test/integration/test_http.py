@@ -919,6 +919,33 @@ def main():
         assert status == 200, "healthz must stay reachable for a load balancer"
         con.execute("CALL qm_config_set('qm_web_force_https', '0')")
 
+        # ---- date format preference ----------------------------------------
+        _, _, prefs = request(op, BASE + "/prefs")
+        status, _, _ = request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "date_format": "us"},
+        )
+        assert status == 303, "saving the date format returned " + str(status)
+        _, _, prefs = request(op, BASE + "/prefs")
+        assert 'value="us" selected' in prefs, "the date format preference did not stick"
+        # "Last call" on this same page is FormatTime(ctx, user.last_call) — the
+        # most direct proof the preference actually changes rendering, not just
+        # what /prefs itself echoes back.
+        assert re.search(r"Last call</dt><dd>\d{2}/\d{2}/\d{4} \d{2}:\d{2}", prefs), (
+            "the last-call timestamp did not switch to MM/DD/YYYY"
+        )
+        status, _, _ = request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "date_format": "iso"},
+        )
+        assert status == 303
+        _, _, prefs = request(op, BASE + "/prefs")
+        assert re.search(r"Last call</dt><dd>\d{4}-\d{2}-\d{2} \d{2}:\d{2}", prefs), (
+            "switching back to iso did not take"
+        )
+
         # ---- logout -------------------------------------------------------
         # Logout ends *this* session, not every session for the account — the
         # open-redirect check above signed webuser in a second time and that

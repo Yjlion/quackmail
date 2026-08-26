@@ -753,7 +753,21 @@ std::string EffectiveTz(Ctx &ctx) {
 	return want;
 }
 
-std::string FormatTimeIn(int64_t epoch_seconds, const std::string &tzid) {
+std::string EffectiveDateFormat(Ctx &ctx) {
+	std::string want;
+	if (ctx.Authed()) {
+		want = quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_date_format");
+	}
+	if (want.empty()) {
+		want = ConfigStr(ctx.con, "qm_default_date_format", "iso");
+	}
+	if (want != "us" && want != "eu") {
+		return "iso";
+	}
+	return want;
+}
+
+std::string FormatTimeIn(int64_t epoch_seconds, const std::string &tzid, const std::string &date_format) {
 	if (epoch_seconds <= 0) {
 		return "—";
 	}
@@ -771,14 +785,21 @@ std::string FormatTimeIn(int64_t epoch_seconds, const std::string &tzid) {
 	std::time_t t = (std::time_t)(days * 86400);
 	struct tm tm {};
 	gmtime_r(&t, &tm);
+	int year = tm.tm_year + 1900, mon = tm.tm_mon + 1, day = tm.tm_mday;
+	int hour = (int)(rem / 3600), minute = (int)((rem % 3600) / 60);
 	char buf[48];
-	std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1,
-	              tm.tm_mday, (int)(rem / 3600), (int)((rem % 3600) / 60));
+	if (date_format == "us") {
+		std::snprintf(buf, sizeof buf, "%02d/%02d/%04d %02d:%02d", mon, day, year, hour, minute);
+	} else if (date_format == "eu") {
+		std::snprintf(buf, sizeof buf, "%02d/%02d/%04d %02d:%02d", day, mon, year, hour, minute);
+	} else {
+		std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d", year, mon, day, hour, minute);
+	}
 	return buf;
 }
 
 std::string FormatTime(Ctx &ctx, int64_t epoch_seconds) {
-	return FormatTimeIn(epoch_seconds, EffectiveTz(ctx));
+	return FormatTimeIn(epoch_seconds, EffectiveTz(ctx), EffectiveDateFormat(ctx));
 }
 
 std::string FormatBytes(int64_t bytes) {
