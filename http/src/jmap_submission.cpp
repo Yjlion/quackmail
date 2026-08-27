@@ -211,8 +211,8 @@ js::Value EmailSubmissionSet(JmapCtx &jc, const js::Value &args) {
 			continue;
 		}
 
-		std::string rfc822 = quackmail::citadel::RenderRfc822(
-		    msg, quackmail::citadel::GetConfig(ctx.con, "c_nodename", "quackcit"));
+		std::string node = quackmail::citadel::GetConfig(ctx.con, "c_nodename", "quackcit");
+		std::string rfc822 = quackmail::citadel::RenderRfc822(msg, node);
 
 		std::string mail_from;
 		std::vector<std::string> rcpts;
@@ -264,7 +264,7 @@ js::Value EmailSubmissionSet(JmapCtx &jc, const js::Value &args) {
 		js::Value sub = js::Value::MakeObject();
 		sub.Set("id", "S" + IdOf(msgnum));
 		sub.Set("emailId", email_id);
-		sub.Set("threadId", ThreadIdFor(msg));
+		sub.Set("threadId", ThreadIdFor(msg, node));
 		sub.Set("identityId", spec["identityId"].AsString().empty()
 		                          ? std::string("0")
 		                          : spec["identityId"].AsString());

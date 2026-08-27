@@ -341,11 +341,19 @@ void SetKeyword(Ctx &ctx, int64_t msgnum, const std::string &keyword, bool on) {
 	     {Value::BIGINT(msgnum), Value(ctx.username), Value(flag)});
 }
 
-std::string ThreadIdFor(const Message &msg) {
+std::string ThreadIdFor(const Message &msg, const std::string &node) {
 	// A reply joins the thread its root started. References holds that root
-	// first, so the thread id is a function of the headers rather than of
-	// anything we store — which is what makes it stable across a restart and
-	// identical for two copies of one message in different rooms.
+	// first — GetBbsCompose builds it as `orig.references + " " + MessageId(orig)`,
+	// so the first entry is the root's Message-ID however deep the reply is — and
+	// the thread id is a function of the headers rather than of anything we
+	// store, which is what makes it stable across a restart and identical for two
+	// copies of one message in different rooms.
+	//
+	// The root has to hash *its own Message-ID* for this to close: naming it
+	// after its msgnum instead (which is what this did until the reading pane
+	// needed it to group) gives a root an id no reply can ever produce, so every
+	// conversation came out as a root alone plus its replies in a thread of their
+	// own.
 	const std::string &refs = msg.references;
 	size_t open = refs.find('<');
 	if (open != std::string::npos) {
@@ -354,8 +362,19 @@ std::string ThreadIdFor(const Message &msg) {
 			return "T" + quackmail::util::Sha256Hex(refs.substr(open + 1, close - open - 1)).substr(0, 16);
 		}
 	}
-	// No references: a thread of one, named after the message itself.
-	return "T" + IdOf(msg.msgnum);
+	// No references: the root of a thread, named by the same Message-ID its
+	// replies will point back at.
+	std::string id = quackmail::citadel::MessageId(msg, node);
+	if (id.size() > 2 && id.front() == '<' && id.back() == '>') {
+		id = id.substr(1, id.size() - 2);
+	}
+	return "T" + quackmail::util::Sha256Hex(id).substr(0, 16);
+}
+
+// The node name the Message-IDs above are minted under. One lookup per listing
+// rather than per message, which is why callers hold it.
+std::string NodeName(Ctx &ctx) {
+	return ConfigStr(ctx.con, "c_nodename", "quackcit");
 }
 
 std::vector<JmapEmail> ListEmails(Ctx &ctx, int64_t only_room) {
@@ -406,8 +425,8 @@ js::Value EmailToJson(Ctx &ctx, const Message &msg, int64_t room_num, const js::
 	// of its own, and RenderRfc822 is what synthesizes them. IMAP made the same
 	// choice for the same reason, and two front-ends disagreeing about what a
 	// message looks like is exactly what that rule prevents.
-	std::string rfc822 =
-	    quackmail::citadel::RenderRfc822(msg, quackmail::citadel::GetConfig(ctx.con, "c_nodename", "quackcit"));
+	std::string node = quackmail::citadel::GetConfig(ctx.con, "c_nodename", "quackcit");
+	std::string rfc822 = quackmail::citadel::RenderRfc822(msg, node);
 	mime::MimeEntity entity = mime::ParseEntity(rfc822);
 	Bodies bodies = SplitBodies(entity);
 
@@ -418,7 +437,7 @@ js::Value EmailToJson(Ctx &ctx, const Message &msg, int64_t room_num, const js::
 		v.Set("blobId", IdOf(msg.msgnum));
 	}
 	if (WantsProp(properties, "threadId")) {
-		v.Set("threadId", ThreadIdFor(msg));
+		v.Set("threadId", ThreadIdFor(msg, node));
 	}
 	if (WantsProp(properties, "mailboxIds")) {
 		// Every room this message is pointed into *and* this user may see. A
@@ -1207,7 +1226,7 @@ js::Value EmailSet(JmapCtx &jc, const js::Value &args) {
 		js::Value made = js::Value::MakeObject();
 		made.Set("id", IdOf(msgnum));
 		made.Set("blobId", IdOf(msgnum));
-		made.Set("threadId", ThreadIdFor(msg));
+		made.Set("threadId", ThreadIdFor(msg, NodeName(jc.ctx)));
 		made.Set("size", (int64_t)msg.raw.size());
 		created.Set(m.first, made);
 	}
@@ -1301,6 +1320,7 @@ js::Value ThreadGet(JmapCtx &jc, const js::Value &args) {
 	js::Value list = js::Value::MakeArray();
 	js::Value not_found = js::Value::MakeArray();
 	auto all = ListEmails(ctx, -1);
+	std::string node = NodeName(ctx);
 
 	for (const auto &want : ids) {
 		js::Value email_ids = js::Value::MakeArray();
@@ -1309,7 +1329,7 @@ js::Value ThreadGet(JmapCtx &jc, const js::Value &args) {
 			if (!quackmail::citadel::LoadMessage(ctx.con, e.msgnum, msg)) {
 				continue;
 			}
-			if (ThreadIdFor(msg) == want) {
+			if (ThreadIdFor(msg, node) == want) {
 				email_ids.Push(js::Value::MakeString(IdOf(msg.msgnum)));
 			}
 		}

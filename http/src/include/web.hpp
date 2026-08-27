@@ -156,7 +156,13 @@ std::string A(const std::string &value);
 std::string RawHtml(const std::string &html);
 
 // Small builders. Every one of these escapes its arguments.
-std::string Cell(const std::string &text, const std::string &css_class = "");
+// A table cell. `label` is the column heading, echoed into a data-label
+// attribute: below the sidebar breakpoint qc.css turns each row into a card and
+// each cell labels itself from it, which is how a four-column table stays
+// legible on a phone without a second markup path. Omitting it leaves the cell
+// unlabelled, not broken.
+std::string Cell(const std::string &text, const std::string &css_class = "",
+                 const std::string &label = "");
 std::string Head(const std::string &text);
 std::string Link(const std::string &href, const std::string &label, const std::string &css_class = "");
 std::string TextInput(const std::string &name, const std::string &value, const std::string &type = "text",
@@ -170,6 +176,19 @@ std::string Select(const std::string &name, const std::vector<std::pair<std::str
 std::string FormStart(const Ctx &ctx, const std::string &action, const std::string &css_class = "");
 std::string FormEnd();
 std::string Button(const std::string &label, const std::string &css_class = "");
+// The same, with a leading glyph from the sprite Render() emits.
+std::string IconButton(const std::string &label, const std::string &icon,
+                       const std::string &css_class = "");
+// One glyph from that sprite, by name (e.g. "reply", "trash"). Always
+// aria-hidden — every icon here sits beside a real or visually-hidden label.
+std::string Icon(const std::string &name);
+// Pico draws role="group" as a single segmented control. Use this for a row of
+// related actions rather than emitting loose buttons, which is what made the
+// old toolbars read as scattered outlined boxes.
+std::string ButtonGroup(const std::string &inner);
+// The action strip above a listing: groups and lone controls on one line, and
+// on a phone one line that scrolls rather than eight that stack.
+std::string Toolbar(const std::string &inner);
 
 // How the shell should present a page. Everything is optional; the default is
 // what every page rendered before this struct existed.
@@ -182,6 +201,10 @@ struct PageOpts {
 	// Drop the 62rem measure. Message lists and calendars want the width; prose
 	// and forms do not.
 	bool wide = false;
+	// Render as the fixed-height two-pane mail shell (list beside reader, each
+	// scrolling on its own) rather than as a flowing document. Opt-in, because
+	// the calendar and the wiki need the page to grow instead.
+	bool panes = false;
 	// A per-page action strip rendered by the shell, above `body`.
 	std::string toolbar;
 	// An extra script from /static, by logical name ("qc-compose.js"), loaded
@@ -245,6 +268,10 @@ bool MayCreateRooms(const Ctx &ctx);
 std::string RoomHref(const quackmail::citadel::Room &room, const std::string &suffix = "");
 std::string RenderMessage(Ctx &ctx, const quackmail::citadel::Room &room,
                           const quackmail::citadel::Message &msg);
+// Mark one message \Seen for the signed-in user. A no-op outside a mail folder.
+// Both the standalone message page and the reading pane call this, so the two
+// cannot disagree about what reading a message does.
+void MarkSeen(Ctx &ctx, const quackmail::citadel::Room &room, int64_t msgnum);
 
 // The signed-in user's mail folders — what a move may target, what the sidebar
 // lists. Personal rooms minus the groupware four, in Citadel's provisioning

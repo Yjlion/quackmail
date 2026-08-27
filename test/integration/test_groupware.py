@@ -82,7 +82,10 @@ def csrf(page):
 
 
 def room_of(home, label):
-    m = re.search(r'href="(/bbs/room/(\d+))"[^>]*><span>' + label + r'</span>', home)
+    # The (?!</a>) guard keeps the match inside one anchor; the sidebar is a
+    # single line, so a bare .*? would pair this label with an earlier href.
+    m = re.search(
+        r'href="(/bbs/room/(\d+))"(?:(?!</a>).)*?<span>' + label + r'</span>', home)
     assert m, f"the sidebar does not link a {label} room"
     return m.group(1)
 
@@ -421,7 +424,10 @@ def main():
         assert status == 303, f"posting a markdown entry returned {status}"
         _, page = c.get(blog)
         assert "Formatted post" in page, "the markdown entry is not listed"
-        assert "HTML version" in page, "the markdown entry was not stored as an HTML part"
+        # The sandboxed frame is the signal, not the sentence beside it: that
+        # copy goes through the message catalog now and reads differently in
+        # each locale.
+        assert 'class="htmlpart"' in page, "the markdown entry was not stored as an HTML part"
         m = re.search(r'<iframe[^>]*\bsrc="([^"]+/html)"', page)
         assert m, "the markdown entry's HTML part has no route"
         status, rendered = c.get(m.group(1))

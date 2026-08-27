@@ -1,503 +1,798 @@
-/* QuackCit web interface — the component sheet.
+/* QuackCit web interface — the application sheet.
  *
- * The palette, the reset and the layout skeleton are NOT here: they are inlined
- * into every page as kCriticalCss (http/src/web_chrome.cpp) so a page still
- * reads if this file is unreachable, and so there is no flash of unstyled
- * content while it loads. Everything below is a component, and every component
- * reads the custom properties rather than naming a colour — that is what lets a
- * theme be a six-line :root override instead of a second stylesheet.
+ * This file layers on top of Pico CSS (http/assets/pico.css), which supplies
+ * the reset, typography, buttons, form controls, tables, cards, dropdowns and
+ * dialogs. Nothing here restates what Pico already does; what lives here is
+ * the part of the interface that is specific to a mail and BBS client — the
+ * app shell, the sidebar, the three-pane mail layout, the calendar grid, the
+ * note cards, the wiki and the diff view.
+ *
+ * Every rule reads Pico's `--pico-*` custom properties rather than naming a
+ * colour, which is what lets a theme stay a `:root` override (web_chrome.cpp)
+ * instead of a second stylesheet.
+ *
+ * The palette, the reset and the layout skeleton are NOT here: the skeleton is
+ * inlined as kCriticalCss *before* the stylesheet links so a page has a shape
+ * on the first packet, and the per-user theme is inlined *after* them so it
+ * still wins the cascade.
  *
  * Served from /static/qc.<hash>.css, immutable and cached forever; the hash
  * changes when this file does. Edit it, run tools/gen_assets.py, commit both.
  */
 
-/* ---- links and headings ------------------------------------------------ */
+/* ---- app-level tuning of Pico ------------------------------------------ */
+/* Pico is tuned for documents: a 1rem rhythm, generous form controls and
+   underlined links. An inbox is a dense application, so the spacing scale
+   comes down and links stop announcing themselves as prose. */
 
-a { color: var(--accent); }
-a:hover { text-decoration: none; }
+:root {
+  --pico-font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --pico-font-size: 100%;
+  --pico-line-height: 1.5;
+  --pico-border-radius: 6px;
+  --pico-spacing: .75rem;
+  --pico-block-spacing-vertical: .75rem;
+  --pico-block-spacing-horizontal: 1rem;
+  --pico-form-element-spacing-vertical: .5rem;
+  --pico-form-element-spacing-horizontal: .7rem;
+  --pico-text-decoration: none;
+  --pico-typography-spacing-vertical: .75rem;
 
-h1 { font-size: 1.35rem; margin: .2rem 0 1rem; }
-h2 { font-size: 1.05rem; margin: 1.6rem 0 .6rem; }
-h3 { font-size: .95rem; margin: 1.2rem 0 .4rem; }
-
-code, pre { font-family: var(--mono); font-size: .92em; }
-
-/* A visible focus ring on keyboard navigation only. Without this the sidebar is
-   unusable without a mouse, which for a BBS is exactly the wrong audience to
-   lock out. */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 2px;
+  /* The app shell's own measurements, so a breakpoint and the grid that has
+     to agree with it are stated once. */
+  --qc-sidebar: 15.5rem;
+  --qc-header: 3.25rem;
+  --qc-list: minmax(21rem, 27rem);
 }
+
+/* Pico scales the root font size up at every breakpoint, which is right for an
+   article and wrong for a message list: it makes a wide screen show *fewer*
+   rows than a narrow one. Hold it at 16px and let the layout use the width. */
+@media (min-width: 576px) {
+  :root { font-size: 16px; }
+}
+
+/* Underlines come back wherever the text really is prose. */
+.wiki a, .richnote a, .msgbody a, .entry a { text-decoration: underline; }
+
+h1 { font-size: 1.4rem; margin: 0 0 var(--pico-spacing); }
+h2 { font-size: 1.1rem; margin: 1.4rem 0 .5rem; }
+h3 { font-size: .95rem; margin: 1rem 0 .4rem; }
+
+/* Pico pads the page landmarks for a document layout; the app shell does its
+   own padding, and the doubled gap pushes the header off the top of a phone. */
+body > header, body > main, body > footer { padding-block: 0; }
 
 .skip {
-  position: absolute; left: -100vw; top: 0; z-index: 10;
-  padding: var(--s2) var(--s3); background: var(--panel); border: 1px solid var(--accent);
+  position: absolute; left: -100vw; top: 0; z-index: 20;
+  padding: var(--pico-spacing);
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-primary);
+  border-radius: var(--pico-border-radius);
 }
-.skip:focus { left: var(--s2); top: var(--s2); }
+.skip:focus { left: var(--pico-spacing); top: var(--pico-spacing); }
 
-/* ---- header ------------------------------------------------------------ */
-
-header.top .brand { font-weight: 700; letter-spacing: .02em; }
-header.top .who {
-  margin-left: auto; color: var(--muted); font-size: .9em;
-  display: flex; gap: var(--s2); align-items: baseline;
-}
-
-/* The search box in the header. `margin-left:auto` on .who still pushes the
-   name to the right, so this sits between the two. */
-header.top .topsearch { margin: 0; }
-header.top .topsearch input { width: 14rem; max-width: 40vw; }
-
-/* A label that only a screen reader sees. The header box is identified by its
-   placeholder visually, which is not an accessible name. */
+/* A label only a screen reader sees. */
 .vh {
   position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip-path: inset(50%); white-space: nowrap;
 }
 
-/* The menu button is a <label> for a hidden checkbox: the sidebar collapses on
-   a phone with no script at all. */
-.navbtn {
-  display: none; cursor: pointer; font-size: 1.3rem; line-height: 1;
-  padding: 0 var(--s2) 0 0; user-select: none;
-}
+/* ---- icons -------------------------------------------------------------- */
+/* One inline <symbol> sprite is emitted per page by Render(), so `use` is
+   always same-document — external `use` is still unreliable across browsers
+   and would raise a CSP question that this sidesteps entirely. */
 
-/* ---- sidebar ----------------------------------------------------------- */
+.i {
+  width: 1em; height: 1em; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+  vertical-align: -.125em;
+}
+button .i, [role="button"] .i, .btn .i { margin-right: .4em; }
+/* An icon-only control still needs an accessible name; it carries one in a
+   .vh span, so there is nothing to space away from. */
+.iconly .i { margin-right: 0; }
+
+/* ---- header ------------------------------------------------------------- */
+
+header.top {
+  display: flex; align-items: center; gap: .75rem;
+  padding: 0 var(--pico-block-spacing-horizontal);
+  height: var(--qc-header);
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  background: var(--pico-card-background-color);
+}
+header.top .brand {
+  font-weight: 650; letter-spacing: -.01em; font-size: 1.02rem;
+  color: var(--pico-color); white-space: nowrap;
+}
+header.top .topsearch { margin: 0; flex: 1; max-width: 34rem; }
+header.top .topsearch input {
+  margin: 0; height: 2.1rem;
+  background-color: var(--pico-background-color);
+}
+header.top .who {
+  margin-left: auto; display: flex; gap: .6rem; align-items: center;
+  color: var(--pico-muted-color); font-size: .9em; white-space: nowrap;
+}
+header.top .who form { margin: 0; }
+header.top .who button { margin: 0; padding: .3rem .7rem; font-size: .85rem; }
+
+/* The menu button is a <label> for a hidden checkbox, so the sidebar collapses
+   on a phone without waiting for script to load. */
+.navbtn {
+  display: none; cursor: pointer; line-height: 1;
+  padding: .35rem; margin: 0; border-radius: var(--pico-border-radius);
+  user-select: none; color: var(--pico-color);
+}
+.navbtn:hover { background: var(--pico-secondary-hover-background); }
+.navbtn .i { width: 1.25rem; height: 1.25rem; }
+
+/* ---- sidebar ------------------------------------------------------------ */
 
 .sidebar {
-  border-right: 1px solid var(--line);
-  background: var(--panel);
-  padding: var(--s3) 0 var(--s5);
+  /* Pico lays a <nav> out as `display:flex; justify-content:space-between`,
+     which is right for a horizontal bar and turns a grouped vertical sidebar
+     into one row. This is the whole reason the rule exists. */
+  display: block;
+  border-right: 1px solid var(--pico-muted-border-color);
+  background: var(--pico-card-background-color);
+  padding: var(--pico-spacing) 0 2rem;
   overflow-y: auto;
 }
-.sidebar .group { margin-bottom: var(--s3); }
+.sidebar .group { margin-bottom: var(--pico-spacing); }
 .sidebar .group > .label {
-  display: block; padding: var(--s1) var(--s4);
-  font-size: .72em; text-transform: uppercase; letter-spacing: .07em;
-  color: var(--muted); font-weight: 600;
+  display: block; padding: .3rem 1rem;
+  font-size: .7rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--pico-muted-color); font-weight: 600;
 }
 .sidebar a {
-  display: flex; justify-content: space-between; gap: var(--s2);
-  padding: var(--s1) var(--s4);
-  text-decoration: none; color: inherit;
-  border-left: 2px solid transparent;
+  display: flex; align-items: center; gap: .55rem;
+  margin: 1px .5rem; padding: .38rem .6rem;
+  border-radius: var(--pico-border-radius);
+  text-decoration: none; color: var(--pico-color);
+  font-size: .92rem; line-height: 1.35;
 }
-.sidebar a:hover { background: var(--bg); }
+.sidebar a > span:first-of-type {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sidebar a .i { color: var(--pico-muted-color); }
+.sidebar a:hover { background: var(--pico-secondary-hover-background); }
 .sidebar a[aria-current="page"] {
-  border-left-color: var(--accent); color: var(--accent); font-weight: 600;
+  background: var(--pico-primary-background); color: var(--pico-primary-inverse);
+  font-weight: 550;
 }
+.sidebar a[aria-current="page"] .i { color: inherit; }
 /* The unread count rides along on the right of a room or folder link. */
+/* The unread count. Tinted from the accent rather than from
+   --pico-secondary-hover-background, which is a solid slate in both themes and
+   left a dark number on a dark chip. */
 .sidebar .count {
-  color: var(--muted); font-size: .85em; font-variant-numeric: tabular-nums;
+  margin-left: auto; font-size: .78rem; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  padding: .05rem .45rem; border-radius: 999px;
+  background: color-mix(in srgb, var(--pico-primary) 16%, transparent);
+  color: var(--pico-primary);
 }
-.sidebar a[aria-current="page"] .count { color: inherit; }
+.sidebar a[aria-current="page"] .count {
+  background: color-mix(in srgb, currentColor 22%, transparent); color: inherit;
+}
 
-/* ---- banners ----------------------------------------------------------- */
+/* ---- banners ------------------------------------------------------------ */
 
 .flash, .warnbar {
-  padding: var(--s2) var(--s3); background: var(--panel);
-  border-left: 3px solid var(--ok); margin-bottom: var(--s3);
+  display: flex; gap: .5rem; align-items: baseline;
+  padding: .55rem .8rem; margin-bottom: var(--pico-spacing);
+  border-radius: var(--pico-border-radius);
+  border-left: 3px solid var(--pico-primary);
+  background: var(--pico-card-sectioning-background-color);
 }
-.warnbar { border-left-color: var(--warn); font-size: .92em; }
-.flash.err { border-left-color: var(--warn); }
-.muted { color: var(--muted); }
+.flash.err, .warnbar { border-left-color: var(--pico-del-color); }
+.warnbar { font-size: .9em; }
+.muted { color: var(--pico-muted-color); }
 
-/* ---- tables ------------------------------------------------------------ */
+/* ---- toolbars ----------------------------------------------------------- */
+/* Pico's [role=group] is the segmented bar; these are the app's tweaks to it.
+   Everything that used to be a loose row of outlined boxes is one of these. */
 
-table { width: 100%; border-collapse: collapse; margin: var(--s2) 0 var(--s3); }
-th, td {
-  text-align: left; padding: .42rem .55rem;
-  border-bottom: 1px solid var(--line); vertical-align: top;
+.toolbar {
+  display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+  margin: 0 0 var(--pico-spacing);
 }
+.toolbar [role="group"] { margin: 0; width: auto; }
+.toolbar > form { margin: 0; }
+.toolbar button, .toolbar [role="button"] {
+  margin: 0; padding: .38rem .75rem; font-size: .88rem; white-space: nowrap;
+}
+.toolbar select { margin: 0; padding: .35rem 2rem .35rem .6rem; font-size: .88rem; }
+.toolbar .spacer { flex: 1; }
+
+/* The bulk bar appears once something is ticked. :has() reads the checkboxes
+   themselves, so there is no second piece of state to keep in step with them
+   and no script involved. */
+.toolbar.bulk { display: none; }
+.list:has(input[name="msgnum"]:checked) .toolbar.bulk,
+.wrap:has(input[name="msgnum"]:checked) + .toolbar.bulk {
+  display: flex;
+  position: sticky; bottom: 0; z-index: 3;
+  margin: 0; padding: .5rem var(--pico-block-spacing-horizontal);
+  background: var(--pico-card-background-color);
+  border-top: 1px solid var(--pico-muted-border-color);
+}
+/* The select-all lives in that bar, so it needs to be reachable before the bar
+   is: it rides in the list header instead. */
+.listhead .pickall { margin: 0; }
+
+/* FormStart(..., "inline") has always meant "this form is one control in a
+   row". Pico makes a <form> a block with a bottom margin, so without this every
+   form in a toolbar takes a line of its own and a select gets separated from
+   the button that submits it. */
+form.inline { display: inline-flex; align-items: center; gap: .3rem; margin: 0; }
+.toolbar form, .actions form {
+  display: inline-flex; align-items: center; gap: .3rem; margin: 0;
+}
+.toolbar select { max-width: 11rem; }
+
+/* The old class name, kept so a page that has not been revisited still lines
+   its controls up rather than stacking them. */
+.actions {
+  display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+  margin: var(--pico-spacing) 0;
+}
+.actions button, .actions [role="button"] { margin: 0; }
+.actions form { margin: 0; }
+
+/* On a phone a toolbar scrolls sideways rather than growing to eight rows. */
+@media (max-width: 52rem) {
+  .toolbar {
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+    padding-bottom: .2rem;
+  }
+  .toolbar::-webkit-scrollbar { display: none; }
+}
+
+/* ---- tables ------------------------------------------------------------- */
+
+table { margin-bottom: var(--pico-spacing); }
+th, td { padding: .45rem .6rem; vertical-align: top; }
 th {
-  font-size: .78em; text-transform: uppercase; letter-spacing: .06em;
-  color: var(--muted); font-weight: 600;
+  font-size: .74rem; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--pico-muted-color); font-weight: 600;
   /* Sticky headers: a 2000-row audit log is unreadable without them. */
-  position: sticky; top: 0; background: var(--bg); z-index: 1;
+  position: sticky; top: 0; z-index: 1;
+  background: var(--pico-background-color);
 }
-tr.unread td { font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-tbody tr:hover td { background: var(--panel); }
+tbody tr:hover td { background: var(--pico-card-sectioning-background-color); }
 .wrap { overflow-x: auto; }
-
-/* The mail folder listing: a narrow column for the checkbox and one for each
-   single-glyph marker, so the subject keeps the width. */
-th.pick, td.pick { width: 1.6rem; padding-right: 0; }
-th.mark, td.mark { width: 1.4rem; padding-left: .2rem; padding-right: .2rem; text-align: center; }
-th.mark { font-size: .9em; }
-
-/* Shown only once qc.js has marked the document. A select-all that did nothing
-   without script would be a lie rather than an enhancement — see qc.js. */
-.jsonly { display: none; }
-html[data-js="1"] .jsonly { display: inline; }
-
-/* The bulk action bar under the folder listing. */
-.actions.bulk { gap: var(--s1) var(--s2); }
-.actions.bulk .btn { padding: .25rem .6rem; font-size: .9em; }
 
 /* Long message lists: let the browser skip laying out what is offscreen. */
 .longlist { content-visibility: auto; contain-intrinsic-size: auto 800px; }
 
-/* ---- forms ------------------------------------------------------------- */
+/* ---- the app shell ------------------------------------------------------ */
+/* .app and the grid columns are declared in kCriticalCss so the page has a
+   shape before this file arrives. What is here is everything that only
+   matters once it has. */
 
-form { margin: var(--s2) 0; }
-form.inline { display: inline; }
+main > .inner { max-width: 62rem; }
+body.wide main > .inner { max-width: none; }
 
-input[type=text], input[type=password], input[type=number], input[type=email],
-input[type=date], input[type=time], input[type=search], textarea, select {
-  font: inherit; padding: .4rem .5rem;
-  border: 1px solid var(--line); border-radius: var(--r1);
-  background: var(--bg); color: var(--fg); max-width: 100%;
-}
-textarea { width: 100%; font-family: var(--mono); font-size: .92em; }
+/* ---- the mail panes ----------------------------------------------------- */
+/* Two panes that scroll independently inside one viewport-height shell. The
+   list keeps its place while a message opens beside it, which is the whole
+   point of a reading pane. Applied via body.panes so it cannot reach the
+   calendar or the wiki, which want the ordinary flowing document. */
 
-label.field { display: block; margin: .55rem 0; }
-label.field span {
-  display: block; font-size: .8em; color: var(--muted); margin-bottom: .15rem;
+body.panes .app { height: 100dvh; overflow: hidden; }
+body.panes main { overflow: hidden; padding: 0; }
+/* Render() always wraps the body in main > .inner, so the panes need it to
+   carry the height rather than sit inside a 62rem measure. */
+body.panes main > .inner { height: 100%; max-width: none; }
+
+.panes {
+  display: grid; grid-template-columns: 1fr; height: 100%; min-height: 0;
 }
-label.chk {
-  display: inline-flex; gap: .35rem; align-items: center;
-  margin: .2rem var(--s3) .2rem 0;
+.panes.open { grid-template-columns: var(--qc-list) 1fr; }
+.panes > * { min-width: 0; min-height: 0; overflow-y: auto; }
+.panes > .list { border-right: 1px solid var(--pico-muted-border-color); }
+.panes > .reader { padding: var(--pico-block-spacing-horizontal); }
+/* Shown only where the list is not: on a wide screen the listing is right
+   there beside the reader, so a "back" control would be noise. */
+.hidewide { display: none; }
+
+/* htmx swaps the reader in place; this is the only cue that anything is in
+   flight, and Pico already draws the spinner for [aria-busy]. */
+.reader[aria-busy="true"] { opacity: .6; }
+
+.listhead {
+  position: sticky; top: 0; z-index: 2;
+  padding: var(--pico-spacing) var(--pico-block-spacing-horizontal) .4rem;
+  background: var(--pico-background-color);
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.listhead h1 { margin: 0 0 .5rem; }
+.listhead .toolbar { margin: 0; }
+
+/* ---- the message list --------------------------------------------------- */
+
+.msglist { list-style: none; margin: 0; padding: 0; }
+.msglist li { border-bottom: 1px solid var(--pico-muted-border-color); }
+.msglist .row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: .1rem .6rem; align-items: baseline;
+  padding: .5rem var(--pico-block-spacing-horizontal);
+  cursor: pointer;
+}
+.msglist .row:hover { background: var(--pico-card-sectioning-background-color); }
+.msglist li[aria-current="true"] .row {
+  background: var(--pico-primary-background); color: var(--pico-primary-inverse);
+}
+.msglist li[aria-current="true"] .row .from,
+.msglist li[aria-current="true"] .row .date,
+.msglist li[aria-current="true"] .row .snippet { color: inherit; opacity: .85; }
+.msglist input[type="checkbox"] { margin: 0; }
+.msglist .marks { display: flex; gap: .25rem; color: var(--pico-muted-color); }
+.msglist .from {
+  grid-column: 3; font-size: .92rem; color: var(--pico-muted-color);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msglist .date {
+  grid-column: 4; font-size: .78rem; color: var(--pico-muted-color);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.msglist .subject {
+  grid-column: 3 / -1; font-size: .95rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msglist .subject a { color: inherit; text-decoration: none; }
+.msglist .snippet {
+  grid-column: 3 / -1; font-size: .85rem; color: var(--pico-muted-color);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.msglist li.unread .subject { font-weight: 650; }
+.msglist li.unread .from { color: var(--pico-color); font-weight: 550; }
+/* The unread dot, in the gutter the checkbox shares. */
+.msglist .dot {
+  width: .45rem; height: .45rem; border-radius: 50%;
+  background: var(--pico-primary); display: inline-block;
 }
 
-.btn {
-  font: inherit; padding: .4rem .8rem;
-  border: 1px solid var(--accent); border-radius: var(--r1);
-  background: var(--accent); color: var(--accent-fg); cursor: pointer;
-  text-decoration: none; display: inline-block;
+/* A thread's replies, behind a disclosure so a forty-message conversation does
+   not push every other one off the screen. */
+.msglist details { margin: 0; border: 0; padding: 0; background: none; }
+.msglist details > summary {
+  display: inline-flex; align-items: center; gap: .3rem;
+  margin: 0 0 .35rem 2.6rem; padding: .05rem .55rem;
+  width: auto; font-size: .78rem; font-weight: 600;
+  /* Tinted from the accent, for the same reason .sidebar .count is: the
+     secondary hover background is a solid slate in both themes and left this
+     unreadable. */
+  color: var(--pico-primary);
+  background: color-mix(in srgb, var(--pico-primary) 14%, transparent);
+  border-radius: 999px; cursor: pointer;
 }
-.btn:hover { filter: brightness(1.08); }
-.btn.sec { background: transparent; color: var(--accent); }
-.btn.danger { background: transparent; color: var(--warn); border-color: var(--warn); }
+.msglist details > summary:hover {
+  background: color-mix(in srgb, var(--pico-primary) 24%, transparent);
+}
+.msglist details > summary::after { display: none; }
+.msglist details[open] > summary { margin-bottom: .1rem; }
+.msglist .thread { list-style: none; margin: 0; padding: 0; }
+.msglist .thread .row { padding-left: 2.6rem; }
+.msglist .thread li { border: 0; }
 
-.actions {
-  display: flex; flex-wrap: wrap; gap: var(--s2);
-  align-items: center; margin: var(--s3) 0;
-}
+/* ---- density ------------------------------------------------------------ */
+/* web_mail_layout. "Comfortable" is the default and needs no rule. */
 
-/* The admin console's second-level nav: one row of buttons per group, with the
-   group name as a quiet label to its left where there is room for it. */
-.adminnav {
-  border: 1px solid var(--line); border-radius: var(--r1);
-  background: var(--panel); padding: var(--s2) var(--s3); margin-bottom: var(--s4);
-}
-.adminnav .group {
-  display: grid; grid-template-columns: 9rem 1fr;
-  align-items: baseline; gap: var(--s2);
-  padding: var(--s1) 0; border-bottom: 1px solid var(--line);
-}
-.adminnav .group:last-child { border-bottom: 0; }
-.adminnav .label {
-  font-size: .72em; text-transform: uppercase; letter-spacing: .07em;
-  color: var(--muted); font-weight: 600;
-}
-.adminnav .actions { margin: 0; gap: var(--s1) var(--s2); }
-.adminnav .btn { padding: .2rem .55rem; font-size: .9em; }
-
-@media (max-width: 40rem) {
-  .adminnav .group { grid-template-columns: 1fr; }
-}
-
-/* ---- messages ---------------------------------------------------------- */
-
-pre.body {
-  white-space: pre-wrap; word-wrap: break-word;
-  background: var(--panel); padding: var(--s3);
-  border: 1px solid var(--line); border-radius: var(--r1);
-}
-/* A note/task/event body saved as HTML or Markdown (RenderFormattedBody) —
-   same box as pre.body, but ordinary flowed HTML rather than preformatted
-   text. */
-.richnote {
-  background: var(--panel); padding: var(--s3);
-  border: 1px solid var(--line); border-radius: var(--r1);
-}
-.richnote img { max-width: 100%; height: auto; }
-iframe.htmlpart {
-  width: 100%; min-height: 24rem;
-  border: 1px solid var(--line); border-radius: var(--r1); background: #fff;
-}
-.msghead {
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: var(--r1); padding: .7rem var(--s3); margin-bottom: var(--s3);
-}
-.msghead dl {
-  display: grid; grid-template-columns: max-content 1fr;
-  gap: .15rem .7rem; margin: 0;
-}
-.msghead dt { color: var(--muted); font-size: .85em; }
-.msghead dd { margin: 0; }
-
-/* Mail list density (web_mail_layout). Only ever applied alongside view-1
-   (mailbox) or view-9 (drafts), so these never reach Notes/Tasks/Calendar/
-   Wiki, which have their own layouts already. "Comfortable" is the default —
-   today's spacing — so it needs no rule of its own. */
+.layout-compact .msglist .row { padding-top: .22rem; padding-bottom: .22rem; }
+.layout-compact .msglist .snippet { display: none; }
 .layout-compact .wrap table td, .layout-compact .wrap table th {
-  padding: .15rem .5rem; font-size: .9em;
+  padding: .18rem .5rem; font-size: .9em;
 }
 .layout-wide main > .inner { max-width: none; }
 
-/* The RFC 4314 rights legend on a room's settings page: one letter, one
-   sentence. Same two-column grid as a message header, but keyed by a glyph. */
-dl.rights {
-  display: grid; grid-template-columns: max-content 1fr;
-  gap: .15rem .7rem; margin: var(--s2) 0; font-size: .9em;
-}
-dl.rights dt { font-family: var(--mono); }
-dl.rights dd { margin: 0; color: var(--muted); }
-
-/* One checkbox per RFC 4314 letter, on a room's settings page. The legend
-   above already spells out what each letter means, so these stay terse. */
-.rightbox { display: flex; flex-wrap: wrap; gap: 0 var(--s3); margin: var(--s2) 0; }
-
-/* ---- misc -------------------------------------------------------------- */
-
-.roomgrid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
-  gap: .4rem .9rem;
-}
-.pager { display: flex; gap: var(--s3); align-items: baseline; margin: var(--s2) 0; }
-/* The same row above a message, moving between messages rather than pages. */
-.pager.msgnav { margin-top: 0; }
-
-/* The search page's own form: the fields sit in a row where there is room for
-   one and stack on a phone, which is what a wrapping flex line already does. */
-.searchform {
-  display: flex; flex-wrap: wrap; gap: 0 var(--s3); align-items: flex-end;
-  padding: var(--s3); background: var(--panel);
-  border: 1px solid var(--line); border-radius: var(--r1);
-}
-.searchform .field { margin: .3rem 0; }
-.searchform .actions { margin: .3rem 0; }
-.login { max-width: 22rem; margin: 3rem auto; }
-
-/* Cards, for the admin overview and the Sieve rule builder. */
-.cards {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
-  gap: var(--s3);
-}
-.card {
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: var(--r1); padding: var(--s3);
-}
-.card h3 { margin-top: 0; }
-
-/* ---- responsive -------------------------------------------------------- */
+/* ---- responsive --------------------------------------------------------- */
 
 @media (max-width: 52rem) {
-  .navbtn { display: inline-block; }
+  .navbtn { display: inline-flex; }
   .app { grid-template-columns: 1fr; }
   .sidebar {
-    display: none;
-    border-right: 0; border-bottom: 1px solid var(--line);
+    display: none; border-right: 0;
+    border-bottom: 1px solid var(--pico-muted-border-color);
   }
   /* The toggle sits before .app in source order, so a sibling selector reaches
-     the sidebar without any script. */
+     the sidebar with no script at all. */
   .navtoggle:checked ~ .app .sidebar { display: block; }
+
+  header.top .brand { display: none; }
+
+  /* One pane at a time: opening a message replaces the list, and the reader's
+     Back control returns to it. */
+  .panes.open { grid-template-columns: 1fr; }
+  .panes.open > .list { display: none; }
+  .hidewide { display: inline-flex; }
+
+  /* A table cannot hold four columns on a phone. Each row becomes a card and
+     each cell labels itself from the data-label the Cell() builder emits, so
+     there is no second markup path to keep in step with this one. */
+  .wrap table, .wrap thead, .wrap tbody, .wrap tr, .wrap td { display: block; }
+  .wrap thead { position: absolute; left: -100vw; }
+  .wrap tr {
+    margin-bottom: .6rem; padding: .5rem .7rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--pico-border-radius);
+    background: var(--pico-card-background-color);
+  }
+  .wrap td { border: 0; padding: .15rem 0; display: flex; gap: .6rem; }
+  .wrap td::before {
+    content: attr(data-label); flex: none; min-width: 6.5rem;
+    font-size: .74rem; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--pico-muted-color); font-weight: 600;
+  }
+  .wrap td:empty { display: none; }
+  .wrap td.num { text-align: left; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 
-/* ---- calendar ---------------------------------------------------------- */
+/* ---- forms -------------------------------------------------------------- */
+
+label.field { display: block; margin: .6rem 0; }
+label.field span {
+  display: block; font-size: .8rem; color: var(--pico-muted-color);
+  margin-bottom: .2rem; font-weight: 550;
+}
+label.chk {
+  display: inline-flex; gap: .4rem; align-items: center;
+  margin: .2rem 1rem .2rem 0;
+}
+label.chk input { margin: 0; }
+
+/* Pico gives every control display:block and a full-width box, which turns a
+   filter row into a column. Inside these two it stays inline.
+   Checkboxes and radios are exempt: Pico sizes those explicitly, and width:auto
+   collapses them to a sliver. */
+.toolbar input:not([type="checkbox"], [type="radio"]),
+.toolbar select,
+.searchform input:not([type="checkbox"], [type="radio"]),
+.searchform select {
+  display: inline-block; width: auto;
+}
+.toolbar input[type="checkbox"] { margin: 0 .2rem 0 0; }
+
+.searchform {
+  display: flex; flex-wrap: wrap; gap: 0 1rem; align-items: flex-end;
+  padding: var(--pico-spacing);
+  background: var(--pico-card-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  margin-bottom: var(--pico-spacing);
+}
+.searchform .field { margin: .3rem 0; }
+.searchform .actions { margin: .3rem 0; }
+
+.login { max-width: 23rem; margin: 3rem auto; }
+.login article { margin: 0; }
+
+/* The admin console's second-level nav. */
+.adminnav {
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color);
+  padding: .3rem var(--pico-spacing); margin-bottom: var(--pico-block-spacing-horizontal);
+}
+.adminnav .group {
+  display: grid; grid-template-columns: 9rem 1fr;
+  align-items: center; gap: .5rem;
+  padding: .35rem 0; border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.adminnav .group:last-child { border-bottom: 0; }
+.adminnav .label {
+  font-size: .7rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--pico-muted-color); font-weight: 600;
+}
+.adminnav .actions { margin: 0; gap: .3rem; }
+.adminnav [role="button"] { padding: .2rem .6rem; font-size: .85rem; }
+
+@media (max-width: 40rem) {
+  .adminnav .group { grid-template-columns: 1fr; }
+}
+
+/* ---- a message ---------------------------------------------------------- */
+
+.msghead {
+  display: flex; gap: .8rem; align-items: flex-start;
+  padding-bottom: var(--pico-spacing); margin-bottom: var(--pico-spacing);
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.msghead .avatar {
+  flex: none; width: 2.5rem; height: 2.5rem; border-radius: 50%;
+  display: grid; place-items: center; font-weight: 650; font-size: .95rem;
+  background: var(--pico-primary-background); color: var(--pico-primary-inverse);
+}
+.msghead .meta { min-width: 0; flex: 1; }
+.msghead .meta .line1 {
+  display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap;
+}
+.msghead .who { font-weight: 600; }
+.msghead .addr, .msghead .when {
+  color: var(--pico-muted-color); font-size: .85rem;
+}
+.msghead .when { margin-left: auto; white-space: nowrap; }
+.msghead dl {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: .1rem .7rem; margin: .3rem 0 0; font-size: .88rem;
+}
+.msghead dt { color: var(--pico-muted-color); }
+.msghead dd { margin: 0; }
+
+.reader h1 { font-size: 1.25rem; }
+
+pre.body, .msgbody {
+  white-space: pre-wrap; word-wrap: break-word;
+  /* Pico sets --pico-font-family to the monospace stack *on* <pre>, so reading
+     that variable here would give monospace back. A plain-text mail body is
+     prose, not code. */
+  font-family: var(--pico-font-family-sans-serif); font-size: .95rem;
+  background: none; border: 0; padding: 0; margin: 0;
+}
+.richnote {
+  background: var(--pico-card-background-color); padding: var(--pico-spacing);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+}
+.richnote img { max-width: 100%; height: auto; }
+iframe.htmlpart {
+  width: 100%; min-height: 24rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius); background: #fff;
+}
+
+/* The attachment strip under a message body. */
+.attach { display: flex; flex-wrap: wrap; gap: .5rem; margin: var(--pico-spacing) 0; }
+.attach a {
+  display: inline-flex; align-items: center; gap: .45rem;
+  padding: .35rem .7rem; font-size: .87rem; text-decoration: none;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color); color: var(--pico-color);
+}
+.attach a:hover { border-color: var(--pico-primary); }
+.attach .size { color: var(--pico-muted-color); font-size: .8rem; }
+
+.pager { display: flex; gap: .8rem; align-items: center; margin: var(--pico-spacing) 0; }
+.pager.msgnav { margin-top: 0; }
+
+/* The RFC 4314 rights legend on a room's settings page. */
+dl.rights {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: .15rem .7rem; margin: .5rem 0; font-size: .9em;
+}
+dl.rights dt { font-family: var(--pico-font-family-monospace); }
+dl.rights dd { margin: 0; color: var(--pico-muted-color); }
+.rightbox { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: .5rem 0; }
+
+/* ---- cards and grids ---------------------------------------------------- */
+
+.roomgrid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: .4rem .9rem;
+}
+.cards, .rules {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: var(--pico-spacing);
+}
+/* Pico styles <article> as the card; these are the app's density tweaks. */
+.cards article, .rules article, .card, .rule {
+  margin: 0; padding: var(--pico-spacing);
+}
+.card h3, .rule h3, .cards article h3 { margin-top: 0; }
+.rule ul { margin: .3rem 0 .5rem; padding-left: 1.1rem; }
+.rule li { font-size: .9rem; }
+.rule .actions { margin-bottom: 0; gap: .3rem; }
+
+/* ---- calendar ----------------------------------------------------------- */
 
 .calmonth { table-layout: fixed; }
-.calmonth th {
-  text-align: center; position: static;   /* the grid is short; no sticky needed */
-}
+.calmonth th { text-align: center; position: static; }
 .calmonth td.calday {
-  height: 7rem; vertical-align: top; padding: var(--s1);
-  border: 1px solid var(--line);
+  height: 7rem; vertical-align: top; padding: .25rem;
+  border: 1px solid var(--pico-muted-border-color);
 }
-/* Days spilling in from the neighbouring months are context, not content. */
-.calmonth td.calday.other { background: var(--panel); }
-.calmonth td.calday.other .num a { color: var(--muted); }
-.calmonth td.calday.today { box-shadow: inset 0 0 0 2px var(--accent); }
+.calmonth td.calday.other { background: var(--pico-card-sectioning-background-color); }
+.calmonth td.calday.other .num a { color: var(--pico-muted-color); }
+.calmonth td.calday.today { box-shadow: inset 0 0 0 2px var(--pico-primary); }
 .calmonth .num {
   font-variant-numeric: tabular-nums; font-size: .85em;
-  text-align: right; margin-bottom: var(--s1);
+  text-align: right; margin-bottom: .2rem;
 }
 .calmonth .num a { text-decoration: none; color: inherit; }
 .calmonth .ev {
-  font-size: .82em; line-height: 1.3; margin-bottom: 2px;
-  padding: 1px 3px; border-radius: 2px; background: var(--bg);
-  border-left: 2px solid var(--accent);
-  /* One line per event: a busy day must not stretch the whole row. */
+  font-size: .8rem; line-height: 1.3; margin-bottom: 2px;
+  padding: 1px 4px; border-radius: 3px;
+  background: var(--pico-card-sectioning-background-color);
+  border-left: 2px solid var(--pico-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.calmonth .ev.allday { background: var(--accent); border-left-color: var(--accent); }
-.calmonth .ev.allday a { color: var(--accent-fg); }
+.calmonth .ev.allday {
+  background: var(--pico-primary-background); border-left-color: var(--pico-primary);
+}
+.calmonth .ev.allday a { color: var(--pico-primary-inverse); }
 .calmonth .ev a { text-decoration: none; }
 
 @media (max-width: 52rem) {
-  /* A seven-column grid does not fit a phone. Let it scroll rather than
-     crushing every day to nothing. */
+  /* A seven-column grid does not fit a phone: let it scroll rather than
+     crushing every day to nothing. The card rules above must not apply. */
+  .wrap table.calmonth, .wrap .calmonth thead, .wrap .calmonth tbody,
+  .wrap .calmonth tr, .wrap .calmonth td { display: revert; }
+  .wrap .calmonth thead { position: static; }
+  .wrap .calmonth tr { margin: 0; padding: 0; border: 0; background: none; }
+  .wrap .calmonth td::before { content: none; }
   .calmonth { min-width: 44rem; }
   .calmonth td.calday { height: 5rem; }
 }
 
-/* ---- tasks ------------------------------------------------------------- */
+/* ---- tasks and notes ---------------------------------------------------- */
 
-tr.taskdone td { color: var(--muted); }
-tr.taskdone td a { color: var(--muted); text-decoration: line-through; }
-
-/* ---- notes ------------------------------------------------------------- */
+tr.taskdone td { color: var(--pico-muted-color); }
+tr.taskdone td a { color: var(--pico-muted-color); text-decoration: line-through; }
 
 .notegrid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
-  gap: var(--s3);
+  gap: var(--pico-spacing);
 }
 .note {
-  /* --note is set per-note from its own colour; the fallback is the panel. */
-  background: var(--note, var(--panel));
-  border: 1px solid var(--line); border-radius: var(--r1);
-  padding: var(--s3); min-height: 8rem;
+  /* --note is set per-note from its own colour; the fallback is the card. */
+  background: var(--note, var(--pico-card-background-color));
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: var(--pico-spacing); min-height: 8rem;
 }
 /* A coloured note needs dark text whatever the theme: the colours come from
    Outlook and are all pale. */
-.note[style*="--note"] { color: #1c1b19; }
-.note[style*="--note"] h3 a { color: #1c1b19; }
-.note h3 { margin: 0 0 var(--s2); font-size: .95rem; }
+.note[style*="--note"], .note[style*="--note"] h3 a { color: #1c1b19; }
+.note h3 { margin: 0 0 .5rem; font-size: .95rem; }
 .note h3 a { text-decoration: none; }
 .note pre {
   margin: 0; white-space: pre-wrap; word-wrap: break-word;
-  font-family: inherit; font-size: .9em;
+  font-family: inherit; font-size: .9em; background: none; padding: 0;
 }
 
-/* The colour picker on the note edit form: swatches, not a <select> of colour
-   names. Each radio is visually hidden behind its own <span>, styled from the
-   same --note variable a saved note renders with — the checked-sibling
-   selector is the same no-script trick the mobile nav toggle uses. */
-.swatches { display: flex; flex-wrap: wrap; gap: var(--s2); margin: .3rem 0; }
+.swatches { display: flex; flex-wrap: wrap; gap: .5rem; margin: .3rem 0; }
 .swatch { position: relative; cursor: pointer; }
 .swatch input {
   position: absolute; opacity: 0; width: 1.8rem; height: 1.8rem; margin: 0; cursor: pointer;
 }
 .swatch span:not(.vh) {
   display: block; width: 1.8rem; height: 1.8rem; border-radius: 50%;
-  background: var(--note, var(--panel)); border: 2px solid var(--line);
+  background: var(--note, var(--pico-card-background-color));
+  border: 2px solid var(--pico-muted-border-color);
 }
 .swatch-default span:not(.vh) {
-  background: repeating-linear-gradient(45deg, var(--line), var(--line) 3px, var(--panel) 3px, var(--panel) 7px);
+  background: repeating-linear-gradient(45deg,
+    var(--pico-muted-border-color), var(--pico-muted-border-color) 3px,
+    var(--pico-card-background-color) 3px, var(--pico-card-background-color) 7px);
 }
-.swatch input:checked + span { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
-.swatch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.swatch input:checked + span {
+  border-color: var(--pico-primary); box-shadow: 0 0 0 2px var(--pico-primary);
+}
+.swatch input:focus-visible + span {
+  outline: 2px solid var(--pico-primary); outline-offset: 2px;
+}
 
-/* ---- blog and journal entries ------------------------------------------ */
+/* ---- blog and journal entries ------------------------------------------- */
 
 .entry {
-  border-bottom: 1px solid var(--line);
-  padding-bottom: var(--s4); margin-bottom: var(--s4);
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  padding-bottom: 1.1rem; margin-bottom: 1.1rem;
 }
 .entry:last-child { border-bottom: 0; }
 .entry h2 { margin-top: 0; }
 .entry h2 a { text-decoration: none; }
-.entry .byline { margin-top: calc(-1 * var(--s2)); font-size: .88em; }
+.entry .byline { margin-top: -.5rem; font-size: .88em; }
 
-/* ---- the rich-text composer -------------------------------------------- */
-/* All of this only matters once qc-compose.js has run. Without it the form is
-   the plain textarea it has always been, so none of these rules apply. */
+/* ---- the rich-text composer --------------------------------------------- */
 
+.compose { max-width: 52rem; }
 .richtools {
-  display: flex; flex-wrap: wrap; gap: var(--s1);
-  margin: var(--s2) 0 0;
+  display: flex; flex-wrap: wrap; gap: .25rem;
+  margin: .5rem 0 0;
 }
-.richtools .btn { padding: .15rem .5rem; font-size: .85em; }
-
+.richtools button {
+  margin: 0; padding: .2rem .55rem; font-size: .85rem;
+}
 .richbody {
   min-height: 14rem; max-height: 60vh; overflow-y: auto;
-  padding: var(--s3);
-  border: 1px solid var(--line); border-radius: var(--r1);
-  background: var(--bg); margin: var(--s1) 0 var(--s2);
+  padding: var(--pico-spacing);
+  border: 1px solid var(--pico-form-element-border-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-form-element-background-color);
+  margin: .3rem 0 .5rem;
 }
 .richbody:focus-visible { outline-offset: -2px; }
-/* A pasted or dropped image must not blow the layout out. */
 .richbody img { max-width: 100%; height: auto; }
 .richbody blockquote {
-  margin: var(--s2) 0; padding-left: var(--s3);
-  border-left: 2px solid var(--line); color: var(--muted);
+  margin: .5rem 0; padding-left: var(--pico-spacing);
+  border-left: 2px solid var(--pico-muted-border-color);
+  color: var(--pico-muted-color);
 }
-/* The textarea stays in the DOM as the plain-text half, just out of the way. */
 .richhidden { display: none; }
-/* The "formatted text" checkbox appears only once the editor exists — offering
-   it to someone who will only ever get a textarea would be a lie. */
+/* The "formatted text" checkbox appears only once the editor exists. */
 .richopt { display: none; }
 .richopt.richavailable { display: inline-flex; }
 
-/* ---- the compose address-book picker ----------------------------------- */
-/* The To/Cc fields already autocomplete from the addressbook <datalist> with
-   no script at all; this panel (qc-compose.js) is a click-to-insert
-   enhancement on top of that, so the toggle button is .jsonly. */
 .addressbook-panel {
-  max-height: 14rem; overflow-y: auto; margin: var(--s1) 0 var(--s2);
-  border: 1px solid var(--line); border-radius: var(--r1); background: var(--panel);
+  max-height: 14rem; overflow-y: auto; margin: .3rem 0 .5rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color);
 }
 .addressbook-panel ul { list-style: none; margin: 0; padding: 0; }
 .addressbook-panel button {
-  display: block; width: 100%; text-align: left; font: inherit;
-  padding: .35rem var(--s3); border: 0; background: none; color: inherit; cursor: pointer;
+  display: block; width: 100%; text-align: left; font: inherit; margin: 0;
+  padding: .35rem var(--pico-spacing); border: 0; background: none;
+  color: inherit; border-radius: 0;
 }
-.addressbook-panel button:hover { background: var(--bg); }
+.addressbook-panel button:hover { background: var(--pico-secondary-hover-background); }
 
-/* ---- the Sieve rule builder -------------------------------------------- */
-/* Every control is a plain form that posts, so this needs no script — which is
-   also why the cards can be styled independently of any state. */
+/* ---- the keyboard help overlay ------------------------------------------ */
 
-.rules {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
-  gap: var(--s3); margin-bottom: var(--s4);
+dialog.keyshelp article { max-width: 32rem; }
+.keys { display: grid; grid-template-columns: max-content 1fr; gap: .3rem .9rem; }
+.keys dt { text-align: right; }
+.keys dd { margin: 0; color: var(--pico-muted-color); font-size: .9rem; }
+kbd {
+  font-size: .8rem; padding: .1rem .35rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-bottom-width: 2px; border-radius: 4px;
 }
-.rule h3 { margin-top: 0; }
-.rule ul { margin: var(--s1) 0 var(--s2); padding-left: var(--s4); }
-.rule li { font-size: .92em; }
-.rule .actions { margin-bottom: 0; gap: var(--s1); }
-.rule .actions .btn { padding: .2rem .5rem; font-size: .85em; }
 
 /* ---- wiki --------------------------------------------------------------- */
-/* Wiki pages are the one place where the *content* is prose somebody wrote
+/* Wiki pages are the one place where the content is prose somebody wrote
    rather than a form or a listing, so it gets a measure and real heading
    rhythm. Everything here is inside .wiki so it cannot leak into a message
    body, which is sanitized markup from somewhere else entirely. */
 
 .wiki { max-width: 46rem; }
 .wiki > :first-child { margin-top: 0; }
-.wiki h1, .wiki h2, .wiki h3, .wiki h4 { margin: var(--s4) 0 var(--s2); line-height: 1.25; }
-.wiki h2 { border-bottom: 1px solid var(--line); padding-bottom: var(--s1); }
-.wiki p, .wiki ul, .wiki ol, .wiki blockquote, .wiki table { margin: var(--s2) 0; }
+.wiki h1, .wiki h2, .wiki h3, .wiki h4 { margin: 1.4rem 0 .6rem; line-height: 1.25; }
+.wiki h2 { border-bottom: 1px solid var(--pico-muted-border-color); padding-bottom: .25rem; }
+.wiki p, .wiki ul, .wiki ol, .wiki blockquote, .wiki table { margin: .6rem 0; }
 .wiki li { margin: .2rem 0; }
-.wiki pre {
-  background: var(--bg2); border: 1px solid var(--line); border-radius: var(--r1);
-  padding: var(--s2); overflow-x: auto;
-}
-.wiki code { background: var(--bg2); border-radius: var(--r1); padding: 0 .25em; }
-.wiki pre code { background: none; padding: 0; }
-.wiki blockquote {
-  margin-left: 0; padding-left: var(--s3);
-  border-left: 3px solid var(--line); color: var(--muted);
-}
 .wiki img { max-width: 100%; height: auto; }
-.wiki table { border-collapse: collapse; }
-.wiki th, .wiki td { border: 1px solid var(--line); padding: .3rem var(--s2); text-align: left; }
+.wiki blockquote {
+  margin-left: 0; padding-left: var(--pico-spacing);
+  border-left: 3px solid var(--pico-muted-border-color);
+  color: var(--pico-muted-color);
+}
+.wiki th, .wiki td {
+  border: 1px solid var(--pico-muted-border-color);
+  padding: .3rem .5rem; text-align: left;
+}
+.wiki th { position: static; background: var(--pico-card-sectioning-background-color); }
 
 /* A link to a page nobody has written yet. It goes to the create form, so the
    styling is a promise the destination keeps rather than a decoration. */
-.wiki a.wanted { color: var(--danger, #b3261e); border-bottom-style: dotted; }
+.wiki a.wanted { color: var(--pico-del-color); text-decoration: underline dotted; }
 .wiki a.wanted::after { content: "?"; font-size: .8em; vertical-align: super; }
 
-.pagelist { columns: 3 14rem; margin: var(--s2) 0; }
+.pagelist { columns: 3 14rem; margin: .5rem 0; }
 .pagelist li { break-inside: avoid; }
 
 /* A rendered unified diff. Colour is not the only signal: the leading +/- is
    still there in the text, which is what a reader without colour vision, or
    with a stylesheet of their own, actually reads. */
 .diff {
-  background: var(--bg2); border: 1px solid var(--line); border-radius: var(--r1);
-  padding: var(--s2); overflow-x: auto; line-height: 1.4;
+  background: var(--pico-code-background-color);
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: .5rem; overflow-x: auto; line-height: 1.4;
+  font-family: var(--pico-font-family-monospace); font-size: .85rem;
 }
 .diff span { display: block; min-height: 1.4em; white-space: pre-wrap; }
-.diff .add { background: color-mix(in srgb, #2e7d32 18%, transparent); }
-.diff .del { background: color-mix(in srgb, #b3261e 18%, transparent); }
-.diff .hunk { color: var(--muted); margin-top: var(--s1); }
+.diff .add { background: color-mix(in srgb, #2e7d32 20%, transparent); }
+.diff .del { background: color-mix(in srgb, #b3261e 20%, transparent); }
+.diff .hunk { color: var(--pico-muted-color); margin-top: .3rem; }
