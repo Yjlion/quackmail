@@ -334,6 +334,37 @@ def deliver(con, user, sender, subject, body):
     )
 
 
+def reply_to(con, user, parent, sender, subject, body):
+    """Deliver a message whose References points at `parent`.
+
+    MessageId() mints a local id as <%08X-msgnum@node> from the message's own
+    time and number, and GetBbsCompose puts the root's first in References — so
+    that is exactly what has to be stored here for ThreadIdFor to group the two.
+    """
+    when, node = con.execute(
+        "SELECT msgtime, (SELECT value FROM citadel_config WHERE name = 'c_nodename') "
+        "FROM citadel_messages WHERE msgnum = ?", [parent]).fetchone()
+    refs = "<%08X-%d@%s>" % (when, parent, node or "quackcit")
+    con.execute(
+        """
+        INSERT INTO citadel_messages
+            (msgnum, author, recipient, msgtime, subject, format_type, refs, raw)
+        VALUES (nextval('citadel_msg_seq'), ?, ?, epoch(now())::BIGINT, ?, 4, ?, ?)
+        """,
+        [sender, user, subject, refs, rfc822(sender, subject, body).encode()],
+    )
+    con.execute(
+        """
+        INSERT INTO citadel_room_msgs (room_num, msgnum)
+        SELECT r.room_num, (SELECT max(msgnum) FROM citadel_messages)
+          FROM citadel_rooms r
+          JOIN citadel_users u ON u.usernum = r.mailbox_owner
+         WHERE u.username = ? AND r.display_name = 'Mail'
+        """,
+        [user],
+    )
+
+
 def post_to_lobby(con, author, subject, body):
     con.execute(
         """
@@ -642,6 +673,19 @@ def set_theme(page, theme):
     page.wait_for_load_state("networkidle")
 
 
+def set_pref(page, field, value, kind="select"):
+    """Set one preference through the real form, the way set_theme does."""
+    page.goto(BASE_TLS + "/prefs", wait_until="networkidle")
+    if kind == "select":
+        page.select_option(f'select[name="{field}"]', value)
+    else:
+        box = page.locator(f'input[name="{field}"]')
+        if box.is_checked() != bool(value):
+            box.click()
+    page.click('form[action="/prefs/settings"] button')
+    page.wait_for_load_state("networkidle")
+
+
 def shoot(page, out, stem, path, viewport):
     page.set_viewport_size(viewport)
     page.goto(BASE_TLS + path, wait_until="networkidle")
@@ -681,6 +725,18 @@ def main():
 
     for sender, subject, body in INBOX:
         deliver(con, USER, sender, subject, body)
+    # One conversation, so the threaded listing has something to collapse.
+    root = con.execute(
+        "SELECT msgnum FROM citadel_messages WHERE subject = ?",
+        ["Nanoseconds, and a question about NNTP peering"]).fetchone()[0]
+    reply_to(con, USER, root, "Grace Hopper <grace@compiler.example>",
+             "Re: Nanoseconds, and a question about NNTP peering",
+             "To answer my own question: the peer feed is in the backlog, and\n"
+             "the Citadel mesh is what carries room traffic today.\n\nGrace")
+    reply_to(con, USER, root, "Ada Lovelace <ada@analytical.example>",
+             "Re: Nanoseconds, and a question about NNTP peering",
+             "Worth noting the mesh already deduplicates by Message-ID, so a\n"
+             "peer feed would not double-post into a room.\n\nAda")
     for author, subject, body in LOBBY:
         post_to_lobby(con, author, subject, body)
     rooms = seed_groupware(c)
@@ -737,14 +793,36 @@ def main():
 
         captured.append((shoot(page, args.out, "web-mail-inbox", inbox, DESKTOP), inbox))
 
-        # One message in the read pane.
+        # One message in the read pane. The listing links carry ?open=, which is
+        # the two-pane view; the standalone /msg/ page is still a real route and
+        # keeps a shot of its own.
         _, listing = c.get(inbox)
-        m = re.search(r'href="(/bbs/room/\d+/msg/\d+)"', listing)
+        # EscapeAttr renders '=' as &#61;, so the href needs unescaping to be a
+        # URL again.
+        m = re.search(r'href="([^"]*open&#61;(\d+))"', listing)
+        opened = msgnum = None
         if m:
-            captured.append((shoot(page, args.out, "web-mail-read", m.group(1), DESKTOP),
-                             m.group(1)))
+            opened, msgnum = html.unescape(m.group(1)), m.group(2)
+            captured.append((shoot(page, args.out, "web-mail-reader", opened, DESKTOP), opened))
+            # The standalone message page is still a real route — it is what a
+            # bookmark or a link from outside the app lands on — so it keeps a
+            # shot of its own. The listing links the pane now, so the message
+            # number comes from that rather than from a /msg/ href.
+            solo = f"{inbox}/msg/{msgnum}"
+            captured.append((shoot(page, args.out, "web-mail-read", solo, DESKTOP), solo))
         else:
-            print("  (no message link in the inbox listing - skipping the read pane)")
+            print("  (no ?open= link in the inbox listing - skipping the reading pane)")
+
+        # Conversation grouping, which is a stored preference like the theme.
+        set_pref(page, "threaded", True, kind="check")
+        captured.append((shoot(page, args.out, "web-mail-threaded", inbox, DESKTOP), inbox))
+        set_pref(page, "threaded", False, kind="check")
+
+        # A second language, to show the catalog is real rather than scaffolding.
+        set_pref(page, "locale", "de")
+        captured.append((shoot(page, args.out, "web-mail-inbox-de", inbox, DESKTOP),
+                         inbox + "  (Deutsch)"))
+        set_pref(page, "locale", "")
 
         # Themes. The theme is a stored preference, not a query parameter.
         for theme in ("dark", "amber"):
@@ -755,8 +833,13 @@ def main():
                                    lobby, DESKTOP), lobby))
         set_theme(page, "auto")
 
-        # Narrow: the sidebar is a CSS-only toggle, so it is worth showing.
-        for stem, path in (("mail-inbox", inbox), ("bbs-room", lobby)):
+        # Narrow: the sidebar is a CSS-only toggle, the listing becomes cards,
+        # and with a message open the list gets out of the way entirely — which
+        # is the layout most likely to regress, so it is captured too.
+        mobile = [("mail-inbox", inbox), ("bbs-room", lobby)]
+        if opened:
+            mobile.append(("mail-reader", opened))
+        for stem, path in mobile:
             captured.append((shoot(page, args.out, f"web-mobile-{stem}", path, MOBILE),
                              path + "  (390x844)"))
 
@@ -767,6 +850,11 @@ def main():
         sign_in(page2, ADMIN, ADMIN_PW)
         for stem, path in ADMIN_SHOTS:
             captured.append((shoot(page2, args.out, "web-" + stem, path, DESKTOP), path))
+
+        # A room's own settings page — reachable by whoever administers it, an
+        # aide always does. The RFC 4314 ACL grid is the thing worth showing.
+        captured.append((shoot(page2, args.out, "web-room-settings",
+                               lobby + "/settings", DESKTOP), lobby + "/settings"))
         ctx2.close()
 
         print("capturing the BBS shell")

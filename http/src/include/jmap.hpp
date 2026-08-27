@@ -93,10 +93,15 @@ void SetKeyword(Ctx &ctx, int64_t msgnum, const std::string &keyword, bool on);
 std::string ImapFlagFor(const std::string &keyword);
 
 // The thread a message belongs to. Derived from its References header: a reply
-// joins the thread its root started, and a message with no references is a
-// thread of one. Stable across restarts because it is a function of the
-// headers rather than of anything we store.
-std::string ThreadIdFor(const quackmail::citadel::Message &msg);
+// hashes the first entry, which is the root's Message-ID, and a root hashes its
+// own — the two have to agree or a conversation never closes. Stable across
+// restarts because it is a function of the headers rather than of anything we
+// store. `node` is what MessageId() mints a local id under; see NodeName().
+std::string ThreadIdFor(const quackmail::citadel::Message &msg, const std::string &node);
+
+// The configured node name (`c_nodename`), which the id above is minted under.
+// One lookup per listing rather than one per message.
+std::string NodeName(Ctx &ctx);
 
 // Every message the account can see, newest first, optionally restricted to one
 // mailbox. This is the backing list for Email/query.

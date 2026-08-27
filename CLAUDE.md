@@ -10,7 +10,8 @@ are gateways over the same Citadel room store.
 instant messages), add a table, not a global.
 
 See [MEMORY.md](MEMORY.md) for project history and decisions, [TODO.md](TODO.md)
-for what's next, and [docs/](docs/README.md) for the user-facing documentation
+for what's next (released work moves to [TODO-archive.md](TODO-archive.md)), and
+[docs/](docs/README.md) for the user-facing documentation
 (`docs/contributing.md` is this file written for a person — keep the two in
 step).
 

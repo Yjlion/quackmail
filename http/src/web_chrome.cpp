@@ -88,23 +88,68 @@ std::string RawHtml(const std::string &html) {
 
 // ---- small builders ------------------------------------------------------
 
-std::string Cell(const std::string &text, const std::string &css_class) {
-	if (css_class.empty()) {
-		return "<td>" + T(text) + "</td>";
+std::string Cell(const std::string &text, const std::string &css_class, const std::string &label) {
+	std::string out = "<td";
+	if (!css_class.empty()) {
+		out += " class=\"" + A(css_class) + "\"";
 	}
-	return "<td class=\"" + A(css_class) + "\">" + T(text) + "</td>";
+	// Below the sidebar breakpoint qc.css turns every row into a card and every
+	// cell labels itself from this attribute, so a phone gets "From: Ada" rather
+	// than a column sheared off the side. Passing it is what makes a table
+	// legible on a phone; omitting it leaves the cell unlabelled, not broken.
+	if (!label.empty()) {
+		out += " data-label=\"" + A(label) + "\"";
+	}
+	return out + ">" + T(text) + "</td>";
 }
 
 std::string Head(const std::string &text) {
 	return "<th>" + T(text) + "</th>";
 }
 
+// Pico styles a link as a button from role="button", not from a class, so the
+// long-standing "btn" / "btn sec" classes are translated here rather than at a
+// hundred call sites.
+std::string PicoButtonClass(const std::string &css_class) {
+	// Translate the three variants this tree has always used, and *keep*
+	// anything else: callers attach hooks like "backtolist" to the same
+	// attribute, and dropping them silently turns a styled control into one no
+	// script and no media query can find.
+	std::string out;
+	size_t i = 0;
+	while (i < css_class.size()) {
+		size_t sp = css_class.find(' ', i);
+		std::string word = css_class.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
+		i = sp == std::string::npos ? css_class.size() : sp + 1;
+		if (word.empty() || word == "btn") {
+			continue; // "btn" becomes role="button"; see Link()
+		}
+		std::string mapped = word == "sec" ? "secondary" : word == "danger" ? "outline danger" : word;
+		if (!out.empty()) {
+			out += " ";
+		}
+		out += mapped;
+	}
+	return out;
+}
+
 std::string Link(const std::string &href, const std::string &label, const std::string &css_class) {
 	std::string out = "<a href=\"" + A(href) + "\"";
-	if (!css_class.empty()) {
-		out += " class=\"" + A(css_class) + "\"";
+	bool as_button = css_class.find("btn") != std::string::npos;
+	std::string cls = as_button ? PicoButtonClass(css_class) : css_class;
+	if (as_button) {
+		out += " role=\"button\"";
+	}
+	if (!cls.empty()) {
+		out += " class=\"" + A(cls) + "\"";
 	}
 	return out + ">" + T(label) + "</a>";
+}
+
+std::string Icon(const std::string &name) {
+	// aria-hidden throughout: every icon in this interface sits beside its own
+	// label, or beside a .vh one, so announcing it again would only be noise.
+	return "<svg class=\"i\" aria-hidden=\"true\"><use href=\"#i-" + A(name) + "\"></use></svg>";
 }
 
 std::string TextInput(const std::string &name, const std::string &value, const std::string &type,
@@ -158,8 +203,31 @@ std::string FormEnd() {
 }
 
 std::string Button(const std::string &label, const std::string &css_class) {
-	std::string cls = css_class.empty() ? std::string("btn") : "btn " + css_class;
-	return "<button class=\"" + A(cls) + "\">" + T(label) + "</button>";
+	return IconButton(label, "", css_class);
+}
+
+std::string IconButton(const std::string &label, const std::string &icon, const std::string &css_class) {
+	std::string cls = PicoButtonClass(css_class);
+	std::string out = "<button";
+	if (!cls.empty()) {
+		out += " class=\"" + A(cls) + "\"";
+	}
+	out += ">";
+	if (!icon.empty()) {
+		out += Icon(icon);
+	}
+	return out + T(label) + "</button>";
+}
+
+std::string ButtonGroup(const std::string &inner) {
+	// Pico draws role="group" as one segmented control, which is what turns the
+	// scattered row of separately outlined boxes this interface used to emit
+	// into a single bar.
+	return "<div role=\"group\">" + inner + "</div>";
+}
+
+std::string Toolbar(const std::string &inner) {
+	return "<div class=\"toolbar\">" + inner + "</div>";
 }
 
 // ---- flash ---------------------------------------------------------------
@@ -258,44 +326,95 @@ std::string FlashText(const std::string &slug) {
 
 namespace {
 
-// The critical stylesheet, inlined into every page. Everything else lives in
-// http/assets/qc.css and is served from /static.
+// The critical stylesheet. Emitted *before* the stylesheet links, unlike the
+// theme below, and the ordering is the whole design:
 //
-// The split is not arbitrary. What stays here is exactly what a page cannot be
-// read without: the ten custom properties (which every rule in the external
-// sheet reads), the reset, and the layout skeleton. That means a page renders
-// legibly on the very first packet — no flash of unstyled content — and it
-// stays legible if /static is unreachable behind a misconfigured proxy. It is
-// also why the split has to be "critical inline plus the rest external" rather
-// than "all external": the per-user theme below is a :root override that cannot
-// be a cacheable asset, and it has to arrive with the page.
+//   1. this block   — a fallback palette and the layout skeleton
+//   2. pico.css, qc.css
+//   3. ThemeCss()   — the per-user override
+//
+// What stays here is exactly what a page cannot be read without, so it renders
+// legibly on the very first packet and stays legible if /static is unreachable
+// behind a misconfigured proxy. It declares the same `--pico-*` names Pico
+// does, at plain `:root` specificity, so Pico overrides every one of them the
+// moment it arrives — putting this block *after* the links instead would
+// silently defeat Pico's own palette. The theme has to stay after them because
+// it is per-user and therefore not a cacheable asset.
 const char *kCriticalCss = R"CSS(
 :root { color-scheme: light dark;
-  --bg:#fbfbfa; --fg:#1c1b19; --muted:#6b6a66; --line:#e0dfdb;
-  --panel:#ffffff; --accent:#8a5a2b; --accent-fg:#ffffff; --warn:#8c2f00; --ok:#1f6b3a;
-  --s1:.25rem; --s2:.5rem; --s3:.8rem; --s4:1.1rem; --s5:2rem; --r1:3px;
-  --mono:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  --pico-background-color:#fbfbfa; --pico-color:#1c1b19;
+  --pico-muted-color:#6b6a66; --pico-muted-border-color:#e0dfdb;
+  --pico-card-background-color:#ffffff; --pico-primary:#8a5a2b;
+  --qc-sidebar:15.5rem; --qc-header:3.25rem; }
 @media (prefers-color-scheme: dark) { :root {
-  --bg:#17171a; --fg:#e9e8e4; --muted:#9d9c97; --line:#2e2e33;
-  --panel:#1f1f23; --accent:#c98d54; --accent-fg:#17171a; --warn:#ff9b7a; --ok:#7ecf9a; } }
+  --pico-background-color:#17171a; --pico-color:#e9e8e4;
+  --pico-muted-color:#9d9c97; --pico-muted-border-color:#2e2e33;
+  --pico-card-background-color:#1f1f23; --pico-primary:#c98d54; } }
 * { box-sizing:border-box; }
-body { margin:0; background:var(--bg); color:var(--fg);
-  font:15px/1.55 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif; }
+body { margin:0; background:var(--pico-background-color); color:var(--pico-color);
+  font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
 .navtoggle { position:absolute; opacity:0; pointer-events:none; }
-.app { display:grid; grid-template-columns:15rem 1fr; grid-template-rows:auto 1fr;
-  min-height:100vh; }
-header.top { grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:baseline;
-  gap:.75rem 1.25rem; padding:.7rem 1.1rem; border-bottom:1px solid var(--line);
-  background:var(--panel); }
-main { padding:1.2rem 1.1rem 4rem; min-width:0; }
-main > .inner { max-width:62rem; }
-body.wide main > .inner { max-width:none; }
+.app { display:grid; grid-template-columns:var(--qc-sidebar) 1fr;
+  grid-template-rows:auto 1fr; min-height:100dvh; }
+header.top { grid-column:1 / -1; display:flex; align-items:center; gap:.75rem;
+  height:var(--qc-header); padding:0 1rem;
+  border-bottom:1px solid var(--pico-muted-border-color); }
+main { padding:1.1rem 1rem 3rem; min-width:0; }
 /* Signed out, SidebarFor() emits no <nav> at all, so without this the grid's
-   first (15rem) column is the only free cell and main — login form included —
+   first (15.5rem) column is the only free cell and main — login form included —
    collapses into that narrow gutter instead of the full page. */
-body.anon .app { grid-template-columns: 1fr; }
+body.anon .app { grid-template-columns:1fr; }
 body.anon main { display:flex; align-items:center; justify-content:center; }
+@media (max-width:52rem) { .app { grid-template-columns:1fr; } }
 )CSS";
+
+// ---- icons ---------------------------------------------------------------
+
+// One <symbol> sprite, emitted once per page by Render(), so every `use` below
+// it is same-document. That is deliberate: cross-document `use` is still
+// unevenly supported, and an external sprite would have to satisfy the CSP as
+// well. A stroke-only set inherits currentColor, so an icon is the right colour
+// in six themes without a single per-theme rule.
+//
+// Geometry is a 24x24 box; qc.css sizes them in `em` so an icon tracks the text
+// it sits beside.
+const char *kIconSprite = R"SVG(<svg class="sprite" aria-hidden="true" hidden xmlns="http://www.w3.org/2000/svg"><defs>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
+<symbol id="i-inbox" viewBox="0 0 24 24"><path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5 5h14l2 8v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5z"/></symbol>
+<symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L10 14"/><path d="M21 3l-7 18-4-7-7-4z"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L20 8l-4-4L4 16z"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7z"/><path d="M14 3v4h4"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 7V5h4v2M6 7l1 13h10l1-13"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a1 1 0 0 1 1-1h5l2 2h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0M16 5.5a3 3 0 0 1 0 5M17 14c2.5.6 4 2.6 4 6"/></symbol>
+<symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></symbol>
+<symbol id="i-tasks" viewBox="0 0 24 24"><path d="M4 7l2 2 3-3M4 17l2 2 3-3M12 8h8M12 18h8"/></symbol>
+<symbol id="i-note" viewBox="0 0 24 24"><path d="M5 4h14a1 1 0 0 1 1 1v9l-6 6H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M20 14h-6v6"/></symbol>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 1 2-2h13"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.2 2.2M16.9 16.9l2.2 2.2M19.1 4.9l-2.2 2.2M7.1 16.9l-2.2 2.2"/></symbol>
+<symbol id="i-filter" viewBox="0 0 24 24"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></symbol>
+<symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M8 20h8M12 16v4"/></symbol>
+<symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 7L4 12l5 5"/><path d="M4 12h9a7 7 0 0 1 7 7v1"/></symbol>
+<symbol id="i-replyall" viewBox="0 0 24 24"><path d="M8 7l-5 5 5 5M13 7l-5 5 5 5"/><path d="M8 12h7a6 6 0 0 1 6 6v1"/></symbol>
+<symbol id="i-forward" viewBox="0 0 24 24"><path d="M15 7l5 5-5 5"/><path d="M20 12h-9a7 7 0 0 0-7 7v1"/></symbol>
+<symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4M5 4h12l-2 4 2 4H5"/></symbol>
+<symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2l1.1-6.2L3 9.6l6.2-.9z"/></symbol>
+<symbol id="i-clip" viewBox="0 0 24 24"><path d="M20 11l-8.5 8.5a4.5 4.5 0 0 1-6.4-6.4L13 5a3 3 0 0 1 4.2 4.2l-8 8a1.5 1.5 0 0 1-2.1-2.1l7.5-7.5"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+<symbol id="i-left" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+<symbol id="i-right" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+<symbol id="i-signout" viewBox="0 0 24 24"><path d="M14 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8"/><path d="M17 8l4 4-4 4M21 12H10"/></symbol>
+<symbol id="i-rss" viewBox="0 0 24 24"><path d="M5 19a1 1 0 1 0 0-2 1 1 0 0 0 0 2M5 12a7 7 0 0 1 7 7M5 5a14 14 0 0 1 14 14"/></symbol>
+</defs></svg>)SVG";
 
 // The sidebar. Grouped, because a flat list stopped scaling somewhere around
 // the fifteenth page and this module now has roughly thirty.
@@ -310,9 +429,10 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 
 	// `label_key` is a Tr() catalog key, not literal text — every static nav
 	// label in this sidebar goes through the message catalog.
-	auto item = [&](const char *href, const char *label_key, const char *key) {
+	auto item = [&](const char *href, const char *label_key, const char *key, const char *icon) {
 		std::string extra = (active == key) ? " aria-current=\"page\"" : "";
-		out += "<a href=\"" + A(href) + "\"" + extra + "><span>" + T(Tr(ctx, label_key)) + "</span></a>";
+		out += "<a href=\"" + A(href) + "\"" + extra + ">" + Icon(icon) + "<span>" +
+		       T(Tr(ctx, label_key)) + "</span></a>";
 	};
 	auto group = [&](const char *label_key) {
 		out += "<div class=\"group\"><span class=\"label\">" + T(Tr(ctx, label_key)) + "</span>";
@@ -324,14 +444,16 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	// Marked current by room number, so the folder you are reading is the one
 	// highlighted rather than the section it belongs to.
 	std::string room_key;
-	auto room_link = [&](const Room &room, const std::string &label, int64_t unread) {
+	auto room_link = [&](const Room &room, const std::string &label, int64_t unread,
+	                     const char *icon) {
 		std::string href = "/bbs/room/" + std::to_string(room.room_num);
 		std::string key = "room:" + std::to_string(room.room_num);
 		std::string extra = (active == key) ? " aria-current=\"page\"" : "";
 		if (!extra.empty()) {
 			room_key = key;
 		}
-		out += "<a href=\"" + A(href) + "\"" + extra + "><span>" + T(label) + "</span>";
+		out += "<a href=\"" + A(href) + "\"" + extra + ">" + Icon(icon) + "<span>" + T(label) +
+		       "</span>";
 		if (unread > 0) {
 			out += "<span class=\"count\">" + std::to_string(unread) + "</span>";
 		}
@@ -351,7 +473,7 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	std::vector<Room> folders = MailFoldersFrom(rooms);
 
 	group("nav.mail");
-	item("/mail/compose", "nav.compose", "compose");
+	item("/mail/compose", "nav.compose", "compose", "edit");
 	{
 		std::vector<int64_t> nums;
 		for (auto &f : folders) {
@@ -365,11 +487,17 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 			// "Mail" is what the store calls it and "Inbox" is what a person
 			// does. The other folders are already named the way they read — and
 			// are room names, not UI copy, so they do not go through Tr().
-			std::string label = folders[i].display_name == "Mail" ? Tr(ctx, "nav.inbox") : folders[i].display_name;
-			room_link(folders[i], label, unseen[i]);
+			const std::string &name = folders[i].display_name;
+			std::string label = name == "Mail" ? Tr(ctx, "nav.inbox") : name;
+			const char *icon = name == "Mail"        ? "inbox"
+			                   : name == "Sent Items" ? "send"
+			                   : name == "Drafts"     ? "file"
+			                   : name == "Trash"      ? "trash"
+			                                          : "folder";
+			room_link(folders[i], label, unseen[i], icon);
 		}
 	}
-	item("/mail/", "nav.all_folders", "mail");
+	item("/mail/", "nav.all_folders", "mail", "mail");
 	endgroup();
 
 	// The user's own groupware rooms, linked by number because that is how rooms
@@ -378,6 +506,7 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	{
 		std::string groupware;
 		static const char *kKeys[] = {"calendar", "contacts", "tasks", "notes"};
+		static const char *kIcons[] = {"calendar", "users", "tasks", "note"};
 		for (size_t g = 0; g < 4; g++) {
 			for (auto &r : rooms) {
 				if (r.mailbox_owner == 0 || r.display_name != kGroupwareRooms[g]) {
@@ -390,8 +519,8 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 					room_key = key;
 				}
 				groupware += "<a href=\"" + A(href) + "\"" +
-				             (current ? " aria-current=\"page\"" : "") + "><span>" +
-				             T(r.display_name) + "</span></a>";
+				             (current ? " aria-current=\"page\"" : "") + ">" + Icon(kIcons[g]) +
+				             "<span>" + T(r.display_name) + "</span></a>";
 				break;
 			}
 		}
@@ -442,29 +571,30 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 		}
 		std::string extra =
 		    (active == "bbs" || (in_a_room && !listed && room_key.empty())) ? " aria-current=\"page\"" : "";
-		out += "<a href=\"/bbs/\"" + extra + "><span>" + T(Tr(ctx, "nav.all_rooms")) + "</span></a>";
+		out += "<a href=\"/bbs/\"" + extra + ">" + Icon("globe") + "<span>" +
+		       T(Tr(ctx, "nav.all_rooms")) + "</span></a>";
 		for (auto &u : unread) {
-			room_link(u.first, u.first.display_name, u.second);
+			room_link(u.first, u.first.display_name, u.second, "home");
 		}
 	}
-	item("/search", "nav.search", "search");
+	item("/search", "nav.search", "search", "search");
 	if (MayCreateRooms(ctx)) {
-		item("/bbs/new", "nav.create_room", "newroom");
+		item("/bbs/new", "nav.create_room", "newroom", "plus");
 	}
-	item("/bbs/who", "nav.who_online", "who");
+	item("/bbs/who", "nav.who_online", "who", "user");
 	endgroup();
 
 	group("nav.you");
-	item("/prefs", "nav.preferences", "prefs");
-	item("/prefs/sieve", "nav.filters", "sieve");
-	item("/prefs/sessions", "nav.sessions", "sessions");
+	item("/prefs", "nav.preferences", "prefs", "settings");
+	item("/prefs/sieve", "nav.filters", "sieve", "filter");
+	item("/prefs/sessions", "nav.sessions", "sessions", "monitor");
 	endgroup();
 
 	// Same gate as the router applies to every /admin route, so the link never
 	// points at a 403.
 	if (ctx.IsAide() && ConfigBool(ctx.con, "qm_web_admin_enabled", false)) {
 		group("nav.system");
-		item("/admin/", "nav.admin", "admin");
+		item("/admin/", "nav.admin", "admin", "shield");
 		endgroup();
 	}
 
@@ -488,12 +618,18 @@ void SecurityHeaders(Ctx &ctx, const std::string &csp) {
 		// does not suppress host sources, only 'strict-dynamic' does — so this
 		// is additive rather than a weakening.
 		//
+		// connect-src is what htmx's XHR needs, and it needs to be stated: with
+		// default-src 'none' and no connect-src, the fetch falls back to 'none'
+		// and every pane swap is blocked. 'self' and nothing else — this page
+		// has no reason to talk to another origin, and saying so is what keeps
+		// an injected script from exfiltrating to one.
+		//
 		// Note that the CSP for a *message* body (web_mail.cpp's HTML-part
 		// route) is passed in explicitly and must never gain 'self': that frame
 		// renders markup written by whoever sent the mail.
 		policy = "default-src 'none'; script-src 'self' 'nonce-" + ctx.nonce + "'; style-src 'self' 'nonce-" +
 		         ctx.nonce +
-		         "'; img-src 'self' data:; frame-src 'self'; form-action 'self'; "
+		         "'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; form-action 'self'; "
 		         "frame-ancestors 'none'; base-uri 'none'";
 	}
 	ctx.resp.SetHeader("Content-Security-Policy", policy);
@@ -507,41 +643,59 @@ void SecurityHeaders(Ctx &ctx, const std::string &csp) {
 	}
 }
 
-// Named themes. kCss above is a ten-variable custom-property sheet and every
-// rule below it reads those variables, so a theme is just a :root override — no
-// second stylesheet, no per-theme rules to keep in sync.
+// Named themes. Pico is a ~500-variable custom-property sheet and everything in
+// qc.css reads those variables, so a theme is a `:root` override plus the
+// `data-theme` attribute Pico keys its own light and dark blocks on — no second
+// stylesheet, no per-theme rules to keep in sync.
 //
-// "auto" is the sheet as written: light, following the OS at night. The rest
-// pin a single appearance, which is what someone who dislikes the automatic
-// switch actually wants.
+// "auto" sets no attribute at all, which is what leaves Pico following the OS.
+// Light and dark are therefore native and cost nothing but the attribute; only
+// the three custom skins carry any CSS.
 struct Theme {
 	const char *name;
 	const char *label;
-	const char *css; // empty = kCss unmodified
+	// "" | "light" | "dark" — the value of the <html data-theme> attribute,
+	// which for a custom skin selects the base Pico palette it overrides.
+	const char *base;
+	const char *css; // "" = Pico unmodified
 };
 
 const Theme kThemes[] = {
-    {"auto", "Follow my system", ""},
-    {"light", "Always light",
-     ":root{--bg:#fbfbfa;--fg:#1c1b19;--muted:#6b6a66;--line:#e0dfdb;--panel:#fff;"
-     "--accent:#8a5a2b;--accent-fg:#fff;--warn:#8c2f00;--ok:#1f6b3a;color-scheme:light}"},
-    {"dark", "Always dark",
-     ":root{--bg:#17171a;--fg:#e9e8e4;--muted:#9d9c97;--line:#2e2e33;--panel:#1f1f23;"
-     "--accent:#c98d54;--accent-fg:#17171a;--warn:#ff9b7a;--ok:#7ecf9a;color-scheme:dark}"},
-    {"sepia", "Sepia",
-     ":root{--bg:#f4ecd8;--fg:#3b2f2a;--muted:#7a6a5d;--line:#ddd0b5;--panel:#fbf5e6;"
-     "--accent:#8a5a2b;--accent-fg:#fbf5e6;--warn:#9c3a12;--ok:#4a6b34;color-scheme:light}"},
-    {"slate", "Slate",
-     ":root{--bg:#1b2027;--fg:#dfe4ea;--muted:#93a1b0;--line:#2c3440;--panel:#222933;"
-     "--accent:#6fa8d6;--accent-fg:#131820;--warn:#e08a6a;--ok:#7fc8a0;color-scheme:dark}"},
-    {"amber", "Amber on black",
-     ":root{--bg:#0b0b0b;--fg:#ffb642;--muted:#a8752a;--line:#3a2a10;--panel:#121008;"
-     "--accent:#ffd08a;--accent-fg:#0b0b0b;--warn:#ff7043;--ok:#b8d94a;color-scheme:dark}"},
+    {"auto", "Follow my system", "", ""},
+    {"light", "Always light", "light", ""},
+    {"dark", "Always dark", "dark", ""},
+    {"sepia", "Sepia", "light",
+     ":root{--pico-background-color:#f4ecd8;--pico-color:#3b2f2a;--pico-muted-color:#7a6a5d;"
+     "--pico-muted-border-color:#ddd0b5;--pico-card-background-color:#fbf5e6;"
+     "--pico-card-sectioning-background-color:#efe5cc;--pico-primary:#8a5a2b;"
+     "--pico-primary-background:#8a5a2b;--pico-primary-hover-background:#734a22;"
+     "--pico-primary-inverse:#fbf5e6;--pico-primary-border:#8a5a2b;"
+     "--pico-primary-hover:#734a22;--pico-secondary-hover-background:#e7dbc0;"
+     "--pico-form-element-background-color:#fbf5e6;--pico-form-element-border-color:#ddd0b5;"
+     "--pico-code-background-color:#efe5cc;--pico-del-color:#9c3a12;--pico-ins-color:#4a6b34}"},
+    {"slate", "Slate", "dark",
+     ":root{--pico-background-color:#1b2027;--pico-color:#dfe4ea;--pico-muted-color:#93a1b0;"
+     "--pico-muted-border-color:#2c3440;--pico-card-background-color:#222933;"
+     "--pico-card-sectioning-background-color:#262e39;--pico-primary:#6fa8d6;"
+     "--pico-primary-background:#6fa8d6;--pico-primary-hover-background:#8bbbe2;"
+     "--pico-primary-inverse:#131820;--pico-primary-border:#6fa8d6;"
+     "--pico-primary-hover:#8bbbe2;--pico-secondary-hover-background:#2c3440;"
+     "--pico-form-element-background-color:#1f252d;--pico-form-element-border-color:#2c3440;"
+     "--pico-code-background-color:#262e39;--pico-del-color:#e08a6a;--pico-ins-color:#7fc8a0}"},
+    {"amber", "Amber on black", "dark",
+     ":root{--pico-background-color:#0b0b0b;--pico-color:#ffb642;--pico-muted-color:#a8752a;"
+     "--pico-muted-border-color:#3a2a10;--pico-card-background-color:#121008;"
+     "--pico-card-sectioning-background-color:#171308;--pico-primary:#ffd08a;"
+     "--pico-primary-background:#ffd08a;--pico-primary-hover-background:#ffdfae;"
+     "--pico-primary-inverse:#0b0b0b;--pico-primary-border:#ffd08a;"
+     "--pico-primary-hover:#ffdfae;--pico-secondary-hover-background:#1d1708;"
+     "--pico-form-element-background-color:#121008;--pico-form-element-border-color:#3a2a10;"
+     "--pico-code-background-color:#171308;--pico-del-color:#ff7043;--pico-ins-color:#b8d94a}"},
 };
 
 // The theme in force: the signed-in user's choice, else the site default.
-// "auto" (or anything unrecognized) leaves kCss alone.
-std::string ThemeCss(Ctx &ctx) {
+// Never null — an unrecognized name falls through to "auto".
+const Theme &ResolveTheme(Ctx &ctx) {
 	std::string want;
 	if (ctx.Authed()) {
 		want = quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_theme");
@@ -551,10 +705,10 @@ std::string ThemeCss(Ctx &ctx) {
 	}
 	for (auto &t : kThemes) {
 		if (want == t.name) {
-			return t.css;
+			return t;
 		}
 	}
-	return "";
+	return kThemes[0];
 }
 
 std::vector<std::pair<std::string, std::string>> ThemeOptions() {
@@ -574,17 +728,59 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	SecurityHeaders(ctx);
 
 	std::string node = ConfigStr(ctx.con, "c_humannode", "QuackCit");
-	std::string page =
-	    "<!doctype html><html lang=\"" + A(EffectiveLocale(ctx)) + "\"><head><meta charset=\"utf-8\">";
+	const Theme &theme = ResolveTheme(ctx);
+
+	std::string page = "<!doctype html><html lang=\"" + A(EffectiveLocale(ctx)) + "\"";
+	// Pico keys its own light and dark blocks on this attribute, so pinning a
+	// theme costs the attribute and nothing else. "auto" deliberately emits no
+	// attribute at all: that is the state Pico's prefers-color-scheme block is
+	// written for.
+	if (theme.base[0] != '\0') {
+		page += " data-theme=\"" + A(theme.base) + "\"";
+	}
+	// The keyboard overlay is built in the browser, so its labels have to reach
+	// it as data rather than as markup — this is what keeps them in the message
+	// catalog with everything else instead of hard-coded in qc.js. "keys|text",
+	// entries separated by "~", because it has to survive an HTML attribute.
+	if (ctx.Authed()) {
+		std::string keys;
+		auto row = [&](const char *combo, const char *key) {
+			if (!keys.empty()) {
+				keys += "~";
+			}
+			keys += std::string(combo) + "|" + Tr(ctx, key);
+		};
+		row("j k", "keys.move");
+		row("Enter", "keys.open");
+		row("u", "keys.back");
+		row("x", "keys.select");
+		row("c", "keys.compose");
+		row("r a f", "keys.replies");
+		row("#", "keys.trash");
+		row("s", "keys.flag");
+		row("/", "keys.search");
+		row("g i", "keys.goto");
+		row("?", "keys.help");
+		page += " data-keys=\"" + A(keys) + "\"";
+		page += " data-keys-title=\"" + A(Tr(ctx, "keys.title")) + "\"";
+		page += " data-keys-close=\"" + A(Tr(ctx, "keys.close")) + "\"";
+	}
+	page += "><head><meta charset=\"utf-8\">";
 	page += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
 	page += "<title>" + T(title.empty() ? node : title + " — " + node) + "</title>";
-	// Order matters twice over. The external sheet comes first so the inline
-	// block below can override it; and the theme goes in the *same* nonced
-	// element as the critical CSS, because style-src has no 'unsafe-inline' and
-	// a second, unnonced <style> would be dropped in silence.
+	// Three blocks, in this order, and the order is the design — see kCriticalCss.
+	// The skeleton must precede the sheets so Pico can override its fallback
+	// palette; the theme must follow them so it wins. Both inline blocks are
+	// nonced, because style-src has no 'unsafe-inline' and an unnonced <style>
+	// would be dropped in silence.
+	page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(kCriticalCss) + "</style>";
+	page += "<link rel=\"stylesheet\" href=\"" + A(AssetUrl("pico.css")) + "\">";
 	page += "<link rel=\"stylesheet\" href=\"" + A(AssetUrl("qc.css")) + "\">";
-	page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(kCriticalCss) + RawHtml(ThemeCss(ctx)) +
-	        "</style>";
+	if (theme.css[0] != '\0') {
+		page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(theme.css) + "</style>";
+	}
+	page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl("htmx.min.js")) +
+	        "\" defer></script>";
 	page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl("qc.js")) + "\" defer></script>";
 	if (!opts.script.empty()) {
 		page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl(opts.script.c_str())) +
@@ -598,6 +794,12 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	}
 	if (opts.wide) {
 		body_class += " wide";
+	}
+	// The two-pane mail layout is a fixed-height shell rather than a flowing
+	// document, so it has to be opted into: applying it everywhere would break
+	// the calendar and the wiki, which want the page to grow.
+	if (opts.panes) {
+		body_class += " panes";
 	}
 	if (opts.view >= 0) {
 		body_class += " view-" + std::to_string(opts.view);
@@ -613,7 +815,10 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 		}
 	}
 	page += "<body" + (body_class.empty() ? "" : " class=\"" + A(body_class.substr(1)) + "\"") + ">";
-	page += "<a class=\"skip\" href=\"#main\">Skip to content</a>";
+	// The sprite first, so every `use` in the page below resolves against a
+	// symbol that is already in the document.
+	page += RawHtml(kIconSprite);
+	page += "<a class=\"skip\" href=\"#main\">" + T(Tr(ctx, "nav.skip")) + "</a>";
 	// The checkbox precedes .app so the stylesheet can reach the sidebar with a
 	// sibling selector: the mobile menu needs no script at all.
 	page += "<input type=\"checkbox\" id=\"navtoggle\" class=\"navtoggle\">";
@@ -621,7 +826,8 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 
 	page += "<header class=\"top\">";
 	if (ctx.Authed()) {
-		page += "<label for=\"navtoggle\" class=\"navbtn\" title=\"Sections\">&#9776;</label>";
+		page += "<label for=\"navtoggle\" class=\"navbtn\" title=\"" + A(Tr(ctx, "nav.sections")) +
+		        "\">" + Icon("menu") + "<span class=\"vh\">" + T(Tr(ctx, "nav.sections")) + "</span></label>";
 	}
 	page += "<span class=\"brand\">" + T(node) + "</span>";
 	if (ctx.Authed()) {
@@ -630,13 +836,14 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 		// the one control that belongs on every page rather than in the sidebar:
 		// finding a message is not a section of the site.
 		page += "<form method=\"get\" action=\"/search\" class=\"topsearch\" role=\"search\">";
-		page += "<label class=\"vh\" for=\"topq\">Search messages</label>";
+		page += "<label class=\"vh\" for=\"topq\">" + T(Tr(ctx, "nav.search_messages")) + "</label>";
 		page += "<input id=\"topq\" type=\"search\" name=\"q\" value=\"" +
 		        A(ctx.req.path == "/search" ? ctx.req.Param("q") : std::string()) +
-		        "\" placeholder=\"Search\">";
+		        "\" placeholder=\"" + A(Tr(ctx, "nav.search")) + "\">";
 		page += "</form>";
 		page += "<span class=\"who\">" + T(ctx.username);
-		page += FormStart(ctx, "/logout", "inline") + Button("Sign out", "sec") + FormEnd();
+		page += FormStart(ctx, "/logout", "inline") +
+		        IconButton(Tr(ctx, "nav.signout"), "signout", "sec") + FormEnd();
 		page += "</span>";
 	}
 	page += "</header>";
@@ -647,8 +854,7 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	// A plaintext session is a real risk worth naming on the page itself, not
 	// only in the docs.
 	if (!ctx.tls && ctx.Authed()) {
-		page += "<div class=\"warnbar\">This connection is not encrypted. Your password and mail are "
-		        "visible to anything on the network path.</div>";
+		page += "<div class=\"warnbar\">" + Icon("shield") + T(Tr(ctx, "warn.plaintext")) + "</div>";
 	}
 	std::string flash = FlashText(ctx.req.Param("ok"));
 	if (!flash.empty()) {
@@ -658,7 +864,10 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	if (!problem.empty()) {
 		page += "<div class=\"flash err\">" + T(problem) + "</div>";
 	}
-	if (!title.empty()) {
+	// A panes page owns its own heading: the title belongs inside the scrolling
+	// list pane, not above the fixed-height shell, so emitting it here as well
+	// would put the folder name on the page twice.
+	if (!title.empty() && !opts.panes) {
 		page += "<h1>" + T(title) + "</h1>";
 	}
 	if (!opts.toolbar.empty()) {

@@ -1,3 +1,4 @@
+#include "jmap.hpp"
 #include "web.hpp"
 #include "web_i18n.hpp"
 #include "web_views.hpp"
@@ -21,12 +22,17 @@
 // either, so a message could not be filed or flagged from a browser at all.
 // This view is what gives them their forms.
 //
-// Everything here is a plain form. The bulk actions are one <form> around the
-// table with a `formaction` per button — HTML, not script — so selecting three
-// messages and deleting them works with JavaScript off, exactly like every
-// other page in this module. The only scripted thing is the select-all
-// checkbox, which is hidden until qc.js marks the document, because a control
-// that did nothing without script would be a lie rather than an enhancement.
+// The listing is a two-pane shell: the folder on the left, the message being
+// read on the right, each scrolling on its own. Opening a message is a real URL
+// (`?open=<msgnum>`) that renders both halves, so it is linkable and the browser
+// history works; htmx then fetches that same URL and swaps only the reader,
+// which is what keeps the list from jumping back to the top. The server decides
+// which of the two to send from the `HX-Request` header — a plain GET always
+// gets the whole page.
+//
+// The bulk actions are still one <form> around the listing with a `formaction`
+// per button. That is not a concession to anything: it is simply the shortest
+// correct way to post a set of checkboxes to one of six endpoints.
 
 namespace duckdb {
 namespace qmweb {
@@ -97,6 +103,62 @@ bool HasAttachment(const Message &msg) {
 	return false;
 }
 
+// One conversation: the message that represents it in the listing (the newest,
+// which is what a person is looking for) and the rest, newest first.
+struct Thread {
+	std::vector<int64_t> msgnums; // newest first; [0] is the one shown collapsed
+	int64_t newest = 0;           // sort key
+	bool any_unread = false;
+};
+
+// Group `nums` (already newest-first) into conversations.
+//
+// The rule itself is jmap_mail.cpp's ThreadIdFor — the same function JMAP's
+// Thread/get answers with, so the web listing and a JMAP client cannot disagree
+// about what a thread is. Deriving it here rather than storing it is what keeps
+// that true: there is no second copy to fall behind.
+//
+// The caller bounds the window with ThreadScanCap for the same reason /search is
+// bounded: this loads every message in it to read the References header, and an
+// unbounded room would make one page load proportional to the room's whole
+// history.
+int64_t ThreadScanCap(Ctx &ctx) {
+	int64_t cap = (int64_t)std::strtoll(ConfigStr(ctx.con, "qm_web_thread_scan", "2000").c_str(),
+	                                    nullptr, 10);
+	return cap > 0 ? cap : 2000;
+}
+
+std::vector<Thread> GroupThreads(Ctx &ctx, const std::vector<int64_t> &nums,
+                                 const std::map<int64_t, MsgFlags> &flags) {
+	// Resolved once for the whole listing rather than per message.
+	std::string node = NodeName(ctx);
+	std::vector<Thread> out;
+	std::map<std::string, size_t> seen; // thread id -> index into `out`
+	for (size_t i = 0; i < nums.size(); i++) {
+		Message msg;
+		if (!quackmail::citadel::LoadMessage(ctx.con, nums[i], msg)) {
+			continue;
+		}
+		std::string id = ThreadIdFor(msg, node);
+		auto it = seen.find(id);
+		if (it == seen.end()) {
+			Thread t;
+			t.msgnums.push_back(nums[i]);
+			t.newest = nums[i];
+			out.push_back(t);
+			seen[id] = out.size() - 1;
+			it = seen.find(id);
+		} else {
+			out[it->second].msgnums.push_back(nums[i]);
+		}
+		auto f = flags.find(nums[i]);
+		if (f == flags.end() || !f->second.seen) {
+			out[it->second].any_unread = true;
+		}
+	}
+	return out;
+}
+
 std::string PagerHtml(Ctx &ctx, const Room &room, const std::string &filter, int64_t page, int64_t per,
                       int64_t total_pages) {
 	if (total_pages <= 1) {
@@ -107,12 +169,14 @@ std::string PagerHtml(Ctx &ctx, const Room &room, const std::string &filter, int
 	};
 	std::string out = "<div class=\"pager\">";
 	if (page > 1) {
-		out += Link(href(page - 1), Tr(ctx, "pager.newer"));
+		out += "<a role=\"button\" class=\"secondary\" href=\"" + A(href(page - 1)) + "\">" +
+		       Icon("left") + T(Tr(ctx, "pager.newer")) + "</a>";
 	}
 	out += "<span class=\"muted\">" + T(Tr(ctx, "pager.page")) + " " + std::to_string(page) + " " +
 	       T(Tr(ctx, "pager.of")) + " " + std::to_string(total_pages) + "</span>";
 	if (page < total_pages) {
-		out += Link(href(page + 1), Tr(ctx, "pager.older"));
+		out += "<a role=\"button\" class=\"secondary\" href=\"" + A(href(page + 1)) + "\">" +
+		       T(Tr(ctx, "pager.older")) + Icon("right") + "</a>";
 	}
 	return out + "</div>";
 }
@@ -129,84 +193,198 @@ void Index(Ctx &ctx, const Room &room) {
 	auto nums = quackmail::citadel::RoomMessages(ctx.con, room.room_num, filter, 0, stats.last_read);
 	std::reverse(nums.begin(), nums.end());
 
-	int64_t total_pages = nums.empty() ? 1 : (int64_t)((nums.size() + (size_t)per - 1) / (size_t)per);
-	if (page > total_pages) {
-		page = total_pages;
-	}
-	size_t begin = (size_t)((page - 1) * per);
-	size_t end = std::min(nums.size(), begin + (size_t)per);
+	// Threading is a per-user preference and defaults off: a BBS mail folder is
+	// often a flat pile of unrelated notices, where grouping only gets in the
+	// way.
+	bool threaded = quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_mail_threaded") == "1";
 
-	std::string toolbar = "<div class=\"actions\">";
-	toolbar += Link("/mail/compose", Tr(ctx, "mail.write"), "btn");
-	toolbar += Link("/mail/", Tr(ctx, "nav.all_folders"), "btn sec");
-	toolbar += Link("/search?room=" + std::to_string(room.room_num), Tr(ctx, "mailbox.search_folder"),
-	                "btn sec");
-	toolbar += Link(RoomHref(room) + "?f=new", Tr(ctx, "mail.unread"), "btn sec");
-	toolbar += Link(RoomHref(room) + "?f=all", Tr(ctx, "mailbox.all"), "btn sec");
-	toolbar += FormStart(ctx, RoomHref(room, "/markread"), "inline") +
-	           Button(Tr(ctx, "mailbox.mark_all_read"), "sec") + FormEnd();
-	toolbar += "</div>";
+	// A page is `per` threads when threading is on and `per` messages when it is
+	// not — paging over messages while displaying threads would show a different
+	// number of rows on every page.
+	std::vector<Thread> threads;
+	size_t begin = 0, end = 0, tbegin = 0, tend = 0;
+	int64_t total_pages = 1;
+
+	// One segmented group of view filters, one of actions: Pico draws each as a
+	// single bar, which is what stops this reading as eight loose boxes.
+	std::string filters = ButtonGroup(
+	    Link(RoomHref(room) + "?f=all", Tr(ctx, "mailbox.all"), filter == "all" ? "btn" : "btn sec") +
+	    Link(RoomHref(room) + "?f=new", Tr(ctx, "mail.unread"), filter == "new" ? "btn" : "btn sec"));
+
+	std::string toolbar = Toolbar(
+	    "<label class=\"vh\" for=\"pickall\">" + T(Tr(ctx, "mailbox.select_all")) + "</label>"
+	    "<input type=\"checkbox\" id=\"pickall\" class=\"pickall\">" +
+	    Link("/mail/compose", Tr(ctx, "mail.write"), "btn") + filters +
+	    "<span class=\"spacer\"></span>" +
+	    Link("/search?room=" + std::to_string(room.room_num), Tr(ctx, "mailbox.search_folder"), "btn sec") +
+	    FormStart(ctx, RoomHref(room, "/markread"), "inline") +
+	    IconButton(Tr(ctx, "mailbox.mark_all_read"), "check", "sec") + FormEnd());
 
 	PageOpts opts;
 	// The sidebar lists every folder, so mark this one rather than the section.
 	opts.active = "room:" + std::to_string(room.room_num);
 	opts.view = (int)room.default_view;
 	opts.wide = true;
-	opts.toolbar = toolbar;
+	opts.panes = true;
 
-	if (nums.empty()) {
-		Render(ctx, room.display_name, "<p class=\"muted\">" + T(Tr(ctx, "mailbox.empty")) + "</p>", opts);
+	// ---- the reader half ---------------------------------------------------
+	// `open` is a message number, and LoadMessageIn is what confirms it is
+	// pointed into *this* room before anything is rendered — skipping that
+	// check would be a direct IDOR, exactly as it would be on /msg/:m.
+	int64_t open = ctx.ParamInt("open", 0);
+	std::string reader;
+	bool opened = false;
+	if (open > 0) {
+		Message msg;
+		if (LoadMessageIn(ctx, room, open, msg)) {
+			opened = true;
+			reader = RenderMessage(ctx, room, msg);
+			MarkSeen(ctx, room, open);
+		}
+	}
+
+	// An htmx request wants the reader and nothing else. Every other client —
+	// including the whole urllib test suite — announces nothing and gets the
+	// complete page, so the URL keeps working exactly as it reads.
+	if (ctx.req.HasHeader("HX-Request") && open > 0) {
+		SecurityHeaders(ctx);
+		ctx.resp.Html(opened ? reader : "<p class=\"muted\">" + T(Tr(ctx, "mailbox.gone")) + "</p>");
 		return;
 	}
 
-	std::vector<int64_t> shown(nums.begin() + (long)begin, nums.begin() + (long)end);
-	auto flags = FlagsFor(ctx, shown);
+	// "Mail" is what the store calls the inbox and "Inbox" is what a person
+	// does — the same mapping the sidebar makes at web_chrome.cpp. Every other
+	// folder name is a room name, which is data rather than UI copy, and stays
+	// as the owner named it.
+	std::string heading =
+	    room.display_name == "Mail" ? Tr(ctx, "nav.inbox") : room.display_name;
 
-	// One form around the table. The default action is the move, because that is
-	// the one with a control beside it; every other button names its own with
-	// `formaction`, which is plain HTML and needs no script.
+	std::string listhead = "<div class=\"listhead\"><h1>" + T(heading) + "</h1>" +
+	                       RawHtml(toolbar) + "</div>";
+
+	if (nums.empty()) {
+		std::string empty = "<div class=\"panes\"><div class=\"list\">" + RawHtml(listhead) +
+		                    "<p class=\"muted\">" + T(Tr(ctx, "mailbox.empty")) + "</p></div></div>";
+		Render(ctx, heading, empty, opts);
+		return;
+	}
+
+	// Flags come from one query either way, but over different windows: the page
+	// when the listing is flat, and the whole scanned prefix when it is
+	// threaded, because GroupThreads needs them to decide whether a conversation
+	// has anything unread in it. Asking for `nums` outright would put every
+	// message number in the room into one IN(...) list.
+	std::map<int64_t, MsgFlags> flags;
+	if (threaded) {
+		int64_t cap = ThreadScanCap(ctx);
+		std::vector<int64_t> window(nums.begin(),
+		                            nums.begin() + (long)std::min<size_t>(nums.size(), (size_t)cap));
+		flags = FlagsFor(ctx, window);
+		threads = GroupThreads(ctx, window, flags);
+		total_pages = threads.empty() ? 1 : (int64_t)((threads.size() + (size_t)per - 1) / (size_t)per);
+		page = std::min(page, total_pages);
+		tbegin = (size_t)((page - 1) * per);
+		tend = std::min(threads.size(), tbegin + (size_t)per);
+	} else {
+		total_pages = (int64_t)((nums.size() + (size_t)per - 1) / (size_t)per);
+		page = std::min(page, total_pages);
+		begin = (size_t)((page - 1) * per);
+		end = std::min(nums.size(), begin + (size_t)per);
+		std::vector<int64_t> window(nums.begin() + (long)begin, nums.begin() + (long)end);
+		flags = FlagsFor(ctx, window);
+	}
+
+	std::string keep = "?f=" + filter + "&p=" + std::to_string(page) + "&n=" + std::to_string(per);
+
+	// One form around the listing. The default action is the move, because that
+	// is the one with a control beside it; every other button names its own with
+	// `formaction`.
 	std::string body = FormStart(ctx, "/mail/move");
 	body += Hidden("room", std::to_string(room.room_num));
-	body += Hidden("back", RoomHref(room) + "?f=" + filter + "&p=" + std::to_string(page) + "&n=" +
-	                           std::to_string(per));
+	body += Hidden("back", RoomHref(room) + keep);
 
-	body += "<div class=\"wrap\"><table><tr>";
-	// Hidden until qc.js marks the document: without script it would be a
-	// checkbox that does nothing.
-	body += "<th class=\"pick\"><span class=\"jsonly\"><input type=\"checkbox\" class=\"pickall\" "
-	        "aria-label=\"Select every message on this page\"></span></th>";
-	body += "<th class=\"mark\" title=\"Flagged\">&#9873;</th>";
-	body += "<th class=\"mark\" title=\"Attachment\">&#128206;</th>";
-	body += Head(Tr(ctx, "mailbox.subject")) + Head(Tr(ctx, "mailbox.from")) + Head(Tr(ctx, "mailbox.date")) +
-	        "<th class=\"num\">" + T(Tr(ctx, "mailbox.size")) + "</th></tr>";
-
-	for (size_t i = begin; i < end; i++) {
+	// One row, whether it stands alone or leads a conversation. `extra` is the
+	// thread count that rides on the subject; `reply` indents it.
+	auto row = [&](int64_t msgnum, const std::string &extra, bool reply) {
 		Message msg;
-		if (!quackmail::citadel::LoadMessage(ctx.con, nums[i], msg)) {
-			continue;
+		if (!quackmail::citadel::LoadMessage(ctx.con, msgnum, msg)) {
+			return std::string();
 		}
-		const MsgFlags &f = flags[nums[i]];
-		std::string num = std::to_string(nums[i]);
+		const MsgFlags &f = flags[msgnum];
+		std::string num = std::to_string(msgnum);
 		std::string subject = DecodeHeader(msg.subject);
 		if (subject.empty()) {
-			subject = "(no subject)";
+			subject = Tr(ctx, "mailbox.no_subject");
 		}
+		std::string href = RoomHref(room) + keep + "&open=" + num;
+
+		std::string out = "<div class=\"row\">";
+		out += "<input type=\"checkbox\" name=\"msgnum\" value=\"" + A(num) + "\" aria-label=\"" +
+		       A(Tr(ctx, "mailbox.select_one")) + "\">";
+		out += "<span class=\"marks\">";
 		// Unread is \Seen here, not the Citadel last-read pointer the message
 		// board uses: this is a mail folder, and \Seen is both what a mail
-		// client means by read and what IMAP shares with this page. Opening a
-		// message sets it, so the column tracks reading.
-		body += std::string("<tr") + (f.seen ? "" : " class=\"unread\"") + ">";
-		body += "<td class=\"pick\"><input type=\"checkbox\" name=\"msgnum\" value=\"" + A(num) +
-		        "\" aria-label=\"Select this message\"></td>";
-		body += "<td class=\"mark\">" + std::string(f.flagged ? "&#9873;" : "") + "</td>";
-		body += "<td class=\"mark\">" + std::string(HasAttachment(msg) ? "&#128206;" : "") + "</td>";
-		body += "<td>" + Link(RoomHref(room, "/msg/" + num), subject) + "</td>";
-		body += Cell(DecodeHeader(msg.author));
-		body += Cell(FormatTime(ctx, msg.msgtime));
-		body += "<td class=\"num\">" + T(FormatBytes((int64_t)msg.raw.size())) + "</td>";
-		body += "</tr>";
+		// client means by read and what IMAP shares with this page.
+		if (!f.seen) {
+			out += "<span class=\"dot\" aria-hidden=\"true\"></span>";
+		}
+		if (f.flagged) {
+			out += Icon("flag");
+		}
+		if (HasAttachment(msg)) {
+			out += Icon("clip");
+		}
+		out += "</span>";
+		out += "<span class=\"from\">" + T(DecodeHeader(msg.author)) + "</span>";
+		out += "<span class=\"date\">" + T(FormatTime(ctx, msg.msgtime)) + "</span>";
+		// hx-* is what turns this into a pane swap; the href is what it does
+		// without htmx, and what a middle-click or a bookmark gets.
+		out += "<span class=\"subject\"><a href=\"" + A(href) + "\" hx-get=\"" + A(href) +
+		       "\" hx-target=\"#reader\" hx-swap=\"innerHTML\" hx-push-url=\"true\" "
+		       "hx-indicator=\"#reader\">" +
+		       T(subject) + "</a>" + RawHtml(extra) + "</span>";
+		out += "</div>";
+		(void)reply;
+		return out;
+	};
+
+	body += "<ul class=\"msglist longlist\">";
+	if (threaded) {
+		for (size_t i = tbegin; i < tend; i++) {
+			const Thread &t = threads[i];
+			bool current = false;
+			for (auto n : t.msgnums) {
+				current = current || n == open;
+			}
+			body += "<li" + std::string(t.any_unread ? " class=\"unread\"" : "") +
+			        (current ? " aria-current=\"true\"" : "") + ">";
+			body += RawHtml(row(t.msgnums[0], "", false));
+			if (t.msgnums.size() > 1) {
+				// The replies are a disclosure rather than always-on rows: a
+				// forty-message thread must not push every other conversation
+				// off the screen. The summary carries the count, so the control
+				// says what it will show rather than being an unlabelled arrow.
+				body += "<details><summary>" +
+				        T(TrF(ctx, "mailbox.more_in_thread",
+				              {std::to_string(t.msgnums.size() - 1)})) +
+				        "</summary><ul class=\"thread\">";
+				for (size_t j = 1; j < t.msgnums.size(); j++) {
+					body += "<li>" + RawHtml(row(t.msgnums[j], "", true)) + "</li>";
+				}
+				body += "</ul></details>";
+			}
+			body += "</li>";
+		}
+	} else {
+		for (size_t i = begin; i < end; i++) {
+			const MsgFlags &f = flags[nums[i]];
+			body += "<li" + std::string(f.seen ? "" : " class=\"unread\"") +
+			        (nums[i] == open ? " aria-current=\"true\"" : "") + ">";
+			body += RawHtml(row(nums[i], "", false));
+			body += "</li>";
+		}
 	}
-	body += "</table></div>";
+	body += "</ul>";
 
 	// The bulk bar. Every button acts on whatever is ticked above it.
 	std::vector<std::pair<std::string, std::string>> folders;
@@ -215,29 +393,35 @@ void Index(Ctx &ctx, const Room &room) {
 			folders.push_back({f.display_name, f.display_name});
 		}
 	}
-	body += "<div class=\"actions bulk\">";
-	body += "<span class=\"muted\">With the selected:</span>";
+	body += "<div class=\"toolbar bulk\">";
+	body += "<span class=\"muted\">" + T(Tr(ctx, "mailbox.with_selected")) + "</span>";
 	if (!folders.empty()) {
 		body += Select("folder", folders, "");
-		body += "<button class=\"btn sec\">Move</button>";
+		body += Button(Tr(ctx, "mailbox.move"), "sec");
 	}
-	body += "<button class=\"btn sec\" formaction=\"/mail/flag\" name=\"set\" value=\"seen\">"
-	        "Mark read</button>";
-	body += "<button class=\"btn sec\" formaction=\"/mail/flag\" name=\"set\" value=\"unseen\">"
-	        "Mark unread</button>";
-	body += "<button class=\"btn sec\" formaction=\"/mail/flag\" name=\"set\" value=\"flagged\">"
-	        "Flag</button>";
-	body += "<button class=\"btn sec\" formaction=\"/mail/flag\" name=\"set\" value=\"unflagged\">"
-	        "Clear flag</button>";
-	body += "<button class=\"btn danger\" formaction=\"/mail/delete\">" +
-	        std::string(room.display_name == "Trash" ? "Delete permanently" : "Move to Trash") +
+	body += ButtonGroup(
+	    "<button class=\"secondary\" formaction=\"/mail/flag\" name=\"set\" value=\"seen\">" +
+	    T(Tr(ctx, "mailbox.mark_read")) + "</button>"
+	    "<button class=\"secondary\" formaction=\"/mail/flag\" name=\"set\" value=\"unseen\">" +
+	    T(Tr(ctx, "mailbox.mark_unread")) + "</button>"
+	    "<button class=\"secondary\" formaction=\"/mail/flag\" name=\"set\" value=\"flagged\">" +
+	    T(Tr(ctx, "mailbox.flag")) + "</button>"
+	    "<button class=\"secondary\" formaction=\"/mail/flag\" name=\"set\" value=\"unflagged\">" +
+	    T(Tr(ctx, "mailbox.clear_flag")) + "</button>");
+	body += "<button class=\"outline danger\" formaction=\"/mail/delete\" data-key=\"trash\">" +
+	        T(Tr(ctx, room.display_name == "Trash" ? "mailbox.delete_forever" : "mailbox.to_trash")) +
 	        "</button>";
 	body += "</div>";
 	body += FormEnd();
 
 	body += PagerHtml(ctx, room, filter, page, per, total_pages);
 
-	Render(ctx, room.display_name, body, opts);
+	std::string page_html = "<div class=\"panes" + std::string(opened ? " open" : "") + "\">";
+	page_html += "<div class=\"list\">" + RawHtml(listhead) + RawHtml(body) + "</div>";
+	page_html += "<div class=\"reader\" id=\"reader\">" + RawHtml(reader) + "</div>";
+	page_html += "</div>";
+
+	Render(ctx, heading, page_html, opts);
 }
 
 } // namespace

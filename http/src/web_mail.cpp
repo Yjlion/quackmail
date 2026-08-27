@@ -273,15 +273,20 @@ void GetMailIndex(Ctx &ctx) {
 	auto stats = quackmail::citadel::RoomStatsBulk(ctx.con, ctx.username, nums);
 
 	std::string body =
-	    "<div class=\"actions\">" + Link("/mail/compose", Tr(ctx, "mail.write"), "btn") + "</div>";
+	    Toolbar(Link("/mail/compose", Tr(ctx, "mail.write"), "btn"));
 	body += "<div class=\"wrap\"><table><tr>" + Head(Tr(ctx, "mail.folder")) + "<th class=\"num\">" +
 	        T(Tr(ctx, "mail.unread")) + "</th><th class=\"num\">" + T(Tr(ctx, "mail.total")) +
 	        "</th></tr>";
 	for (size_t i = 0; i < folders.size(); i++) {
+		// data-label on every cell: below the sidebar breakpoint qc.css turns
+		// each row into a card, and a bare "3" in a card means nothing.
 		body += "<tr" + std::string(stats[i].new_count > 0 ? " class=\"unread\"" : "") + ">";
-		body += "<td>" + Link(RoomHref(folders[i]), folders[i].display_name) + "</td>";
-		body += "<td class=\"num\">" + std::to_string(stats[i].new_count) + "</td>";
-		body += "<td class=\"num\">" + std::to_string(stats[i].total) + "</td>";
+		body += "<td data-label=\"" + A(Tr(ctx, "mail.folder")) + "\">" +
+		        Link(RoomHref(folders[i]), folders[i].display_name) + "</td>";
+		body += "<td class=\"num\" data-label=\"" + A(Tr(ctx, "mail.unread")) + "\">" +
+		        std::to_string(stats[i].new_count) + "</td>";
+		body += "<td class=\"num\" data-label=\"" + A(Tr(ctx, "mail.total")) + "\">" +
+		        std::to_string(stats[i].total) + "</td>";
 		body += "</tr>";
 	}
 	body += "</table></div>";
@@ -541,7 +546,7 @@ void GetCompose(Ctx &ctx) {
 	        "</span><input type=\"text\" name=\"cc\" id=\"compose-cc\" value=\"" + A(cc) +
 	        "\" list=\"addressbook\"></label>";
 	if (!addresses.empty()) {
-		body += "<button type=\"button\" class=\"btn sec jsonly\" id=\"addressbook-toggle\">" +
+		body += "<button type=\"button\" class=\"secondary\" id=\"addressbook-toggle\">" +
 		        T(Tr(ctx, "compose.address_book")) + "</button>";
 		body += "<div id=\"addressbook-panel\" class=\"addressbook-panel\" hidden><ul>";
 		for (auto &a : addresses) {
@@ -559,15 +564,16 @@ void GetCompose(Ctx &ctx) {
 	        T(Tr(ctx, "compose.formatted_text")) + "</label>";
 	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.attachment")) +
 	        "</span><input type=\"file\" name=\"attachment\" multiple></label>";
-	body += "<p>" + Button(Tr(ctx, "compose.send")) + " ";
-	body += "<button class=\"btn sec\" name=\"draft\" value=\"1\">" + T(Tr(ctx, "compose.save_draft")) +
+	body += "<div class=\"toolbar\">" + IconButton(Tr(ctx, "compose.send"), "send") + " ";
+	body += "<button class=\"secondary\" name=\"draft\" value=\"1\">" + T(Tr(ctx, "compose.save_draft")) +
 	        "</button> ";
-	body += Link("/mail/", Tr(ctx, "compose.cancel")) + "</p>";
+	body += "<span class=\"spacer\"></span>";
+	body += Link("/mail/", Tr(ctx, "compose.cancel"), "btn sec") + "</div>";
 	body += "</form>";
 	PageOpts opts;
 	opts.active = "compose";
 	opts.script = "qc-compose.js";
-	Render(ctx, Tr(ctx, "compose.title"), body, opts);
+	Render(ctx, Tr(ctx, "compose.title"), "<div class=\"compose\">" + body + "</div>", opts);
 }
 
 void PostSend(Ctx &ctx) {

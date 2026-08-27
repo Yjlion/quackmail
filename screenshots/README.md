@@ -69,7 +69,7 @@ throwaway server seeded with a demo world. Regenerate them with:
 
 ![web-wiki-history](web-wiki-history.png)
 
-### `/bbs/room/108/wiki/diff?page=home&rev=26`
+### `/bbs/room/108/wiki/diff?page=home&rev=28`
 
 ![web-wiki-diff](web-wiki-diff.png)
 
@@ -77,9 +77,21 @@ throwaway server seeded with a demo world. Regenerate them with:
 
 ![web-mail-inbox](web-mail-inbox.png)
 
-### `/bbs/room/100/msg/5`
+### `/bbs/room/100?f=all&p=1&n=30&open=7`
+
+![web-mail-reader](web-mail-reader.png)
+
+### `/bbs/room/100/msg/7`
 
 ![web-mail-read](web-mail-read.png)
+
+### `/bbs/room/100`
+
+![web-mail-threaded](web-mail-threaded.png)
+
+### `/bbs/room/100  (Deutsch)`
+
+![web-mail-inbox-de](web-mail-inbox-de.png)
 
 ### `/bbs/room/100`
 
@@ -105,6 +117,10 @@ throwaway server seeded with a demo world. Regenerate them with:
 
 ![web-mobile-bbs-room](web-mobile-bbs-room.png)
 
+### `/bbs/room/100?f=all&p=1&n=30&open=7  (390x844)`
+
+![web-mobile-mail-reader](web-mobile-mail-reader.png)
+
 ### `/admin/`
 
 ![web-admin](web-admin.png)
@@ -128,6 +144,10 @@ throwaway server seeded with a demo world. Regenerate them with:
 ### `/admin/queue`
 
 ![web-admin-queue](web-admin-queue.png)
+
+### `/bbs/room/0/settings`
+
+![web-room-settings](web-room-settings.png)
 
 ## The BBS shell (telnet)
 

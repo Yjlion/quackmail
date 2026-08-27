@@ -107,7 +107,11 @@ def main():
         # The sidebar links the user's own groupware rooms, provisioned by
         # EnsureUserRooms at first login.
         _, home = c.get("/mail/")
-        m = re.search(r'href="(/bbs/room/(\d+))"[^>]*><span>Contacts</span>', home)
+        # The link carries a glyph between the href and the label. The guard is
+        # what keeps the match inside *one* anchor: without it a lazy .*? walks
+        # across the whole sidebar and pairs this label with an earlier href.
+        m = re.search(
+            r'href="(/bbs/room/(\d+))"(?:(?!</a>).)*?<span>Contacts</span>', home)
         assert m, "the sidebar does not link a Contacts room"
         room_path = m.group(1)
 

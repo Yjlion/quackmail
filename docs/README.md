@@ -35,7 +35,8 @@ are the detail.
 - **[Contributing](contributing.md)** — layout, building, adding a listener, a
   module or a worker, the parity oracle, and the test suites.
 - **[`TODO.md`](../TODO.md)** — the live backlog. It is the authoritative list
-  of what is next; these pages describe what exists.
+  of what is next; these pages describe what exists. Shipped work moves to
+  **[`TODO-archive.md`](../TODO-archive.md)** once it is released.
 - **[`MEMORY.md`](../MEMORY.md)** — project history and the reasoning behind
   decisions that are not obvious from the code.
 

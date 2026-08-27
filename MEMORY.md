@@ -59,11 +59,109 @@ from a browser at all. That is why `web_mailbox.cpp` exists. A route with no way
 in is worse than a missing one — it reads as a working feature in the route
 table and in the README.
 
-The bulk bar is one `<form>` with a `formaction` per button rather than script,
-so it works with JavaScript off like everything else here; the select-all is the
-one scripted control and is hidden by CSS until `qc.js` sets `data-js`. `flag` +
-`on` collapsed into a single `set` field for the same reason — an HTML button
-contributes exactly one name and value, and these buttons share a form.
+The bulk bar is one `<form>` with a `formaction` per button — not as a
+concession to anything, but because it is the shortest correct way to post one
+set of checkboxes to six endpoints. `flag` + `on` collapsed into a single `set`
+field for the same reason: an HTML button contributes exactly one name and
+value, and these buttons share a form. (The select-all checkbox used to hide
+itself until `qc.js` set `data-js`; see *The JavaScript-off guarantee is
+retired* below.)
+
+### The JavaScript-off guarantee is retired
+
+Until the interface was rebuilt, **every page had to work with scripting off**,
+and several things were shaped by it: the select-all checkbox hidden behind
+`data-js`, the composer degrading to a bare textarea, `qc-sieve.js` hand-rolling
+a fetch-and-swap. That rule is gone.
+
+What did *not* change is that every route still returns a **complete page**. It
+now earns its place for three different reasons: a URL stays meaningful and
+linkable, the ~4000 lines of `urllib`-driven integration tests can still drive
+the whole application, and htmx fragment negotiation becomes a two-line
+decision. "Server-rendered" is no longer a synonym for "works without script".
+
+### Pico CSS and htmx are vendored, and their CVEs adopted with them
+
+The stance was "no framework, no build step, no CDN"; two of those three still
+hold. `http/assets/pico.css` (v2.1.1, MIT) and `http/assets/htmx.min.js` (2.x,
+0BSD) were fetched once by hand and committed on exactly the terms
+`core/src/psl_data.cpp` sets — the build fetches nothing and works offline.
+
+Neither can carry a licence file beside it: `tools/gen_assets.py` serves *every*
+file in `http/assets/` and refuses any extension outside its MIME table, so a
+`LICENSE` there would either be published or fail the generator. Pico's banner
+is its own record; `docs/web.md` is the record for both.
+
+`htmx.config.allowEval = false` is set in `qc.js`. htmx's only `eval()` and
+`new Function` sit behind that flag, and turning it off is what lets the page
+CSP keep refusing `'unsafe-eval'`. The cost is `hx-on:` attributes, which this
+interface does not use.
+
+### The stylesheet arrives in three blocks, and the order is the design
+
+1. an inlined skeleton — fallback palette and layout grid, at plain `:root`
+   specificity;
+2. `pico.css` then `qc.css`;
+3. the per-user theme, inlined, because it varies per user and cannot be a
+   cacheable file.
+
+The skeleton has to come **first** so Pico overrides its fallback palette, and
+the theme **last** so it wins. The previous arrangement put the critical CSS and
+the theme in one block after the link; keeping that would have silently defeated
+Pico's palette everywhere. Both inline blocks are nonced — `style-src` has no
+`'unsafe-inline'`, so an unnonced `<style>` is dropped in silence.
+
+A theme is now the `data-theme` attribute Pico keys its own light and dark
+blocks on, plus a `:root` override of about a dozen `--pico-*` properties for
+the three custom skins. Light and dark cost the attribute and nothing else.
+
+### The reading pane is one URL, rendered two ways
+
+`?open=<msgnum>` on a mail folder renders the listing *and* the message. htmx
+fetches the same URL and swaps only the reader; the server decides which to send
+from the `HX-Request` header. So the pane is linkable, the history works, and a
+client that announces nothing — every integration test included — gets the whole
+page.
+
+`MarkSeen` was factored out of `GetBbsMessage` for this: the pane and the
+standalone message page must not be able to disagree about what reading a
+message does. `MessageActions` moved *into* `RenderMessage` for the same reason
+— the pane renders a message with no page around it and would otherwise have had
+no controls at all.
+
+### A root could never join its own thread
+
+`ThreadIdFor` (`http/src/jmap_mail.cpp`) hashed the first entry of a message's
+References — which is the *root's* Message-ID, because `GetBbsCompose` builds
+References as `orig.references + " " + MessageId(orig)` — but named a message
+with no references after its **msgnum**. Those two can never produce the same
+id, so a root sat in a thread of its own and its replies sat in another.
+
+JMAP had been shipping that since Phase 11 and nothing caught it:
+`test_jmap.py` only ever asked for the thread of a single message, which is a
+thread of one either way. It surfaced the moment the webmail listing tried to
+*group* by it. A root now hashes its own Message-ID, which is exactly what its
+replies point back at.
+
+The web listing calls that same function rather than growing a display-side
+rule of its own — deriving the id rather than storing it is what keeps the two
+surfaces unable to disagree, and adding a second implementation would have
+thrown that away. `ThreadIdFor` takes the node name now, because a local
+Message-ID is minted under it.
+
+### connect-src has to be stated
+
+The page CSP is `default-src 'none'` plus per-directive grants. There was no
+`connect-src`, so htmx's XHR fell back to `'none'` and every reading-pane swap
+was blocked — visible only in the browser console, since the server saw no
+request at all. It is `'self'` and nothing else: this interface has no reason to
+talk to another origin, and saying so is what keeps an injected script from
+exfiltrating to one.
+
+The **message-body frame** keeps its own policy, passed to `SecurityHeaders`
+explicitly, and must never gain this: that frame renders markup written by
+whoever sent the mail, and a `fetch()` from inside it back to our origin is
+precisely what the sandbox exists to prevent.
 
 ### Search resolves rooms, never room numbers
 

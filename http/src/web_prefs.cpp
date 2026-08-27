@@ -94,6 +94,12 @@ void GetPrefs(Ctx &ctx) {
 	        Select("tz", zones, quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_tz")) +
 	        "</label>";
 
+	// Threading is off by default: a BBS mail folder is often a flat pile of
+	// unrelated notices, where grouping only gets in the way.
+	body += Checkbox("threaded",
+	                 quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_mail_threaded") == "1",
+	                 Tr(ctx, "mailbox.threaded"));
+
 	body += "<label class=\"field\"><span>Mail list density</span>" +
 	        Select("mail_layout",
 	               {{"comfortable", "Comfortable"}, {"compact", "Compact"}, {"wide", "Wide"}},
@@ -225,6 +231,11 @@ void PostSettings(Ctx &ctx) {
 	quackmail::citadel::SetUserPref(
 	    ctx.con, ctx.username, "web_date_format",
 	    (date_format == "iso" || date_format == "us" || date_format == "eu") ? date_format : "");
+
+	// A checkbox contributes nothing at all when it is clear, so the absence of
+	// the field is the "off" value — there is no third state to store.
+	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_mail_threaded",
+	                                ctx.req.Form("threaded") == "1" ? "1" : "");
 
 	// Only a locale this build actually ships a catalog for; anything else
 	// clears the row rather than pinning the visitor to a typo.

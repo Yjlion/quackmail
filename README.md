@@ -74,7 +74,8 @@ the Citadel text client reads. There is one store.
 | [Contributing](docs/contributing.md) | layout, building, adding a protocol |
 
 [`TODO.md`](TODO.md) is the live backlog — what is next, and why the things
-that are deliberately absent are absent. [`MEMORY.md`](MEMORY.md) records the
+that are deliberately absent are absent; what has already shipped is in
+[`TODO-archive.md`](TODO-archive.md). [`MEMORY.md`](MEMORY.md) records the
 reasoning behind decisions that the code does not explain on its own.
 
 ## Quick start

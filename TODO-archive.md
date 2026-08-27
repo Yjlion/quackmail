@@ -1,0 +1,982 @@
+# TODO archive
+
+Shipped work, moved out of [TODO.md](TODO.md) so that file can stay a live task
+list rather than a changelog. Everything here is **released** — v0.8.0 or
+earlier — and none of it is current work.
+
+Newest first. The *why* behind these decisions lives in [MEMORY.md](MEMORY.md);
+this is the record of what landed.
+
+## v0.8.0 and earlier
+
+- [x] **An ACME (Let's Encrypt) client**, http-01, so the server obtains and
+      renews its own certificate. Until now the only options were a self-signed
+      pair or a certificate obtained with some other tool — a whole second piece
+      of software to install, configure and remember to renew.
+  - [x] RFC 8555 end to end: directory, nonces, account, order, http-01
+        authorization, finalize with a CSR, download, and revoke. The challenge
+        is served by `qm_http` out of a table the worker writes, which is the
+        only thing crossing between the two extensions.
+  - [x] **The challenge route is dispatched beside `/healthz`, before the
+        `qm_web_force_https` redirect.** That redirect sends everything to
+        `https://c_fqdn`, and at first issuance there is nothing there but the
+        self-signed certificate being replaced — so a challenge routed through
+        it cannot be answered. This is the single placement the feature depends
+        on, and `test_acme.py` runs with the redirect deliberately left **on**.
+  - [x] **A renewed certificate reaches every listener without dropping a
+        connection.** `RegisterServerControls` now also registers
+        `<prefix>_tls_reload()`, so all twelve get one from one edit and a
+        thirteenth cannot forget; `TlsContext` swaps an `std::atomic<SSL_CTX*>`
+        that `AcceptLoop` already re-read on every accept. A retired context is
+        *kept*, not freed — a thread can be between `Get()` and `SSL_new`, and a
+        few kB a year beats a use-after-free. The worker finds the reload
+        functions in `duckdb_functions()`: the catalog is already an
+        authoritative register of what is loaded, so there is no second list.
+  - [x] **A verifying client TLS context, with SNI and a host-name check.**
+        `ClientContext::Init` verified nothing, deliberately, because its only
+        caller was opportunistic MX-to-MX transport — and `ConnectTls` sent no
+        SNI at all, which a CDN-fronted directory will not complete a handshake
+        without. Both are additive overloads, so the mail path is unchanged. An
+        ACME client that does not authenticate the CA is not an ACME client.
+  - [x] `httpc` grew a general `Request` — method, body, request headers, and
+        **response headers**, which `Replay-Nonce` and `Location` need and which
+        were previously parsed and discarded. A redirect on a non-GET is refused
+        rather than guessed at. `Get()` and the feed path are untouched.
+  - [x] **Staging by default, and `qm_acme_enabled` off.** A failed validation
+        counts against a small per-hostname hourly limit on the production
+        endpoint, and the first run of a new install is the one most likely to
+        have DNS wrong. Failures back off exponentially to a day; a
+        `rateLimited` problem document jumps straight there. `badNonce` is
+        retried exactly once (§6.5).
+  - [x] **No `insecure` flag.** `qm_acme_ca_bundle` points at a CA bundle
+        instead — which is what makes a private ACME server work, and which
+        means `test_acme.py` exercises the *verifying* path against a CA it
+        mints itself rather than leaving it the one path never run.
+  - [x] RS256 only, and EAB and dns-01 are out: `dns.hpp` resolves rather than
+        updates, so dns-01 would mean "publish this TXT record by hand in the
+        next few minutes", which is not automation.
+  - [x] No private key is returned by any function or rendered on any page; the
+        account's *thumbprint* is shown instead, and it is what the CA compares
+        against.
+  - [x] `/admin/acme`, `quackcitadm.sh acme`, `QUACKCIT_ACME_*`, and a tier in
+        `ensure_tls_material` between the operator's own certificate and the
+        self-signed pair — the self-signed one stays the bootstrap, because a
+        listener that refused to start until a CA answered would be worse.
+  - [x] `test/sql/acme.test` (against the RFC 7638 §3.1 and RFC 8555 §8.1
+        vectors) and `test/integration/test_acme.py`, which stands up a fake CA,
+        has it really fetch the token from the running listener, and asserts the
+        served certificate's serial changes without a restart.
+
+- [x] **The wiki room view** (`VIEW_WIKI`), the last user-facing view with no
+      renderer, and the largest single gap against WebCit.
+  - [x] **The storage convention is Citadel's, read from
+        `citadel/server/modules/wiki/serv_wiki.c` and `webcit/wiki.c` rather
+        than invented.** A page is an ordinary `format_type = 4` message whose
+        euid is the normalized page name; its history is a second message with
+        euid `<page>_HISTORY_`, author "Citadel", holding a `multipart/mixed`
+        whose parts are each a `text/x-diff`, newest first, with a base64 memo
+        (`<old msgnum>|<timestamp>|<author>|`, **including the trailing NUL**)
+        in each part's filename. A QuackCit-shaped revision table would have
+        been much easier and would have interoperated with nothing.
+  - [x] The diffs run **backwards** — each takes the text one revision older —
+        so reading revision R means patching the current page until the memo
+        names R. `serv_wiki.c:234` is explicit that the arguments are swapped
+        on purpose, and reversing it silently produces a history that
+        reconstructs from nothing.
+  - [x] `core/diff.{hpp,cpp}`: a line Myers diff, a unified emitter and a
+        hunk applier, ~500 lines, no dependency. Verified **byte-identical to
+        GNU `diff -U3`** in both directions, including the
+        `\ No newline at end of file` marker, which is the closest available
+        proxy for the libxdiff Citadel patches with. Bounded by construction:
+        line and edit-distance budgets, past which it emits one whole-file hunk
+        — still a valid patch. Degrade, never diverge.
+  - [x] `core/markdown.{hpp,cpp}`: a bounded subset, written rather than
+        vendored. **Raw HTML in the source is escaped, not passed through** — a
+        deliberate CommonMark deviation that deletes the injection surface at
+        the source — and the output still goes through
+        `html::SanitizeForCompose`, because generated markup is markup we store
+        and re-serve from our own origin.
+  - [x] Markdown is a property of the page's **MIME type** (`text/x-markdown`),
+        not of the room's view code. `VIEW_WIKIMD` is **not a code current
+        Citadel knows**: `ROOM_VIEWS` ends at `VIEW_QUEUE` and WebCit sizes
+        `exchangeable_views[VIEW_MAX][VIEW_MAX]` from that, so a room set to 12
+        reads out of bounds in the oracle's own web client. The constant exists
+        here so such a room still renders, and is kept out of every picker
+        behind `qm_wiki_markdown_view`.
+  - [x] **Versioning hooks `citadel::UpsertByEuid`, not the web front-end.**
+        Citadel does it with a server-wide `EVT_BEFORESAVE` hook precisely so
+        every front-end produces history — the same argument that keeps
+        `CanPost` in the store and forbids re-deriving it. A save that changes
+        nothing is refused rather than stored as an empty diff, as Citadel does.
+  - [x] `WIKI history|<page>` and `WIKI rev|<page>|<rev>|showrev|revert` on the
+        native protocol, which is what makes the shared storage pay: a real
+        WebCit or Citadel client can browse history written here.
+  - [x] The web view: a page index with recently-changed, `[[wiki links]]` that
+        mark a page nobody has written yet and lead to the create form, history,
+        a rendered diff, and revert — which is itself recorded as a revision,
+        never a rewrite of history.
+  - [x] `ViewOptions()` had **two divergent copies**; the aide's stopped at
+        Notes and would silently reset a Blog room to a message board on save.
+        Now one list. The telnet room editor's numeric prompt stopped at 5 for
+        the same reason and now offers the full set.
+  - [x] `HasCustomView()` had zero call sites and is deleted.
+  - [x] `test/sql/wiki.test` and `test/integration/test_wiki.py`.
+
+- [x] **Screenshots and a `docs/` tree.** `tools/screenshots.py` starts a
+      throwaway server, seeds a demo world, and captures both user interfaces —
+      the web pages through Chromium, and the telnet BBS by replaying a real
+      session into a terminal emulator and rendering that through the *same*
+      browser. The 983-line README is now a pitch and an index over `docs/`.
+
+- [x] **Sieve past its core: `imap4flags`, `variables` and `vacation`**, and a
+      filter builder that can express them.
+  - [x] `qm_sieve_eval(script, message, mail_from, rcpt_to)` first, because
+        until it existed there was no way to assert what a script *does* —
+        only that it parses. Every rule below that fails silently against a
+        real correspondent is one line in `test/sql/sieve.test` because of it.
+  - [x] **imap4flags** (RFC 5232): `setflag`/`addflag`/`removeflag`, `:flags`
+        on `keep`/`fileinto`, and `hasflag`. The flags an action carries are a
+        *snapshot* of the internal set as it stood when that action ran — an
+        `addflag` afterwards must not reach back and change what was already
+        filed, which is the whole subtlety of §5. They land in
+        `citadel_msg_flags` through a new `citadel::AddMsgFlag`, the rows
+        IMAP's STORE writes and the web mailbox reads, so a rule that files
+        something as read shows up read in every client at once.
+  - [x] **variables** (RFC 5229): `set` with its modifiers, `${}` expansion at
+        evaluation time, the `string` test, and `:matches` captures into
+        `${1}`..`${9}` — which is what makes a per-list folder expressible.
+        **`require "variables"` is the one capability that stops being
+        advisory**: without it `${foo}` is literal text (§3), and a script
+        written before this existed has to keep meaning what it meant then.
+  - [x] The capture matcher is new rather than `WildmatMatch`. That answers
+        yes/no for NNTP's comma/`!`/`[class]` syntax Sieve does not have —
+        which is why the caller was escaping it back out — and cannot say what
+        a wildcard consumed. It was also unbounded: `*a*a*a*a*b` against a
+        sender-chosen value is exponential. The replacement has a step budget.
+  - [x] **vacation** (RFC 5230). `Evaluate` stays a pure function of the
+        message and takes no `Connection`, so it decides only whether *this
+        message* deserves a reply — §4.5/§4.6 in full: `Auto-Submitted`,
+        `Precedence`, `List-*`, a null return-path, the user not being a
+        visible recipient, replying to oneself, one reply per message. What
+        needs a connection is the per-correspondent window, and that lives in
+        `delivery.cpp` against a new `quackmail_vacation_sent`.
+  - [x] The send is modelled on `itip::Notify`: charged against
+        `policy::CheckRate` (`submission::Send` is quota-agnostic by contract,
+        and an auto-replier with the limit off is a backscatter cannon),
+        `Auto-Submitted: auto-replied` per §4.6, and an **empty envelope
+        sender** per §4.5. `:from` is honoured only for an address the user
+        actually owns — taken on trust it is a From-forgery primitive handed to
+        every account holder, the same hole `itip::IsOrganizer` closes.
+  - [x] `qm_sieve_vacation` switches auto-replies off site-wide, because an
+        auto-reply is mail this server sends to an address somebody else chose.
+  - [x] **Three bugs the builder had been carrying.** `/admin/sieve` rendered
+        the whole rule builder and had registered *none* of the routes its
+        buttons post to, so every control there answered 404 while looking
+        identical to the one that works. The page told users to build a
+        multi-condition rule by "adding a condition to it" and there was no
+        such route. And `fileinto :create` was read by `Decompose` and never
+        written back by `Compose`, so a click on any *other* rule silently
+        rewrote a script that asked for it.
+  - [x] The builder now edits a rule in place: conditions and actions added and
+        removed one at a time, all/any, stop, a custom header (`header:X` always
+        round-tripped and could not be typed), a folder picker fed by
+        `MailFolders`, `:create`, and flags. An unconditional rule — `if true` —
+        is representable at last, which is the shape an out-of-office has.
+  - [x] `test_sieve_rules.py` asserted the builder must *not* offer vacation,
+        which was right while the engine lacked it. Inverted rather than
+        deleted: the property worth keeping is that the builder offers exactly
+        what the engine implements.
+  - [x] `regex` stays out, deliberately — see the backlog.
+
+- [x] **Passwords are hashed with scrypt**, not one round of salted SHA-256.
+      The old scheme gave a leaked `quackmail_users` table up at GPU speed, and
+      the header said as much ("first-pass KDF; bcrypt/argon2 is a noted
+      hardening follow-up") — this is that follow-up.
+  - [x] scrypt (RFC 7914) through OpenSSL's `EVP_PBE_scrypt`: no new
+        dependency, and available since OpenSSL 1.1.0, where Argon2 needs 3.2
+        and would have broken portability to anything older. Memory-hardness is
+        the property that matters — PBKDF2 and bcrypt both fit in a GPU's
+        registers and scrypt does not. N=16384 r=8 p=1 is 16 MiB and ~80 ms per
+        verify, measured rather than guessed.
+  - [x] `algo` is self-describing (`scrypt$16384$8$1`), so the work factor can
+        be raised later without invalidating rows stored at the old one. It is
+        parsed with bounds and *refused* rather than clamped when absurd: the
+        value comes out of a database, and a row naming a huge N would let one
+        sign-in allocate the machine.
+  - [x] **Legacy rows still verify, and are rewritten on the next successful
+        sign-in.** Without that the change is close to worthless on an install
+        that already exists: every account created before it keeps the weak hash
+        until somebody happens to set a new password, which for most accounts is
+        never. The rewrite failing is ignored on purpose — the sign-in already
+        succeeded, and refusing it because a housekeeping UPDATE did not land
+        would turn hardening into an outage.
+  - [x] `test/sql/password.test` pins the legacy format with a vector computed
+        *independently* rather than by asking the server what it produces, and
+        the scrypt output against a vector from `hashlib.scrypt`. An upgrade
+        that locked every existing user out would be worse than the weakness it
+        fixed, so that path needs a test that fails loudly if it is ever
+        "tidied". `test_http.py` asserts the in-place upgrade end to end.
+  - [x] Contained entirely in `core/src/auth.cpp`: all twenty-odd call sites
+        already went through `auth::Verify`/`AddUser`, so no front-end changed.
+
+- [x] **IMAP `IDLE`** (RFC 2177), and the tombstone bug finding it uncovered.
+  - [x] A parked client is told about new mail and expunges from *another*
+        session. The wake-up is a **poll of the store**, not a push from
+        whatever made the change: extensions share no C++ state, DuckDB has no
+        `LISTEN`/`NOTIFY`, and `RoomChangeToken` is one cheap aggregate over two
+        indexed columns. Reading it every two seconds is what turns polling
+        here into push *to the client*, which is the half that matters — the
+        alternative is every phone on the site opening a fresh connection every
+        few minutes to ask the same question. The comment says so rather than
+        implying it is event-driven.
+  - [x] `EXPUNGE` goes out highest-position-first, because each one renumbers
+        everything after it and a client applying them in ascending order
+        deletes the wrong messages. `EXISTS` follows, and only when the count is
+        not already what the client would have worked out from the expunges.
+  - [x] Capped at 29 minutes, then `* BYE` and close. There is no clean way to
+        end IDLE from the server side — the client is waiting to send `DONE` and
+        would match a tagged reply to a command it has not finished.
+  - [x] `NOOP` reports changes too. RFC 3501 §6.1.2 names that as the point of
+        the command, and a client that cannot IDLE polls with it; reporting
+        nothing was how such a client missed new mail until it re-selected.
+  - [x] **Three removal paths left no tombstone**, which the IDLE test found
+        immediately: IMAP `EXPUNGE`, IMAP `MOVE` and POP3 `DELE`-at-QUIT each
+        deleted the `citadel_room_msgs` row with SQL of their own, and so did
+        `citadel::MoveMessage` in core. `citadel_room_tombstones` exists
+        precisely because "removals left nothing behind at all, which is why a
+        deletion was invisible to any token derived from the store" — and a
+        message deleted in any ordinary mail client was still invisible to
+        JMAP's `Email/changes` and DAV's `sync-collection`. All four now go
+        through one `Unlink` that records the tombstone, and `test_imap.py` /
+        `test_pop3.py` assert it directly.
+  - [x] Driven through Python 3.14's `imaplib.idle()` — a client implementation
+        nobody here wrote — with a second connection appending and expunging
+        from another thread, because a single-session test cannot prove the
+        cross-session path at all.
+
+- [x] **iTIP/iMIP** (RFC 5546 + 6047) — an invitation sent to an attendee now
+      arrives as mail, and their reply updates the event. Until this, an event
+      with `ATTENDEE` properties was stored and served faithfully and nothing
+      else happened.
+  - [x] `core/itip.{hpp,cpp}`. Everything except the two functions that need
+        site config is a **pure function of the calendar text**, so the rules
+        that fail *silently* against a real client are pinned in
+        `test/sql/itip.test` with no mail server: a `CANCEL` that does not bump
+        `SEQUENCE` is dropped as a stale duplicate and the meeting never leaves
+        the attendee's calendar; a `REPLY` must carry only the replying
+        attendee, because what the others said is not theirs to report; a
+        delayed `REPLY` to `SEQUENCE:1` must not overwrite an answer given to
+        `SEQUENCE:2`; and the organizer must not be mailed their own
+        invitation.
+  - [x] **Only the organizer sends.** `IsOrganizer` gates `Notify` before
+        anything is built, and requires the ORGANIZER's local part to *be* the
+        acting user on a domain this site hosts — checking only the domain
+        would let anyone with an account organize as anyone else. Without this,
+        an attendee saving their own copy of a shared event would mail
+        everybody, and every calendar would become a mailing list.
+  - [x] `Notify` charges `policy::CheckRate`/`RecordSend` itself.
+        `submission::Send` is quota-agnostic by contract, so a scheduling path
+        that skipped it would be a third door onto the mail path with the limit
+        switched off.
+  - [x] `DavPut` sends the REQUEST after the save, best effort — the object
+        *is* stored, and failing the PUT because a recipient's MX is down would
+        tell the client the event was never created. `DavDelete` sends the
+        CANCEL *before* the delete, because it is built from the stored bytes
+        and there are none afterwards.
+  - [x] **The first content-type hook on the delivery path.**
+        `deliver::LocalDeliver` parsed headers and never built the part tree;
+        it now looks for a `text/calendar` part carrying a `METHOD`. It sits
+        *after* Sieve has ruled, and only for recipients who actually kept the
+        message: a user who wrote `discard` for a sender meant it, and acting
+        on a scheduling message they told us to throw away would make the rule
+        a lie. A message that *was* kept gets the calendar effect whichever
+        folder it landed in. The guard is a substring check, because almost no
+        mail is a scheduling message and building the part tree for every
+        inbound message would be a tax on the whole path.
+  - [x] Inbound: REPLY folds the PARTSTAT into the organizer's stored copy,
+        REQUEST files the event onto the attendee's Calendar *in addition to*
+        delivering the mail, CANCEL marks the stored copy `STATUS:CANCELLED`
+        rather than deleting it — a meeting that vanishes without trace is
+        indistinguishable from one that was never there.
+  - [x] `citadel::WrapObject`/`ObjectBody` lifted out of `http/src/web_views.cpp`
+        into core, which now has one implementation. Inbound iTIP writes
+        calendar objects into the rooms CalDAV and the web UI read, and a
+        second spelling of that wrapper would leave one of them unable to read
+        what another wrote.
+  - [x] Still absent, deliberately: RFC 6638's scheduling collections
+        (`schedule-inbox-URL`, `schedule-outbox-URL`, `POST` to the outbox) and
+        with them the `calendar-auto-schedule` compliance token, which stays
+        off the `DAV:` header until they exist. iMIP is what makes this
+        interoperate with servers that are not this one; auto-schedule is a
+        convenience for clients that already speak to us.
+
+- [x] **CalDAV free/busy** (`CALDAV:free-busy-query`, RFC 4791 §7.10) — the
+      first half of DAV scheduling, and the half that stands on its own: it
+      needs no mail, no scheduling collections and no new compliance class.
+  - [x] `ical::Period`, `Busy`, `MergePeriods`, `CollectBusy`, `EmitFreeBusy`
+        in core. The rules are the spec's and every one of them is about what
+        *does not* count: `TRANSP:TRANSPARENT` contributes nothing (that is how
+        an all-day "on holiday" marker avoids blocking the week),
+        `STATUS:CANCELLED` contributes nothing, `STATUS:TENTATIVE` reports
+        under `FBTYPE=BUSY-TENTATIVE`, and only VEVENTs count at all.
+        Recurrences expand through `ical::Expand`, so the rule that draws the
+        calendar is the rule that decides availability.
+  - [x] Periods that merely *touch* merge into one. Two back-to-back meetings
+        are one unavailable stretch; reporting them separately invites a client
+        to offer the zero-length gap between them.
+  - [x] `ical::Item` gained `transp`, read-only: `FoldItemInto` deliberately
+        does not write it back, so TRANSP keeps living in the `Component` tree
+        and an edit cannot drop it.
+  - [x] The report answers with one `text/calendar` body rather than a
+        multistatus, which is the whole point — it carries intervals and
+        nothing else, so it is answerable for a calendar the asker cannot read.
+        `test_caldav.py` asserts the reply leaks no `SUMMARY`, `VALARM` or `X-`
+        property, which is the assertion that matters.
+  - [x] An unbounded request is refused with `CALDAV:valid-filter` rather than
+        served: "expand every recurrence you have" is a way to hang a thread,
+        not a question.
+  - [x] Added to `supported-report-set`, or no client would attempt it.
+  - [x] `qm_ical_freebusy(text, from, to)` puts the merging, the exclusions and
+        the recurrence expansion in `test/sql/ical.test`, where they are pinned
+        without a socket.
+  - [x] **The oracle is not an oracle here.** `citadeldotorg/citadel` ships
+        classic WebCit, which serves *GroupDAV* at `/groupdav/` — `DAV: 1`,
+        `Allow: OPTIONS, PROPFIND`, nothing else — and no CalDAV at all. There
+        is nothing to diff against; the RFCs and real clients are the authority
+        for everything under `/dav/`.
+
+- [x] **A real JMAP client was pointed at `/jmap/`, and it could not use it.**
+      The client is [`jmapc`](https://github.com/smkent/jmapc) 0.3.0 — chosen
+      because nobody here wrote it, which was the whole point of the backlog
+      item. It found what assertions written by the same person who chose the
+      behaviour could not.
+  - [x] **`apiUrl`, `uploadUrl` and `downloadUrl` were site-relative paths.**
+        A DAV href is a path the client resolves against the request URI, and
+        `dav.hpp` says so deliberately; RFC 8620's Session URLs are called
+        *verbatim*. `requests` refuses `"/jmap/api"` with "No scheme supplied",
+        so a client parsed the Session resource and then failed on its first
+        method call, its first upload and its first download alike. `/jmap/`
+        was unusable to any client that does not silently `urljoin`, and
+        `test_jmap.py` was asserting the broken value.
+  - [x] `qmweb::SelfBaseUrl` builds the origin from the authority the client
+        reached us on, because `c_fqdn` carries no port and would describe
+        every server not on 80/443 wrongly. The `Host` header is validated to
+        `host[:port]` and falls back to `c_fqdn` otherwise. This is the one
+        place that does derive a URL from `Host`, against the rule the HTTPS
+        redirect follows, and the comment says why the rule does not transfer:
+        a `Location` is followed and cacheable, where these go back to the
+        authenticated client that just sent the header, in a `no-store`
+        response, for it to call us on. `qm_web_base_url` overrides.
+  - [x] `primaryAccounts` named `mail` and `submission` but not `core`. jmapc
+        reads `core` first; a client may read any of the three.
+  - [x] `test/integration/test_jmap_client.py` — the probe kept as a test, so
+        the next regression is caught by somebody else's deserializer rather
+        than by ours. It skips itself when `jmapc` is not installed.
+        `test_jmap.py` gains the hostile-`Host` cases, which are the half a
+        client library cannot exercise.
+  - [x] Everything else jmapc touched worked unchanged: session discovery,
+        `Core/echo`, `Mailbox/get` with roles, `Email/set`/`query`/`get`
+        round-tripping through its models, `Identity/get`, blob upload and
+        download, and the per-account scoping on a blob. Verified against a
+        real `deploy/quackcit.sh start` instance as well as the harness.
+
+- [x] **The `k` right delegates room creation.** Left out of phase 4
+      deliberately: `k` ("create rooms under this one") was in the rights
+      legend but nothing read it, so a room administrator could delegate
+      *access* but not *creation*.
+  - [x] `citadel::CreatableFloors` / `CanCreateRoomOnFloor` — a caller may
+        create when their access level clears `qm_room_create_axlevel` (the
+        existing site-wide gate, unchanged), or they hold `k` on some room they
+        can see on that floor. A stored ACL row and an aide's blanket grant
+        both count. Personal rooms are skipped on purpose: their owner always
+        holds every right including `k`, and every user has one on floor 0, so
+        counting those would hand every logged-in user the run of the Main
+        Floor.
+  - [x] the answer is cheap when it is "no", because the sidebar asks it on
+        every page render. `EffectiveRights` only ever produces `k` for a
+        non-aide from a *stored* row — the derived set is `lrs`/`lrswi` — so
+        one query over `citadel_room_acl` settles the common case without
+        touching a room. `ListRooms` still decides visibility, so a `k` grant
+        on a room the caller cannot see stays unusable.
+  - [x] `/bbs/new`'s floor picker offers every floor to someone who clears the
+        axlevel gate, and only the floors a `k` grant opens to everyone else;
+        `POST` re-checks the specific floor submitted, so the picker being
+        right is a courtesy and not the enforcement.
+  - [x] `test_roomadmin.py`: the axlevel gate raised to aide-only so the
+        axlevel path cannot be what is actually passing, a second floor a `k`
+        grant does not reach, and revocation closing the door again.
+
+- [x] **The sidebar counts what is unread, and a message page moves.** The last
+      two gaps from the web review.
+  - [x] `SidebarFor` emits the `.count` span `qc.css` had described since the
+        sidebar was written and nothing ever produced, for every mail folder and
+        for the rooms with something new in them. It costs *fewer* queries than
+        before: one `ListRooms` plus one or two `RoomStatsBulk` calls, replacing
+        the four `FindUserRoom` lookups the groupware links used to make, since
+        those rooms are in the same listing.
+  - [x] `qm_web_sidebar_rooms` (default 10) caps the room half, most unread
+        first, and 0 drops it and its query. The sidebar renders on every page,
+        so the ceiling is the point. Folder counts are a handful of personal
+        rooms and are not gated.
+  - [x] `PageOpts::active` gained a `room:<num>` form, so the folder or room
+        being read is what gets `aria-current`, with "All rooms" as the fallback
+        for one the sidebar does not list — no room page is ever unmarked.
+  - [x] Newer / Older / Next unread above every message (`NavHtml`), each a
+        bounded min/max over the `(room_num, msgnum)` primary key rather than
+        `RoomMessages`: reading one message should not cost a listing of ten
+        thousand. "Next unread" means what the room's own listing means —
+        `\Seen` in a mail folder, the last-read pointer on a board — and is
+        suppressed when it would point where "Newer" already does.
+
+- [x] **The mail folder view**, and with it the two endpoints that had no way in.
+  - [x] `http/src/web_mailbox.cpp` renders `VIEW_MAILBOX`/`VIEW_DRAFTS`, which
+        every folder `EnsureUserRooms` provisions is. Until now they fell
+        through to the message-board renderer, so *the* webmail listing was
+        Subject / From / Date with no action anywhere on the page.
+  - [x] `/mail/move` and `/mail/flag` are reachable at last. Both handlers were
+        written, registered and correct, and nothing rendered a form that
+        posted to either — a message could not be filed or flagged from a
+        browser at all. They now take a selection (`FormAll("msgnum")`) rather
+        than one number, and `SelectedIn` runs every element through
+        `LoadMessageIn`, so a bulk action cannot become an IDOR by smuggling
+        somebody else's message number into the list.
+  - [x] One `<form>` with a `formaction` per button, so the bulk actions are
+        HTML rather than script. The select-all is the only scripted part and
+        is hidden by CSS until `qc.js` sets `data-js` — a control that did
+        nothing without script would be a lie rather than an enhancement.
+  - [x] Read state is `\Seen`, not the Citadel last-read pointer: a high-water
+        mark cannot express "this one, not that one". Opening a message in a
+        folder sets it, and it is the row IMAP already shares.
+  - [x] `flag` + `on` became one `set` field (`seen`/`unseen`/`flagged`/
+        `unflagged`) because an HTML button contributes exactly one name and
+        value, and the buttons share a form. Free to change: nothing could
+        reach the old contract.
+
+- [x] **Message search in the web front-end** (`/search`, plus a box in the page
+      header and "Search this room" on a room's toolbar).
+  - [x] `http/src/web_search.cpp`. The room set **is** the access control: it
+        enumerates rooms through `citadel::ListRooms` and `RoomUnlocked` — the
+        same helpers the pages use — and searches inside that set, so a `room=`
+        parameter naming anything outside it is ignored rather than turned into
+        a query. Private rooms stay invisible, zapped rooms stay forgotten,
+        another user's mailbox is unreachable, and a passworded room is not
+        searched until that session has unlocked it.
+  - [x] Two match paths, because `subject` and `author` are columns and a body
+        is not. Headers are one prepared statement over the whole store, using
+        `contains(lower(...), $1)` rather than `LIKE` so a term holding `%` or
+        `_` needs no escaping. Message text decodes each candidate through
+        `citadel::BodyText` — a `contains()` over `raw` would match transfer
+        encoding and header noise while missing every base64 body — and is
+        bounded by `qm_web_search_scan` (default 2000), with the page saying so
+        when it hits the bound.
+  - [x] `test/integration/test_http.py`: a subject-only term, a term that
+        exists only inside a base64 part (which is what proves `BodyText` is
+        being used), another user's mailbox holding the same term and never
+        appearing, a locked room before and after `/unlock`, room scoping,
+        date bounds, paging, and a term full of LIKE and HTML metacharacters.
+
+- [x] **Three bugs squashed from the 0.6.0 backlog.**
+  - [x] `c_version` no longer sticks at whatever an install was created with.
+        `deploy/quackcit.sh`'s `seed_site()` gained a `seed_version()` sibling
+        to `seed_fqdn()`: every `quackcit.sh start` now compares the stored
+        `c_version` against `qm_version()`'s and reconciles through
+        `qm_config_set` when they differ, so the documented manual
+        `quackcitadm.sh config set c_version` workaround is no longer needed.
+  - [x] `citadel_dav_names` rows no longer leak past a non-DAV delete.
+        `citadel::PruneDavNames` — an unconditional anti-join delete beside
+        `PruneTombstones`, since a binding is either orphaned or it isn't,
+        with no cutoff to tune — runs from the same best-effort housekeeping
+        `web_router.cpp` already rolls the dice on for tombstones and JMAP
+        blobs.
+  - [x] IMAP `SEARCH` renders native (format 0) messages through
+        `citadel::RenderRfc822` before matching, same as `FETCH` already did.
+        `SearchMatch` read `msg.raw` directly, which has no header block for a
+        native message at all — `FROM`/`TO`/`SUBJECT`/`HEADER` could never
+        match one, and `LARGER`/`SMALLER` disagreed with the `RFC822.SIZE`
+        `FETCH` reports for the same message. `test_imap.py` now seeds a
+        native message and asserts both.
+
+- [x] **JMAP Core + Mail** (RFC 8620 + RFC 8621) at `/jmap/`, on the same two
+      listeners, over the same rooms and messages IMAP serves.
+  - [x] `core/json.{hpp,cpp}` — written rather than vendored, because the
+        extension build has no package manager and DuckDB's bundled yyjson is
+        not exposed to extensions. What it *refuses* is the contract: bounded
+        depth and size, a number grammar walked rather than handed to `strtod`,
+        no literal control characters in strings, no unpaired surrogates, no
+        trailing content. `qm_json_*` scalars make all of that assertable from
+        `test/sql/json.test` with no socket.
+  - [x] `core/submission.{hpp,cpp}` — stamp, DKIM-sign, split local from
+        remote, deliver and queue. Extracted from `smtp_out` so the SMTP
+        submission listener and `EmailSubmission/set` are one implementation:
+        they differ only in how the message arrived.
+  - [x] `Mailbox/get|query|changes`, `Email/get|query|changes|set`,
+        `Thread/get`, `Identity/get`, `EmailSubmission/set|get`, `Core/echo`,
+        the Session resource, and blob upload and download — so a client can
+        attach something rather than only compose text.
+  - [x] `Email/changes` reuses `RoomChangeToken`/`RoomChangesSince` from the DAV
+        work — without the tombstones there would be no way to report a deleted
+        message, and `/changes` would not be implementable at all.
+  - [x] Unlike IMAP's `APPEND`, `Email/set` asks `citadel::CanPost`, and
+        `EmailSubmission/set` charges the same `policy::CheckRate` quota the
+        submission listener charges. A second door onto one mail path that
+        skipped either would make the rule advisory.
+  - [x] Deliberately absent: `Mailbox/changes` (nothing journals room creation,
+        so `cannotCalculateChanges` is the honest answer), push over EventSource
+        (`eventSourceUrl` is empty, which stops a client opening a stream that
+        would never carry anything), and the JMAP Calendars and Contacts
+        bindings — drafts nothing ships against, where CalDAV and CardDAV are
+        what a phone actually connects with.
+
+- [x] **CalDAV and CardDAV** over the groupware rooms, on the existing HTTP and
+      HTTPS listeners — not an extension of its own, because it is a second
+      projection of the rooms the web UI already renders rather than a new
+      service. `/dav/`, with `.well-known` discovery, principal and home sets,
+      `PROPFIND`, `PROPPATCH`, `GET`/`PUT`/`DELETE`, `calendar-query`,
+      `calendar-multiget`, `addressbook-query`, `addressbook-multiget` and
+      `sync-collection`.
+  - [x] `core/davxml.{hpp,cpp}` — an XML document reader over the existing
+        `xmlstream` tokenizer (resolving prefixes to namespace URIs, so matching
+        never depends on a prefix a client chose) and an element writer. The
+        first XML *writer* in the tree; XMPP concatenates strings.
+  - [x] The resource-name encoding, which is the one real subtlety.
+        `http::NormalizePath` percent-decodes *before* it splits a path into
+        segments, so percent-encoding cannot help: `%2F` decodes back to a `/`
+        and turns one segment into two. Names are encoded to unreserved bytes
+        only, with `~HH` for the rest and a leading `.` always escaped so no
+        name can be `.` or `..`.
+  - [x] `citadel_dav_names`, because a resource name is the client's to choose
+        and is not the object's UID. Required to match at first, which rejected
+        vdirsyncer outright — it PUTs to a random UUID of its own. Found by
+        pointing real clients at it (`caldav` 3.2.1 and vdirsyncer 0.20), which
+        is the only kind of test that could have.
+  - [x] `citadel_room_tombstones` plus `RoomChangeToken`/`RoomChangesSince`.
+        Additions were already discoverable by msgnum, so the insert path every
+        inbound message takes is untouched; removals left nothing behind at all,
+        which is why a deletion was invisible to any token derived from the
+        store.
+  - [x] `Role::Api` (named `Role::Dav` until JMAP reused it): Basic against the
+        same credential IMAP takes, through the same `LoginAllowed` throttle the
+        login form uses; 401 with a challenge rather than a redirect to
+        `/login`; no CSRF, which a client that has never seen an HTML form
+        cannot satisfy and does not need to.
+  - [x] Deliberately absent: `LOCK`/`UNLOCK` (we advertise `DAV: 1` only —
+        CalDAV's consistency story is ETags and `If-Match`, which is
+        implemented), `MKCALENDAR`/`MKCOL` (creating a calendar means creating a
+        room, which has a floor and an access level to decide), and the Notes
+        rooms (vNote is not a DAV resource type, and rewriting them as
+        `VJOURNAL` would lose the WebCit parity that is the reason they are
+        vNote).
+
+- [x] **Per-room management and self-serve rooms** (phase 4 of the web overhaul)
+  - [x] `citadel::CanAdminister` on the RFC 4314 `a` right, which
+        `EffectiveRights` already derives for an aide and for the owner of a
+        personal room. An aide delegates a room by granting it — from the web,
+        `quackcitadm.sh room acl`, or any IMAP client's `SETACL`. No new column,
+        no QuackCit-only bit, nothing only one protocol can see.
+  - [x] `http/src/web_rooms.cpp`: `/bbs/room/:n/settings` as a **`Role::User`**
+        route — preferences, an ACL editor with the rights legend, the room's
+        `room_<name>@` address, mailing-list presentation and membership (each
+        field through `listserv::SetField`, so a partial form cannot reset what
+        it does not show), the feeds pointed at the room, and deletion behind
+        typing the room's name.
+  - [x] two things stay aide-only, and the page says why: creating a **feed**
+        (`fetch::Feed` stores a plaintext password and `RunFeed` dials an
+        arbitrary host — an SSRF primitive with credential storage attached) and
+        turning a room into a **list** at all (that mints an inbound address and
+        a fan-out engine). A room administrator may poll a feed an aide already
+        aimed at their room, and *invite* a subscriber — by confirmation token,
+        never outright, so nobody signs up an address they do not read.
+  - [x] `/bbs/new` gated on `qm_room_create_axlevel`, default 6 so nothing
+        changes until an operator lowers it; an unparseable value reads as the
+        default rather than as 0. A restricted flag mask (no `QR_NETWORK`, no
+        file-area bits). The creator gets a full stored grant, which is what
+        makes them the administrator.
+  - [x] **private rooms became joinable.** `ListRooms` and `ResolveRoomNumFor`
+        hid every `QR_PRIVATE` room from every non-aide, consulting no ACL — so
+        a self-serve private room would have been invisible to the person who
+        had just created it. Both now honour a stored `l` grant, which is
+        exactly RFC 4314's lookup right.
+  - [x] **the mailbox keyspace is defended.** A public room's internal key *is*
+        its display name; a personal room's is `<usernum padded to 10>.<room>`.
+        A public room called `0000000002.Mail` squats the key user 2's Mail room
+        needs, and the loser fails on a unique constraint rather than on
+        anything a user could read. `IsReservedRoomName` refuses the shape in
+        `CreateRoom` **and** `UpdateRoom`, so a rename cannot reach it either.
+  - [x] the room-edit forms carry over flag bits they have no checkbox for. The
+        admin console's list omits `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR`, so
+        saving that page silently cleared them; a checkbox set that is not
+        exhaustive always does.
+  - [x] `KillRoom` refuses the Aide room, which `PostAideMessage` writes to
+        unconditionally — losing it breaks the server's own log channel rather
+        than merely removing a room. Personal folders are refused by the
+        settings page outright: renaming "Mail" would leave IMAP's INBOX and
+        every Sieve `fileinto` pointing at a room that no longer exists.
+  - [x] **`KillRoom` no longer leaves rows keyed to a room that is gone.** A
+        `citadel_lists` row outliving its room left `ResolveAddress` pointing
+        the list's inbound address at nothing; a `quackmail_feeds` row left
+        `RunDue` polling a feed with nowhere to put the result. `listserv` and
+        `fetch` both depend on `citadel_store`, so it cannot call into them and
+        should not learn their table names either — each registers a cleanup
+        with `RegisterRoomDeletedHook` from its own `EnsureSchema` and
+        `KillRoom` runs the set. A new table keyed by `room_num` means a hook
+        beside it, not an edit to `citadel_store.cpp`. `cit_room_kill` exposes
+        the whole thing to SQL (and to `quackcitadm.sh room kill`), which is
+        what makes it assertable in `test/sql/`.
+  - [x] `cit_room_rights(room, user)` — the *derived* view, which
+        `cit_room_acl` cannot show, so the predicate the front-ends ask is
+        assertable in SQL. `quackcitadm.sh room rights` beside it.
+  - [x] `test/sql/roomadmin.test` and `test/integration/test_roomadmin.py`,
+        which is mostly negative: a member without `a` cannot save settings, a
+        delegate cannot drop their own `a`, `anyone` cannot hold `a`, a stranger
+        404s on a private room and its settings alike, a feed for another room
+        is not runnable, and a flag the form does not offer survives a save.
+
+- [x] **Rich mail and a Sieve rule builder** (phase 3 of the web overhaul)
+  - [x] `core/src/mime_build.cpp` — one builder choosing the nesting
+        (plain / alternative / related / mixed), replacing the third hand-rolled
+        copy in the tree. Boundaries verified absent from every part's bytes;
+        transfer encoding chosen rather than fixed.
+  - [x] `core/src/html_sanitize.cpp` with two profiles: the existing deny-list
+        for *display* (defensible only behind the sandboxed frame) and a true
+        **allow-list** for *compose*, applied before the message is built,
+        because composed HTML is stored and re-served to other people.
+        28 evasions and 14 must-survive constructs asserted.
+  - [x] `cid:` inline images end to end: data: URIs from the editor become real
+        parts, and the serving route forces the type from a list of four —
+        `image/svg+xml` downloads rather than rendering.
+  - [x] `sieve::Decompose`/`Compose` over the AST that was already in
+        `core/src/sieve.cpp`. The script text stays the single source of truth;
+        anything the rule view cannot express is reported and left alone.
+  - [x] `http/assets/qc-compose.js` — hand-rolled contenteditable editor, no
+        dependency, degrading to the plain textarea when JS is off.
+  - [x] `/prefs/sieve` rule cards with add, delete and reorder, all plain form
+        posts and no JavaScript.
+  - [x] `test/sql/{mime,html_sanitize,sieve}.test` plus
+        `test/integration/test_richmail.py` and `test_sieve_rules.py`.
+
+- [x] **The remaining room views** (phase 2b of the web overhaul)
+  - [x] `core/contentline.{hpp,cpp}` — the line grammar vCard, iCalendar and
+        vNote share, extracted rather than copied a third time.
+  - [x] `core/vnote.{hpp,cpp}` — what real Citadel stores a sticky note in
+        (`text/vnote`), so WebCit and the Citadel clients can read ours. VJOURNAL
+        would have needed no new code but would not have been readable by them.
+  - [x] a viewer time zone: `web_tz` per user, `qm_default_tz` for the site, with
+        a picker on `/prefs`. `FormatTime` used `localtime_r`, so every timestamp
+        rendered in the *server's* zone.
+  - [x] `web_calendar.cpp` — month grid and agenda over `ical::Expand`, events
+        written with a TZID so a recurrence keeps its local hour across a DST
+        change. `VIEW_CALBRIEF` shares the handler.
+  - [x] `web_tasks.cpp` — VTODO with due/priority/progress, sorted as a work
+        queue, complete toggled by POST.
+  - [x] `web_notes.cpp` — a vNote card grid, colours validated before they reach
+        a style attribute.
+  - [x] `web_blog.cpp` — blog and journal, which hold *ordinary messages*: whole
+        entries newest-first, reusing `RenderMessage` and the existing compose
+        and read routes rather than growing a second edit path.
+  - [x] `test/sql/vnote.test` and `test/integration/test_groupware.py`.
+  - [x] deliberately **not** wiki (versioning, a name→euid resolver and a
+        markdown renderer — its own PR, and now shipped; see above) or
+        `VIEW_QUEUE` (Citadel's internal spool view, not a user view). Drafts
+        stay on the mailbox path under `/mail/`.
+
+- [x] **Groupware core and the contacts view** (phase 2a of the web overhaul)
+  - [x] a bundled IANA time zone database: `core/tz.{hpp,cpp}` +
+        `tools/gen_tzdata.py` → committed `core/src/tzdata.cpp` (598 zones, 341
+        distinct after dedup, 252 links, IANA 2026c), on the same terms as the
+        PSL. Verified against Python's `zoneinfo` over the same release: 318,136
+        offset/DST/abbreviation checks across every zone and 1971–2055, plus
+        71,760 wall-clock round trips, zero mismatches.
+  - [x] `core/vcard.{hpp,cpp}` — vCard 3.0/4.0, preserving unknown properties,
+        folding at 75 octets on a UTF-8 boundary.
+  - [x] `core/ical.{hpp,cpp}` — VEVENT/VTODO/VJOURNAL, a Component tree beside
+        a flat Item so an edit cannot drop an alarm, `EmitVtimezone` from the
+        bundled database, and recurrence that steps in **wall-clock** terms so a
+        weekly 09:00 meeting keeps its local hour across a DST change. Capped at
+        750 occurrences.
+  - [x] `citadel::UpsertByEuid`/`FindByEuid` and an index on
+        `citadel_messages.euid` (there were no indexes on that table at all).
+  - [x] `enum RoomView` extended with the numbering transcribed from
+        `libcitadel.h` on the oracle — 6 WIKI, 7 CALBRIEF, 8 JOURNAL, 9 DRAFTS,
+        10 BLOG, 11 QUEUE. A different, plausible-looking ordering was in
+        circulation and is wrong.
+  - [x] `web_views.cpp` dispatch on `default_view` with `?view=raw` as the
+        escape hatch, and `web_contacts.cpp`: browse, view, create, edit in
+        place, delete.
+  - [x] `test/sql/{tz,vcard,ical}.test` and `test/integration/test_contacts.py`,
+        which reads objects created in the browser back over IMAP.
+
+- [x] **Web: persistent connections, `/static` assets, a sidebar** (phase 1 of
+      the web overhaul)
+  - [x] keep-alive in `core/src/http.cpp`, bounded by 100 requests per
+        connection, a 5 s idle deadline and a 60 s connection ceiling. The first
+        request keeps the 15 s header budget the slow-loris defence relies on.
+  - [x] the invariant that makes it safe: any non-`Ok` read closes the
+        connection, because 413 and 411 answer without consuming the announced
+        body and those bytes would otherwise be read as the next request.
+        Regression test pipelines a request behind an oversized `Content-Length`.
+  - [x] `ServerController::SetMaxConnections` (`qm_http_max_connections`,
+        default 256; 0 = unlimited, so no other protocol changes). MEMORY.md
+        named the absence of a cap as the reason connections were closed, so it
+        had to land in the same commit.
+  - [x] `/static/*` with content-hashed immutable URLs, ETag/304, and bytes
+        compiled in from `tools/gen_assets.py` → committed `web_assets.cpp`.
+        CI runs `--check` so a stale generated file fails the build.
+  - [x] CSP gains `'self'` for script and style; the message-body frame
+        deliberately does not.
+  - [x] the stylesheet splits into inlined critical CSS + `/static/qc.css`;
+        `NavFor` becomes a grouped sidebar; `AdminNav`'s nineteen buttons become
+        six labelled groups; `Render` gains a `PageOpts` overload so no existing
+        call site moved.
+
+- [x] **Pull messages in from POP3, IMAP and RSS** (`qm_fetch` in
+      `quackmail_spool`, `core/src/fetch.cpp`)
+  - [x] the tree spoke all three protocols only as a server, so the clients are
+        new: `mail_client.cpp` (POP3 `UIDL`/`RETR`/`DELE`; IMAP `UID SEARCH` /
+        `UID FETCH BODY.PEEK[]` with literal handling and `UIDVALIDITY`),
+        `http_client.cpp`, `feed.cpp`
+  - [x] the HTTP client is separate from `core/http.cpp` on purpose: that one
+        refuses chunked transfer encoding, which is right for a server and fatal
+        for a client, because feed servers chunk
+  - [x] RSS 2.0 / RDF / Atom over the `xmlstream` tokenizer already in core for
+        XMPP — which gained CDATA support, without which the tag scanner stops
+        at the first `>` inside a feed's HTML payload
+  - [x] `quackmail_feed_seen` (POP3 UIDLs, IMAP `<uidvalidity>.<uid>`, RSS
+        guids) makes a poll idempotent; ETag/If-Modified-Since turn an unchanged
+        feed into a 304 with no body
+  - [x] messages are left on the server by default, and one dead source records
+        its error on its own row instead of stopping the others
+  - [x] `qm_feed_*` admin functions, `quackcitadm.sh feed`, `/admin/feeds`
+  - [x] `feed::Parse` is a pure function, so `test/sql/feed.test` pins down
+        every shape of feed offline; `test_fetch.py` points the new clients at
+        QuackCit's **own** POP3 and IMAP listeners, so there is no fixture
+        server to drift and any client/server disagreement surfaces there
+
+- [x] **Mailing list manager** (`quackmail_spool`, `core/src/listserv.cpp`)
+  - [x] a list *is* a room: `citadel_lists` / `citadel_list_subs` /
+        `citadel_list_held`, which is Citadel's `listrecp`/`digestrecp` model in
+        tables
+  - [x] distribution is a spooler over the room's message pointers, not a hook
+        in the SMTP handler — so a post from telnet, NNTP, webmail or `ENT0`
+        reaches subscribers, which a delivery-path hook would silently miss
+  - [x] RFC 2369/2919 `List-*` headers, a `<list>-bounces@` envelope, subject
+        tags and footers; inbound `DKIM-Signature`/`Authentication-Results`/
+        `Return-Path`/`List-*` stripped (the rewriting invalidates a signature,
+        and a sender-supplied `List-Unsubscribe` is a hijack)
+  - [x] self-service by mail (`-subscribe`, `-unsubscribe`, `-request`,
+        `-confirm-<token>`) and at `/lists`, both gated on a token mailed to the
+        address claimed; `multipart/digest` batching; a moderation queue where
+        approval posts into the room and the spooler does the sending
+  - [x] `qm_list_*` admin functions, `quackcitadm.sh list`, `/admin/lists`
+  - [x] `core/worker.hpp` — `PeriodicWorker`, lifted out of `smtp_out`'s relay
+        drainer and now shared by it. `util::RfcDate` and `net::Connect`
+        (with a connect timeout the old private copy lacked) lifted likewise
+  - [x] **`deploy/` starts background workers at all.** `qm_smtp_relay_start`
+        appeared nowhere in `deploy/`, so on a real install the outbound queue
+        was drained by nothing: submitted mail, alias forwards and Sieve
+        redirects all queued and never left. `quackcit_workers` now covers the
+        relay drainer and the listserv spooler.
+
+- [x] **Misc fixes and features.**
+  - [x] IMAPS: the implicit-TLS twin of the IMAP listener (993; dev 1993), so
+        every protocol now has one.
+  - [x] Deploy: `QUACKCIT_PORT_SMTP_IN` → `QUACKCIT_PORT_SMTP` and
+        `QUACKCIT_PORT_SMTPS` → `QUACKCIT_PORT_SUBMISSIONS`, named after the
+        service rather than the module. The old names still work for one release.
+  - [x] ANSI colour in the BBS shell, finally reading the long-plumbed
+        `US_COLOR` bit. Gated on TERMINAL-TYPE so a dumb terminal never sees an
+        escape, and the pager counts printable columns rather than bytes.
+  - [x] `citadel_sessions.host` is written at last: RWHO, the telnet who-list
+        and both web who-lists show where a session came from. The native
+        extension's duplicate session helpers are gone, which also fixed its
+        blank Client column.
+  - [x] System messages to the Aide room (`qm_aide_log`): new users, aide
+        actions, and optionally refused inbound mail (`qm_aide_log_rejects`,
+        off by default).
+  - [x] RFC 4314 IMAP ACLs — `SETACL`/`DELETEACL`/`GETACL`/`LISTRIGHTS`/
+        `MYRIGHTS` and the `ACL` capability, closing a parity gap with the
+        oracle. Rights are derived from the room and unioned with stored grants.
+  - [x] `citadel::CanPost`, one post predicate for the web front-end, NNTP,
+        telnet and `ENT0` — which had no check at all.
+  - [x] Public room mail at `room_<name>@<fqdn>`, opted in by granting `anyone`
+        the `p` right, plus RFC 5233 subaddressing (`user+detail@`) with
+        `envelope :detail`/`:user` in Sieve.
+  - [x] A bundled Public Suffix List behind DMARC's organizational domain,
+        with `qm_psl_org_domain`/`qm_psl_suffix` and `test/sql/psl.test`.
+  - [x] Web colour themes (per-user, with a site default) and a typed
+        `/admin/prefs` settings page beside the raw config list.
+- [x] **Phase 0 — GitHub sync.** Merged branches pruned; v0.3.0 re-cut as
+      **v0.3.1** (PR #9).
+- [x] **Phase 1 — POP3 parity + agent docs** (PR #10)
+  - [x] Citadel command set, wording and UPDATE-state semantics
+        (`STLS`, `LAST`, `TOP <n> <lines>`, CAPA, exact `-ERR` strings)
+  - [x] `qm_pop3s` implicit-TLS listener (Citadel's 995)
+  - [x] `citadel::RenderRfc822`/`MessageId` in core — the RFC822 view POP3 serves
+        for native messages (NNTP reuses it)
+  - [x] `test/integration/test_pop3.py`, sqllogictest rows, launcher, README
+  - [x] `CLAUDE.md` / `MEMORY.md` / `TODO.md`; `HANDOFF.md` removed
+  - [x] built and diffed against the oracle on `debian.lan`
+- [x] **Phase 2 — telnet + telnets BBS shell** (PR #11; `quackmail_telnet`,
+      dev 2300 / 2992, real 23/992 — the oracle has no telnet listener)
+  - [x] IAC option negotiation + line editing in `core/src/telnet.cpp`
+  - [x] presence/instant messages moved into core so telnet and native Citadel
+        sessions share the who-list and paging
+  - [x] commands from `citadel.rc`: login/new user, `G`oto, `K`nown rooms,
+        `U`ngoto, `M`ail, read `N`ew/`O`ld/`F`orward/`R`everse/`L`ast five,
+        `E`nter message, `W`ho is online, `P`age a user, `X` expert mode,
+        `?`Help, `T`erminate, and the `.` dot-command dispatcher
+  - [x] verified with the real `telnet` client; message posted over telnet reads
+        back over the native Citadel protocol
+- [x] **Phase 3 — NNTP + NNTPS** (PR #12; `quackmail_nntp`, dev 1119 / 1563)
+  - [x] reader parity with the oracle (CAPABILITIES, AUTHINFO, LIST ACTIVE/
+        NEWSGROUPS/OVERVIEW.FMT, GROUP/LISTGROUP, ARTICLE/HEAD/BODY/STAT,
+        NEXT/LAST, OVER/XOVER, NEWGROUPS, DATE, HELP, STARTTLS)
+  - [x] `RoomToNewsgroup`/`NewsgroupToRoom` + wildmat in core; personal room keys
+        padded to Citadel's `0000000002.Mail` form so group names match exactly
+  - [x] **POST**, plus `<message-id>` fetches and real `:bytes`/`:lines`
+  - known divergences from the oracle, all deliberate: posting-related
+    capabilities/flags, and RFC-correct `205` for QUIT (Citadel sends `221`).
+    Room ordering was also on this list until Phase 6 traced it to `cmd_lkra`
+    walking the room database in key order; `ListRooms` now matches.
+- [x] **Phase 4 — XMPP** (PR #13; `quackmail_xmpp`, 5222/5223; dev 15222/15223
+      because the oracle owns 5222 on the test box)
+  - [x] incremental XML stream tokenizer in core (no expat in the extension
+        build) + `net::ClientStream::WaitReadable`/`ReadAvailable` so a session
+        can push unsolicited stanzas
+  - [x] STARTTLS, SASL PLAIN, legacy `jabber:iq:auth`, bind, session, roster and
+        presence from `citadel_sessions`, `<message>` ↔ `citadel_express`,
+        vcard-temp, ping, disco, `503` fallback
+  - [x] verified against the oracle stanza by stanza; XMPP → native `GEXP`
+        confirmed live
+
+- [x] **Phase 5 — SMTP authentication, policy and operations** (PR #14)
+  - [x] `core/`: SPF (RFC 7208), DKIM sign+verify+keygen (6376, plus ed25519
+        from 8463), DMARC (7489), DNSBL lookups, and the DNS TXT/A/AAAA/PTR
+        queries they all need
+  - [x] `policy::` site policy in `core/src/mailpolicy.cpp` — hosted domains,
+        aliases and catch-alls, allow/block ACLs, DNSBL zones, DKIM keys,
+        per-user quotas, and the inbound audit log
+  - [x] inbound: checks run at the protocol stage they belong to, with
+        `Received:`/`Authentication-Results:`/`Received-SPF:` stamped on every
+        accepted message; rejects only on the sender's own `p=reject` or a
+        DNSBL listing, each overridable through `citadel_config`
+  - [x] outbound: DKIM signing at submission (one signature covers the local
+        copy and every queued copy) and per-recipient rate limiting, default
+        100/300 s and 500/24 h, refused with a transient `451`
+  - [x] LMTP listener (RFC 2033) in `smtp_in` — `LHLO`, per-recipient replies,
+        all spam checking bypassed; addressing and Sieve still apply
+  - [x] real RFC 5228 Sieve engine (lexer → parser → evaluator, multiple
+        actions with implicit keep) replacing the regex placeholder, and a real
+        RFC 5804 ManageSieve server replacing the stub
+  - [x] `deploy/quackcit.sh` + `quackcit.conf` (config-driven run/stop/status)
+        and `deploy/quackcitadm.sh` (CLI administration, over the launcher's
+        admin socket while the server holds the database file)
+  - [x] `test/sql/mailpolicy.test`, `test/sql/sieve.test`, and integration tests
+        for policy, LMTP and ManageSieve; README refreshed
+  - [x] built on `debian.lan`; `make test` (211 assertions) and all 12
+        integration tests green, including the 8 pre-existing ones
+  - [x] probed against real DNS: SPF follows `redirect=` and matches ip4 CIDRs
+        (gmail.com → pass/softfail/none), DMARC reads live policies
+        (google.com `p=reject`, gmail.com `p=none; sp=quarantine`), DKIM
+        fetches a real two-segment TXT key (github.com/s1), DNSBL detects
+        Spamhaus's 127.0.0.2 test entry with its code and reason
+  - [x] `deploy/` scripts exercised end to end: admin CLI works with the server
+        both up (0600 socket) and down, every listener binds its configured port
+  - [x] cross-read against the Citadel oracle on port 25 — fixed the SMTP
+        banner to lead with the configured FQDN, as Citadel requires
+  - [x] PR #14 opened
+  - remaining oracle divergences, all cosmetic and deliberate:
+        Citadel's EHLO reply is `250-Hello <helo> (<rdns> [<ip>])` where ours is
+        `250-quackmail greets <helo>` (matching would need a reverse-DNS lookup
+        per connection); Citadel offers `HELP` and advertises `AUTH` on port 25,
+        where our MX deliberately offers neither
+
+- [x] **Phase 6 — BBS shell depth + a web front-end (HTTP/HTTPS)** (PR #15)
+  - [x] `core/`: zapped rooms and room passwords in the previously dead
+        `citadel_room_state.flags`; `DeleteMessage`/`MoveMessage` lifted out of
+        the native extension; `ListUsers`/`GetUser`/`SetAxLevel`/`SetUserFlags`
+        with Citadel's canonical `US_*` bits in the equally dead
+        `citadel_users.flags`; `citadel_user_reg` (the eight `REGI` fields plus
+        a biography); `UpdateRoom`, floor rename/kill, and a batched
+        `RoomStatsBulk` so a room listing is one query instead of ~4N
+  - [x] `core/http.{hpp,cpp}`: an HTTP/1.1 server codec — request reader with
+        limits and deadlines, response writer, percent/urlencoded/multipart
+        codecs, HTML escaping, path normalization, cookies and a route matcher;
+        `net::ClientStream::ReadN` and opt-in `SetTimeouts` behind it
+  - [x] `quackmail_http`: server-rendered webmail, the BBS over the web, a
+        preferences area, and an admin console covering everything
+        `quackcitadm.sh` does
+  - [x] telnet: floors and the `;` submenu, zap and the `.Known` filters,
+        `S`kip/`A`bandon distinct from `G`oto, registration/bio/configuration,
+        the user listing, message delete/move and the `.Admin` family, NAWS
+        terminal sizing and a real pager — plus the four known bugs fixed
+  - [x] native `REGI`/`GREG`/`EBIO`/`RBIO`/`LIST`, so the official text client
+        sees the same registration data
+  - [x] `test/sql/http.test` and `test/sql/citadel_store.test`;
+        `quackcitadm.sh websession`; README, `quackcit.conf` and deploy wiring
+  - [x] `test/integration/test_http.py` — auth and session handling (the stored
+        token is the SHA-256, never the cookie), CSRF including the per-session
+        binding, account-enumeration resistance, IDOR from three angles, XSS
+        from both a raw and an RFC 2047-encoded hostile subject, the sandboxed
+        HTML part and its CSP, attachment framing, admin gating with
+        re-authentication, the DKIM private key staying off the page, the
+        HTTPS redirect, malformed-request handling, and a slow-loris regression
+  - [x] `test_telnet.py` extended: expert/floor mode persisting as `US_*` bits,
+        floor-grouped listings, `S`kip leaving a room unread where `G`oto does
+        not, zap (Lobby refused, `.KZ` listing, restored on visit), `.EG`
+        registration setting `US_REGIS`, `.RU` user listing, message deletion
+        unlinking the pointer but keeping the row, and aide gating
+  - [x] built clean on `debian.lan`; **243 sqllogictest assertions and all 13
+        integration tests green**
+  - [x] manual pass through the real `deploy/run_quackcit.py` launcher: every
+        listener bound, `quackcitadm.sh` driven over the launcher's admin
+        socket while the server held the database, each web page read as text,
+        and the BBS driven with the actual `telnet` client. Two things it
+        caught that no assertion would have: room badges read "Lobby of 0" when
+        nothing was unread (now "empty" / "N messages" / "3 new of 10"), and
+        the toggle wording did not match the text client. Confirmed end to end
+        that a message posted in the browser reads back over the native
+        Citadel protocol, and that `/admin/dkim` shows only the public key.
+  - [x] byte-level parity diff: the official `citadel` text client driven
+        against QuackCit (through the `LD_PRELOAD` port shim) and against the
+        oracle, same script, screens compared. It found three real divergences,
+        all fixed and re-verified:
+        - `PASS`/`NEWU` returned `0` for the `US_*` field, so the official
+          client never saw expert or floor mode — silently defeating the whole
+          point of persisting those bits. The reply now carries the real user
+          record, including the e-mail field and `last_call`.
+        - room listings were ordered by floor/listorder; the real server walks
+          the room database in key order, which puts every mailbox first
+        - `100` listings all said "listing follows"; the real server has
+          per-verb text ("Known rooms:", "Server info:", "msg:", ...)
+  - known divergences that remain, all deliberate: branding (node name, banner
+    text) and the NNTP posting support QuackCit adds on purpose
+- [x] **GitHub sync + TLS out of the box.**
+  - [x] every branch from PRs #9–#17 was fully merged into `main` with no open
+        PRs; the eight merged local branches and the three `origin/claude/*`
+        remote branches are gone, leaving `main`. (`xmpp` survives only because
+        it is checked out in a local worktree.)
+  - [x] `deploy/quackcit.sh` generates a self-signed certificate on first start
+        when none is configured, under `$QUACKCIT_TLS_DIR`. Until now
+        `start_call` skipped **every implicit-TLS listener** without one, so a
+        fresh install had no SMTPS/POP3S/TELNETS/NNTPS/XMPPS and — because
+        `qm_web_force_https` defaults to 1 — a web interface that redirected to
+        a port nothing was listening on. `core/src/tls.cpp`'s in-memory cert
+        did not help: ephemeral, per-listener, `CN=localhost`.
+  - [x] issued to `hostname -f` with `localhost`/`127.0.0.1`/`::1` SANs, ten
+        years, written through `.tmp` files so an interrupt cannot leave a
+        mismatched pair, key 0600 in a 0700 directory, and reused by every
+        restart. `QUACKCIT_TLS_CERT`/`_KEY` still win; a path that does not
+        resolve is now a startup error rather than a silent downgrade.
+        `QUACKCIT_TLS_AUTOGEN=0` restores the old behaviour.
+
+- [x] **Deploy scripts for the binary release.**
+  - [x] `deploy/` is POSIX shell end to end; `run_quackcit.py` and
+        `quackcit_admin.py` deleted. The server is the bundled DuckDB CLI
+        idling on a FIFO it holds open read-write, and that FIFO is the admin
+        channel `quackcitadm.sh` uses in place of the old JSON Unix socket
+  - [x] `quackcit_common.sh` — layout detection (checkout vs unpacked bundle,
+        nested vs flat extension tree), the listener table, SQL quoting, the
+        control channel; sourced by both entry points
+  - [x] `.github/workflows/release.yml` packages the scripts, `quackcit.conf`
+        and a `quackcit.service` template, so a release untars into
+        `/opt/quackmail` and runs

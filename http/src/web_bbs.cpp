@@ -1,4 +1,5 @@
 #include "web.hpp"
+#include "web_i18n.hpp"
 #include "web_views.hpp"
 
 #include "quackmail/citadel_msg.hpp"
@@ -6,6 +7,7 @@
 #include "quackmail/mime.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 
@@ -352,74 +354,11 @@ void GetBbsMessage(Ctx &ctx) {
 		quackmail::citadel::SetLastRead(ctx.con, ctx.username, room.room_num, msg.msgnum);
 		stats.last_read = msg.msgnum;
 	}
-	// In a mail folder, reading also sets \Seen. The folder listing shows that
-	// rather than the Citadel last-read pointer — a pointer is a high-water mark
-	// and cannot say "this one, not that one" — and it is the same flag IMAP
-	// shares, so opening a message here marks it read in a desktop client too.
-	if (room.mailbox_owner > 0) {
-		Exec(ctx.con,
-		     "INSERT INTO citadel_msg_flags (msgnum, username, flag) "
-		     "SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM citadel_msg_flags "
-		     "WHERE msgnum = $1 AND username = $2 AND flag = $3)",
-		     {Value::BIGINT(msg.msgnum), Value(ctx.username), Value("\\Seen")});
-	}
+	MarkSeen(ctx, room, msg.msgnum);
 
-	std::string body = "<p>" + Link(RoomHref(room), "Back to " + room.display_name) + "</p>";
-	body += RawHtml(NavHtml(ctx, room, msg, stats));
+	std::string body = RawHtml(NavHtml(ctx, room, msg, stats));
 	body += RenderMessage(ctx, room, msg);
 
-	std::string num = std::to_string(msg.msgnum);
-	body += "<div class=\"actions\">";
-	if (room.mailbox_owner > 0) {
-		// A personal mail folder: mail actions, which go through the submission
-		// path rather than posting into the room.
-		std::string q = "?room=" + std::to_string(room.room_num) + "&";
-		body += Link("/mail/compose" + q + "reply=" + num, "Reply", "btn sec");
-		body += Link("/mail/compose" + q + "reply=" + num + "&all=1", "Reply all", "btn sec");
-		body += Link("/mail/compose" + q + "forward=" + num, "Forward", "btn sec");
-
-		// Which way the flag button toggles depends on where the flag is now.
-		bool flagged = false;
-		if (auto fr = Exec(ctx.con,
-		                   "SELECT 1 FROM citadel_msg_flags WHERE msgnum = $1 AND username = $2 "
-		                   "AND flag = $3",
-		                   {Value::BIGINT(msg.msgnum), Value(ctx.username), Value("\\Flagged")})) {
-			flagged = fr->Cast<MaterializedQueryResult>().RowCount() > 0;
-		}
-		std::string here = RoomHref(room, "/msg/" + num);
-		body += FormStart(ctx, "/mail/flag", "inline") + Hidden("room", std::to_string(room.room_num)) +
-		        Hidden("msgnum", num) + Hidden("back", here) +
-		        "<button class=\"btn sec\" name=\"set\" value=\"" +
-		        A(flagged ? "unflagged" : "flagged") + "\">" + T(flagged ? "Clear flag" : "Flag") +
-		        "</button>" + FormEnd();
-
-		// Filing it somewhere else. The same endpoint the folder listing's bulk
-		// move posts to, with one message selected instead of several.
-		std::vector<std::pair<std::string, std::string>> folders;
-		for (auto &f : MailFolders(ctx)) {
-			if (f.room_num != room.room_num) {
-				folders.push_back({f.display_name, f.display_name});
-			}
-		}
-		if (!folders.empty()) {
-			body += FormStart(ctx, "/mail/move", "inline") +
-			        Hidden("room", std::to_string(room.room_num)) + Hidden("msgnum", num) +
-			        Select("folder", folders, "") + Button("Move", "sec") + FormEnd();
-		}
-
-		body += FormStart(ctx, "/mail/delete", "inline") + Hidden("room", std::to_string(room.room_num)) +
-		        Hidden("msgnum", num) +
-		        Button(room.display_name == "Trash" ? "Delete permanently" : "Move to Trash", "danger") +
-		        FormEnd();
-	} else {
-		if (!(room.qr_flags & quackmail::citadel::QR_READONLY)) {
-			body += Link(RoomHref(room, "/compose?reply=" + num), "Reply", "btn sec");
-		}
-		body += FormStart(ctx, RoomHref(room, "/delete"), "inline") + Hidden("msgnum", num) +
-		        Button("Delete", "danger") + FormEnd();
-	}
-	body += Link(RoomHref(room, "/msg/" + num + "/source"), "View source", "btn sec");
-	body += "</div>";
 
 	std::string subject = DecodeHeader(msg.subject);
 	Render(ctx, subject.empty() ? std::string("(no subject)") : subject, body, RoomPage(room));
@@ -681,23 +620,186 @@ std::string RoomHref(const Room &room, const std::string &suffix) {
 	return "/bbs/room/" + std::to_string(room.room_num) + suffix;
 }
 
-std::string RenderMessage(Ctx &ctx, const Room &room, const Message &msg) {
-	std::string out = "<div class=\"msghead\"><dl>";
-	auto row = [&out](const char *label, const std::string &value) {
-		if (!value.empty()) {
-			out += "<dt>" + T(label) + "</dt><dd>" + T(value) + "</dd>";
+// "Ada Lovelace <ada@example>" -> "Ada Lovelace"; a bare address is its own
+// display name. Purely presentational — nothing downstream parses these back.
+static std::string DisplayNameOf(const std::string &from) {
+	size_t lt = from.find('<');
+	if (lt == std::string::npos) {
+		return from;
+	}
+	std::string name = from.substr(0, lt);
+	while (!name.empty() && (name.back() == ' ' || name.back() == '"')) {
+		name.pop_back();
+	}
+	size_t i = 0;
+	while (i < name.size() && (name[i] == ' ' || name[i] == '"')) {
+		i++;
+	}
+	return name.empty() ? from : name.substr(i);
+}
+
+// The same string's address half, or "" when there is no angle-bracket form.
+static std::string AddressOf(const std::string &from) {
+	size_t lt = from.find('<');
+	size_t gt = from.rfind('>');
+	if (lt == std::string::npos || gt == std::string::npos || gt < lt) {
+		return std::string();
+	}
+	return from.substr(lt + 1, gt - lt - 1);
+}
+
+// The monogram for the avatar block: the first character of the display name,
+// upper-cased. Deliberately one *byte* only when it is ASCII — taking one byte
+// out of a UTF-8 name would emit a broken sequence, so anything non-ASCII falls
+// back to a placeholder rather than to mojibake.
+static std::string Initial(const std::string &from) {
+	std::string name = DisplayNameOf(from);
+	if (name.empty()) {
+		return "?";
+	}
+	unsigned char c = (unsigned char)name[0];
+	if (c < 0x80) {
+		return std::string(1, (char)toupper(c));
+	}
+	// A multi-byte first character: take the whole sequence, uppercased by the
+	// font rather than by us.
+	size_t len = 1;
+	while (len < name.size() && ((unsigned char)name[len] & 0xC0) == 0x80) {
+		len++;
+	}
+	return name.substr(0, len);
+}
+
+// In a mail folder, reading a message also sets \Seen. The folder listing shows
+// that rather than the Citadel last-read pointer — a pointer is a high-water
+// mark and cannot say "this one, not that one" — and it is the same flag IMAP
+// shares, so opening a message here marks it read in a desktop client too.
+//
+// A no-op outside a mailbox: a message board has only the last-read pointer,
+// and giving its messages per-user flags would make the two disagree.
+void MarkSeen(Ctx &ctx, const Room &room, int64_t msgnum) {
+	if (room.mailbox_owner <= 0) {
+		return;
+	}
+	Exec(ctx.con,
+	     "INSERT INTO citadel_msg_flags (msgnum, username, flag) "
+	     "SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM citadel_msg_flags "
+	     "WHERE msgnum = $1 AND username = $2 AND flag = $3)",
+	     {Value::BIGINT(msgnum), Value(ctx.username), Value("\\Seen")});
+}
+
+// The action bar for one message. Part of RenderMessage rather than of the page
+// around it, because the reading pane renders a message without a page around
+// it and must not end up with a different set of controls.
+//
+// The data-key attributes are what qc.js binds the keyboard shortcuts to: the
+// shortcut clicks the control that is already there rather than duplicating
+// what it does, so the two can never drift.
+static std::string MessageActions(Ctx &ctx, const Room &room, const Message &msg) {
+	std::string num = std::to_string(msg.msgnum);
+	std::string out = "<div class=\"toolbar msgactions\">";
+
+	// On a phone the list is hidden while the reader is open, so the way back
+	// has to be on the reader itself.
+	out += Link(RoomHref(room), Tr(ctx, "msg.back"), "btn sec backtolist hidewide");
+
+	if (room.mailbox_owner > 0) {
+		// A personal mail folder: mail actions, which go through the submission
+		// path rather than posting into the room.
+		std::string q = "?room=" + std::to_string(room.room_num) + "&";
+		out += ButtonGroup(
+		    "<a role=\"button\" class=\"secondary\" data-key=\"reply\" href=\"" +
+		    A("/mail/compose" + q + "reply=" + num) + "\">" + Icon("reply") + T(Tr(ctx, "msg.reply")) +
+		    "</a>"
+		    "<a role=\"button\" class=\"secondary\" data-key=\"replyall\" href=\"" +
+		    A("/mail/compose" + q + "reply=" + num + "&all=1") + "\">" + Icon("replyall") +
+		    T(Tr(ctx, "msg.reply_all")) + "</a>"
+		    "<a role=\"button\" class=\"secondary\" data-key=\"forward\" href=\"" +
+		    A("/mail/compose" + q + "forward=" + num) + "\">" + Icon("forward") +
+		    T(Tr(ctx, "msg.forward")) + "</a>");
+
+		// Which way the flag button toggles depends on where the flag is now.
+		bool flagged = false;
+		if (auto fr = Exec(ctx.con,
+		                   "SELECT 1 FROM citadel_msg_flags WHERE msgnum = $1 AND username = $2 "
+		                   "AND flag = $3",
+		                   {Value::BIGINT(msg.msgnum), Value(ctx.username), Value("\\Flagged")})) {
+			flagged = fr->Cast<MaterializedQueryResult>().RowCount() > 0;
 		}
-	};
-	row("Subject", DecodeHeader(msg.subject));
-	row("From", DecodeHeader(msg.author));
-	row("To", DecodeHeader(msg.recipient));
-	row("Date", FormatTime(ctx, msg.msgtime));
-	out += "</dl></div>";
+		std::string here = RoomHref(room, "/msg/" + num);
+		out += FormStart(ctx, "/mail/flag", "inline") + Hidden("room", std::to_string(room.room_num)) +
+		       Hidden("msgnum", num) + Hidden("back", here) +
+		       "<button class=\"secondary\" data-key=\"flag\" name=\"set\" value=\"" +
+		       A(flagged ? "unflagged" : "flagged") + "\">" + Icon("flag") +
+		       T(Tr(ctx, flagged ? "mailbox.clear_flag" : "msg.flag")) + "</button>" + FormEnd();
+
+		// Filing it somewhere else. The same endpoint the folder listing's bulk
+		// move posts to, with one message selected instead of several.
+		std::vector<std::pair<std::string, std::string>> folders;
+		for (auto &f : MailFolders(ctx)) {
+			if (f.room_num != room.room_num) {
+				folders.push_back({f.display_name, f.display_name});
+			}
+		}
+		if (!folders.empty()) {
+			out += FormStart(ctx, "/mail/move", "inline") +
+			       Hidden("room", std::to_string(room.room_num)) + Hidden("msgnum", num) +
+			       Select("folder", folders, "") + Button(Tr(ctx, "msg.move"), "sec") + FormEnd();
+		}
+
+		out += FormStart(ctx, "/mail/delete", "inline") + Hidden("room", std::to_string(room.room_num)) +
+		       Hidden("msgnum", num) +
+		       "<button class=\"outline danger\" data-key=\"trash\">" + Icon("trash") +
+		       T(Tr(ctx, room.display_name == "Trash" ? "mailbox.delete_forever" : "mailbox.to_trash")) +
+		       "</button>" + FormEnd();
+	} else {
+		if (!(room.qr_flags & quackmail::citadel::QR_READONLY)) {
+			out += "<a role=\"button\" class=\"secondary\" data-key=\"reply\" href=\"" +
+			       A(RoomHref(room, "/compose?reply=" + num)) + "\">" + Icon("reply") +
+			       T(Tr(ctx, "msg.reply")) + "</a>";
+		}
+		out += FormStart(ctx, RoomHref(room, "/delete"), "inline") + Hidden("msgnum", num) +
+		       "<button class=\"outline danger\" data-key=\"trash\">" + Icon("trash") +
+		       T(Tr(ctx, "msg.delete")) + "</button>" + FormEnd();
+	}
+	out += Link(RoomHref(room, "/msg/" + num + "/source"), Tr(ctx, "msg.source"), "btn sec");
+	return out + "</div>";
+}
+
+std::string RenderMessage(Ctx &ctx, const Room &room, const Message &msg) {
+	std::string subject = DecodeHeader(msg.subject);
+	std::string author = DecodeHeader(msg.author);
+	std::string recipient = DecodeHeader(msg.recipient);
+
+	// The subject leads, the way it does in every mail client — the old
+	// four-row definition list buried it as one field among four.
+	std::string out;
+	if (!subject.empty()) {
+		out += "<h2 class=\"subj\">" + T(subject) + "</h2>";
+	}
+
+	out += "<div class=\"msghead\">";
+	// A monogram rather than a fetched avatar: there is no image to fetch, no
+	// third party to ask for one, and it still gives the eye something stable
+	// to track down a thread.
+	out += "<div class=\"avatar\" aria-hidden=\"true\">" + T(Initial(author)) + "</div>";
+	out += "<div class=\"meta\"><div class=\"line1\">";
+	out += "<span class=\"who\">" + T(DisplayNameOf(author)) + "</span>";
+	std::string addr = AddressOf(author);
+	if (!addr.empty() && addr != DisplayNameOf(author)) {
+		out += "<span class=\"addr\">" + T(addr) + "</span>";
+	}
+	out += "<span class=\"when\">" + T(FormatTime(ctx, msg.msgtime)) + "</span>";
+	out += "</div>";
+	if (!recipient.empty()) {
+		out += "<dl><dt>" + T(Tr(ctx, "msg.to")) + "</dt><dd>" + T(recipient) + "</dd></dl>";
+	}
+	out += "</div></div>";
 
 	// format_type 4 is RFC822/MIME; anything else is native Citadel text.
 	if (msg.format_type != 4) {
 		out += "<pre class=\"body\">" + T(quackmail::citadel::BodyText(msg)) + "</pre>";
-		return out;
+		return MessageActions(ctx, room, msg) + out;
 	}
 
 	auto entity = quackmail::mime::ParseEntity(msg.raw);
@@ -721,10 +823,7 @@ std::string RenderMessage(Ctx &ctx, const Room &room, const Message &msg) {
 		// Served from its own route into a sandboxed frame, so the sender's
 		// markup gets an opaque origin and its own restrictive policy instead
 		// of running inside this page. See the /html handler in web_mail.cpp.
-		out += "<p class=\"muted\">HTML version" + std::string(text ? " (the plain text above is the same "
-		                                                             "message)"
-		                                                           : "") +
-		       ":</p>";
+		out += "<p class=\"muted\">" + T(Tr(ctx, text ? "msg.html_alt" : "msg.html_only")) + "</p>";
 		out += "<iframe class=\"htmlpart\" sandbox src=\"" +
 		       A(RoomHref(room, "/msg/" + std::to_string(msg.msgnum) + "/html")) + "\"></iframe>";
 	}
@@ -741,15 +840,15 @@ std::string RenderMessage(Ctx &ctx, const Room &room, const Message &msg) {
 			continue;
 		}
 		std::string label = p.filename.empty() ? p.content_type : p.filename;
-		attach += "<li>" +
-		          Link(RoomHref(room, "/msg/" + std::to_string(msg.msgnum) + "/part/" + p.section), label) +
-		          " <span class=\"muted\">" + T(p.content_type) + ", " + T(FormatBytes(p.size_bytes)) +
-		          "</span></li>";
+		attach += "<a href=\"" +
+		          A(RoomHref(room, "/msg/" + std::to_string(msg.msgnum) + "/part/" + p.section)) +
+		          "\" download>" + Icon("clip") + "<span>" + T(label) + "</span>" +
+		          "<span class=\"size\">" + T(FormatBytes(p.size_bytes)) + "</span></a>";
 	}
 	if (!attach.empty()) {
-		out += "<h2>Attachments</h2><ul>" + RawHtml(attach) + "</ul>";
+		out += "<div class=\"attach\">" + RawHtml(attach) + "</div>";
 	}
-	return out;
+	return MessageActions(ctx, room, msg) + out;
 }
 
 void RegisterBbsRoutes(std::vector<Route> &out) {

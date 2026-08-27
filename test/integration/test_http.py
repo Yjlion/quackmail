@@ -13,6 +13,7 @@ build/release/extension.
 """
 import base64
 import hashlib
+import html
 import http.cookiejar
 import os
 import re
@@ -476,11 +477,16 @@ def main():
         assert "allow-scripts" not in page, "the HTML frame allows scripts"
         assert "allow-same-origin" not in page, "the HTML frame is not a separate origin"
 
-        status, headers, html = request(op, f"{BASE}/bbs/room/{mail_room}/msg/{mime_num}/html")
+        status, headers, html_part = request(op, f"{BASE}/bbs/room/{mail_room}/msg/{mime_num}/html")
         assert status == 200
         assert headers.get("Content-Type", "").startswith("text/html")
         frame_csp = headers.get("Content-Security-Policy", "")
         assert "default-src 'none'" in frame_csp, frame_csp
+        # The page CSP gained connect-src 'self' for htmx. This frame must not
+        # have: it renders markup written by whoever sent the mail, and a
+        # fetch() back to our origin from inside it is exactly what the sandbox
+        # exists to prevent.
+        assert "connect-src" not in frame_csp, frame_csp
         # img-src carries 'self' so a cid: image — which travelled inside the
         # message and reveals nothing by loading — can be served from our own
         # route. The frame is sandboxed with no allow-same-origin, so this grants
@@ -488,8 +494,8 @@ def main():
         assert "img-src 'self' data:" in frame_csp, frame_csp
         # Remote images stay behind the ?images=1 opt-in: those are trackers.
         assert "https:" not in frame_csp.split("img-src")[1].split(";")[0], frame_csp
-        assert "<script>" not in html, "the sanitizer left a script tag"
-        assert "onclick" not in html, "the sanitizer left an event handler"
+        assert "<script>" not in html_part, "the sanitizer left a script tag"
+        assert "onclick" not in html_part, "the sanitizer left an event handler"
 
         # Attachments are never served as the sender's type.
         status, headers, blob = request(op, f"{BASE}/bbs/room/{mail_room}/msg/{mime_num}/part/3")
@@ -631,9 +637,14 @@ def main():
         assert 'name="msgnum"' in page, "the folder listing has no per-message checkbox"
         assert 'formaction="/mail/flag"' in page, "the bulk bar does not reach /mail/flag"
         assert 'name="folder"' in page, "the bulk bar offers no move target"
-        # The select-all only works with script, so it is hidden until qc.js
-        # marks the document rather than sitting there doing nothing.
-        assert "jsonly" in page, "the select-all is not gated on script"
+        # The select-all is an ordinary control now: scripting is assumed, so
+        # there is nothing to hide it behind.
+        assert 'class="pickall"' in page, "the folder listing has no select-all"
+        # The listing is the two-pane shell, and each row links into the reader.
+        assert 'class="panes' in page, "the folder listing is not the two-pane shell"
+        # EscapeAttr renders '=' as &#61;, so the href has to be unescaped before
+        # it can be matched — or compared against.
+        assert "open&#61;" in page, "the folder listing offers no reading-pane link"
         tok = csrf_of(page)
 
         def in_room(room_num, msgnum):
@@ -775,8 +786,11 @@ def main():
         assert f'href="/bbs/room/{mail_room}"' in page, "the inbox does not link to its room"
 
         # The count is the room's unread total, not a decoration.
+        # The link carries its glyph between the href and the label now, so the
+        # match has to step over the <svg> rather than assume the span is first.
         m = re.search(
-            r'href="/bbs/room/%d"[^>]*><span>Inbox</span><span class="count">(\d+)</span>' % mail_room,
+            r'href="/bbs/room/%d"(?:(?!</a>).)*?'
+            r'<span>Inbox</span><span class="count">(\d+)</span>' % mail_room,
             page,
         )
         assert m, "the inbox link carries no count"
@@ -796,7 +810,8 @@ def main():
         ).fetchone()[0] == 0, "mark-all-read left messages unseen in a mail folder"
         _, _, page = request(op, f"{BASE}/prefs")
         m = re.search(
-            r'href="/bbs/room/%d"[^>]*><span>Inbox</span><span class="count">' % mail_room, page
+            r'href="/bbs/room/%d"(?:(?!</a>).)*?'
+            r'<span>Inbox</span><span class="count">' % mail_room, page
         )
         assert not m, "the inbox still shows a count after being marked read"
 
@@ -992,9 +1007,9 @@ def main():
         # test, and GET /login while authenticated redirects instead of
         # rendering the form.
         _, _, page = request(opener(), BASE + "/login")
-        assert '<html lang="en">' in page, "the login page does not declare its language"
+        assert '<html lang="en"' in page, "the login page does not declare its language"
         _, _, prefs = request(op, BASE + "/prefs")
-        assert '<html lang="en">' in prefs, "a signed-in page does not declare its language"
+        assert '<html lang="en"' in prefs, "a signed-in page does not declare its language"
         assert 'name="locale"' in prefs, "there is no language preference on /prefs"
         status, _, _ = request(
             op, BASE + "/prefs/settings",
@@ -1013,6 +1028,113 @@ def main():
         )
         _, _, prefs = request(op, BASE + "/prefs")
         assert 'value="xx" selected' not in prefs, "an unknown locale was stored"
+
+        # ---- i18n coverage --------------------------------------------------
+        # A real second language, not a scaffold. Switching to it must change
+        # the chrome, and — this is the part worth asserting — must not leave
+        # any *key* on the page: Tr() returns the key itself when the catalog
+        # has no entry, so a bare "nav." or "mailbox." in the body is exactly
+        # what an untranslated string looks like.
+        _, _, prefs = request(op, BASE + "/prefs")
+        status, _, _ = request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "locale": "de"},
+        )
+        assert status == 303, "saving German returned " + str(status)
+        _, _, de = request(op, BASE + "/mail/")
+        assert '<html lang="de"' in de, "the page did not declare German"
+        assert "Verfassen" in de, "the sidebar is still English under de"
+        leaked = re.findall(r">\s*((?:nav|mail|mailbox|msg|pager|compose|keys)\.[a-z_]+)\s*<", de)
+        assert not leaked, f"untranslated catalog keys reached the page: {sorted(set(leaked))}"
+
+        # French too, so the third column is not write-only.
+        _, _, prefs = request(op, BASE + "/prefs")
+        request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "locale": "fr"},
+        )
+        _, _, fr = request(op, BASE + "/mail/")
+        assert '<html lang="fr"' in fr, "the page did not declare French"
+        assert "Écrire" in fr, "the sidebar is still English under fr"
+
+        # Back to following the site default, so nothing below reads German.
+        _, _, prefs = request(op, BASE + "/prefs")
+        request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "locale": ""},
+        )
+
+        # Accept-Language decides for a visitor with no preference and no site
+        # default — which is the only way an anonymous page can be in the
+        # reader's language at all.
+        _, _, page = request(opener(), BASE + "/login", headers={"Accept-Language": "de-CH,de;q=0.9"})
+        assert '<html lang="de"' in page, "Accept-Language was ignored on /login"
+        assert "Anmelden" in page, "the login form is still English under Accept-Language: de"
+        # A language this build has no catalog for falls through rather than
+        # pinning the page to something Tr() cannot serve.
+        _, _, page = request(opener(), BASE + "/login", headers={"Accept-Language": "ja"})
+        assert '<html lang="en"' in page, "an unknown Accept-Language was not ignored"
+        # q-values are honoured rather than the first tag winning.
+        _, _, page = request(opener(), BASE + "/login",
+                             headers={"Accept-Language": "en;q=0.3, fr;q=0.9"})
+        assert '<html lang="fr"' in page, "Accept-Language q-values were ignored"
+
+        # ---- themes ---------------------------------------------------------
+        # "auto" is the absence of the attribute, because that is the state
+        # Pico's prefers-color-scheme block is written for; pinning one sets it.
+        _, _, page = request(op, BASE + "/mail/")
+        assert "data-theme" not in page.split(">", 1)[0] + page[:200], "auto emitted a data-theme"
+        _, _, prefs = request(op, BASE + "/prefs")
+        request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "dark",
+             "tz": "", "locale": ""},
+        )
+        _, _, page = request(op, BASE + "/mail/")
+        assert 'data-theme="dark"' in page, "the dark theme did not set data-theme"
+        _, _, prefs = request(op, BASE + "/prefs")
+        request(
+            op, BASE + "/prefs/settings",
+            {"_csrf": csrf_of(prefs), "width": "80", "height": "24", "theme": "auto",
+             "tz": "", "locale": ""},
+        )
+
+        # ---- the reading pane -----------------------------------------------
+        # One URL, two renderings. Without the header it is the whole page —
+        # which is what keeps every assertion in this file meaningful; with it,
+        # only the fragment htmx swaps in.
+        inbox = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'Mail' AND mailbox_owner = "
+            "(SELECT usernum FROM citadel_users WHERE username = 'webuser')"
+        ).fetchone()[0]
+        _, _, listing = request(op, f"{BASE}/bbs/room/{inbox}")
+        m = re.search(r'href="([^"]*open&#61;\d+)"', listing)
+        assert m, "the folder listing offers no reading-pane link"
+        opened = html.unescape(m.group(1))
+
+        _, _, whole = request(op, BASE + opened)
+        assert "<!doctype html>" in whole.lower(), "?open= did not return a whole page"
+        assert "msglist" in whole, "?open= dropped the listing"
+        assert 'id="reader"' in whole and "msghead" in whole, "?open= did not render the message"
+
+        _, _, frag = request(op, BASE + opened, headers={"HX-Request": "true"})
+        assert "<!doctype html>" not in frag.lower(), "an htmx request got a whole page"
+        assert "msglist" not in frag, "the fragment carried the listing"
+        assert "msghead" in frag, "the fragment did not contain the message"
+
+        # The pane is still subject to the same ownership check as /msg/:m —
+        # `open` is a client-supplied message number and skipping that would be
+        # a direct IDOR.
+        other = con.execute(
+            "SELECT msgnum FROM citadel_room_msgs WHERE room_num <> ? LIMIT 1", [inbox]
+        ).fetchone()
+        if other:
+            _, _, sneak = request(op, f"{BASE}/bbs/room/{inbox}?open={other[0]}",
+                                  headers={"HX-Request": "true"})
+            assert "msghead" not in sneak, "?open= served a message from another room"
 
         # ---- logout -------------------------------------------------------
         # Logout ends *this* session, not every session for the account — the
@@ -1190,8 +1312,36 @@ def main():
         assert "immutable" in headers["Cache-Control"], headers["Cache-Control"]
         assert "no-store" not in headers["Cache-Control"], "an asset was marked no-store"
         assert headers["ETag"], "an asset was served with no ETag"
-        assert "--accent" in css, "the stylesheet did not contain its own rules"
+        assert ".msglist" in css, "the stylesheet did not contain its own rules"
         etag = headers["ETag"]
+
+        # The vendored dependencies are linked and actually served. A stale
+        # web_assets.cpp shows up here as a 404 rather than as an unstyled page
+        # somebody has to notice by eye.
+        m = re.search(r'href="(/static/pico\.[0-9a-f]+\.css)"', login_page)
+        assert m, "the login page did not link Pico"
+        status, headers, pico = request(opener(), BASE + m.group(1))
+        assert status == 200, f"{m.group(1)} returned {status}"
+        assert "--pico-background-color" in pico, "the Pico we served is not Pico"
+
+        m = re.search(r'src="(/static/htmx\.min\.[0-9a-f]+\.js)"', login_page)
+        assert m, "the login page did not link htmx"
+        status, headers, htmx = request(opener(), BASE + m.group(1))
+        assert status == 200, f"{m.group(1)} returned {status}"
+        assert headers["Content-Type"].startswith("application/javascript"), headers["Content-Type"]
+
+        # htmx.config.allowEval is set to false in qc.js, which is the whole
+        # reason the policy below can keep refusing 'unsafe-eval'.
+        _, headers, _ = request(opener(), BASE + "/login")
+        csp = headers["Content-Security-Policy"]
+        assert "'unsafe-inline'" not in csp, csp
+        assert "'unsafe-eval'" not in csp, csp
+        # htmx's XHR needs connect-src stated: with default-src 'none' and no
+        # connect-src it falls back to 'none' and every pane swap is blocked.
+        # 'self' and nothing else — an injected script must have nowhere to
+        # exfiltrate to.
+        assert "connect-src 'self'" in csp, csp
+        assert "connect-src *" not in csp, csp
 
         # The conditional GET.
         status, headers, body = request(opener(), BASE + css_url, headers={"If-None-Match": etag})
