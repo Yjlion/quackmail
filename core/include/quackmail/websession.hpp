@@ -27,7 +27,19 @@ struct Session {
 	std::string csrf; // the raw CSRF token to put in this session's forms
 	bool tls = false; // the session was established over TLS
 	int64_t axlevel = 0;
+	// This browser's row in citadel_sessions, so the web appears in RWHO beside
+	// telnet and XMPP. 0 when presence could not be registered.
+	int64_t presence_id = 0;
+	// Whether that row is due a refresh. Set on the same once-a-minute schedule
+	// the idle window is rewritten on, so a page load that also fetches a
+	// stylesheet and four icons costs one UPDATE rather than six.
+	bool presence_stale = false;
 };
+
+// How often a browser is expected to refresh its presence row. Declared to
+// RegisterSession, which is what lets ReapSessions hold it to the promise: a
+// closed tab has no close event to unregister on.
+constexpr int64_t kWebHeartbeatSeconds = 60;
 
 struct SessionRow {
 	std::string token_hash;

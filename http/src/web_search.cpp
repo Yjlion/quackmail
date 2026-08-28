@@ -382,6 +382,32 @@ void GetSearch(Ctx &ctx) {
 		return;
 	}
 
+	// Sorted before the page is sliced out, not after: sorting the rendered page
+	// would reorder twenty results out of two hundred and call it a sort. The
+	// Table below sorts again on the same key, which is a no-op on an already
+	// ordered slice and keeps the two from having separate opinions.
+	{
+		std::string key = ctx.req.Param("sort");
+		bool desc = ctx.req.Param("dir") == "desc";
+		auto less = [&](const Hit &a, const Hit &b) {
+			if (key == "from") {
+				return quackmail::util::Lower(a.author) < quackmail::util::Lower(b.author);
+			}
+			if (key == "subject") {
+				return quackmail::util::Lower(a.subject) < quackmail::util::Lower(b.subject);
+			}
+			if (key == "date") {
+				return a.msgtime < b.msgtime;
+			}
+			return false;
+		};
+		if (key == "from" || key == "subject" || key == "date") {
+			std::stable_sort(hits.begin(), hits.end(), [&](const Hit &a, const Hit &b) {
+				return desc ? less(b, a) : less(a, b);
+			});
+		}
+	}
+
 	int64_t total_pages = (int64_t)((hits.size() + (size_t)per - 1) / (size_t)per);
 	if (page > total_pages) {
 		page = total_pages;
@@ -407,8 +433,9 @@ void GetSearch(Ctx &ctx) {
 		return nullptr;
 	};
 
-	body += "<div class=\"wrap\"><table><tr>" + Head("Subject") + Head("From") + Head("Room") +
-	        Head("Date") + "</tr>";
+	Table table(ctx, "search-results",
+	            {Column("subject", "Subject"), Column("from", "From"), Column("", "Room"),
+	             Column("date", "Date", "", true)});
 	for (size_t i = begin; i < end; i++) {
 		const Room *room = room_named(hits[i].room_num);
 		if (!room) {
@@ -418,15 +445,13 @@ void GetSearch(Ctx &ctx) {
 		if (subject.empty()) {
 			subject = "(no subject)";
 		}
-		body += "<tr>";
-		body += "<td>" +
-		        Link(RoomHref(*room, "/msg/" + std::to_string(hits[i].msgnum)), subject) + "</td>";
-		body += Cell(DecodeHeader(hits[i].author));
-		body += "<td>" + Link(RoomHref(*room), room->display_name) + "</td>";
-		body += Cell(FormatTime(ctx, hits[i].msgtime));
-		body += "</tr>";
+		table.Add()
+		    .Html(Link(RoomHref(*room, "/msg/" + std::to_string(hits[i].msgnum)), subject), subject)
+		    .Text(DecodeHeader(hits[i].author))
+		    .Html(Link(RoomHref(*room), room->display_name), room->display_name)
+		    .Html(T(FormatTime(ctx, hits[i].msgtime)), std::to_string(hits[i].msgtime));
 	}
-	body += "</table></div>";
+	body += table.Render();
 
 	if (total_pages > 1) {
 		body += "<div class=\"pager\">";

@@ -70,6 +70,22 @@ void Put(Note &n, const std::string &name, const std::string &value) {
 	n.props.emplace_back(name, value);
 }
 
+// Remove a projected field from the property list.
+//
+// The counterpart to Put, and the half that was missing: props is the list
+// Parse preserved so another client's geometry survives an edit here, which
+// means it still holds the *old* value of every field we project. Emitting only
+// when the new value is non-empty left the old one in place, so clearing a
+// note's colour or switching it from HTML back to plain text did nothing at all.
+void Drop(Note &n, const std::string &name) {
+	for (size_t i = 0; i < n.props.size(); i++) {
+		if (n.props[i].first == name) {
+			n.props.erase(n.props.begin() + (long)i);
+			return;
+		}
+	}
+}
+
 } // namespace
 
 bool Parse(const std::string &text, std::vector<Note> &out) {
@@ -135,10 +151,16 @@ std::string Emit(const Note &note) {
 	}
 	Put(n, "SUMMARY", n.summary);
 	Put(n, "BODY", n.body);
-	if (!n.color.empty()) {
+	// Empty is a value: "this note has no colour" has to erase the property, not
+	// leave whatever was parsed out of the stored copy.
+	if (n.color.empty()) {
+		Drop(n, "X-OUTLOOK-COLOR");
+	} else {
 		Put(n, "X-OUTLOOK-COLOR", n.color);
 	}
-	if (!n.content_type.empty()) {
+	if (n.content_type.empty()) {
+		Drop(n, "X-QM-FORMAT");
+	} else {
 		Put(n, "X-QM-FORMAT", n.content_type);
 	}
 

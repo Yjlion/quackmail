@@ -182,7 +182,9 @@ std::string BuildMessage(const HeaderList &headers, const std::vector<BuildPart>
 
 // Choose a transfer encoding for a part: 8bit for text that is already clean,
 // quoted-printable for text with long lines or control characters, base64 for
-// anything binary. Exposed because the choice is worth asserting.
+// anything binary, and 8bit for message/* whatever it contains (RFC 2046
+// §5.2.1 permits nothing else around an embedded message). Exposed because the
+// choice is worth asserting.
 std::string ChooseEncoding(const BuildPart &part);
 
 } // namespace mime

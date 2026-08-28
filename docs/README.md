@@ -20,11 +20,12 @@ are the detail.
   what is implemented, and what is not.
 - **[The BBS](bbs.md)** — the native Citadel protocol, the server-side text
   client a plain `telnet` reaches, NNTP and XMPP.
-- **[The web interface](web.md)** — webmail, the BBS in a browser, the
-  groupware room views, CalDAV/CardDAV/JMAP, and the security posture.
+- **[The web interface](web.md)** — webmail, the BBS in a browser, chat and
+  presence, the groupware room views, CalDAV/CardDAV/JMAP, and the security
+  posture.
 - **[Mail](mail.md)** — SPF, DKIM, DMARC and DNSBL on the way in; signing,
-  queueing and rate limits on the way out; Sieve filtering; the IMAP/POP3
-  gateways over the room store.
+  queueing and rate limits on the way out; Sieve filtering and out-of-office;
+  storage quotas; the IMAP/POP3 gateways over the room store.
 - **[Mailing lists and feeds](lists.md)** — fanning a room out to subscribers,
   and pulling remote mailboxes and RSS/Atom into one.
 

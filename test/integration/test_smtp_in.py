@@ -113,9 +113,94 @@ def main():
 
     check_policy(con)
     check_room_mail_and_subaddressing(con)
+    check_storage_quota(con)
 
     print("PASS: inbound MX validates recipients, delivers local mail, POP3 retrieves it,")
-    print("      honours domains, aliases and block rules, and routes room + subaddressed mail")
+    print("      honours domains, aliases, block rules, storage quotas, and routes room +")
+    print("      subaddressed mail")
+
+
+def check_storage_quota(con):
+    """Per-user storage quotas, enforced at RCPT and at DATA."""
+    assert con.execute("SELECT ok FROM qm_user_add('quotaman', 'pw')").fetchone()[0]
+    assert con.execute("SELECT ok FROM qm_user_add('roomy', 'pw')").fetchone()[0]
+
+    note = con.execute(f"SELECT note FROM qm_smtp_in_start('{HOST}', {SMTP_PORT})").fetchone()[0]
+    assert note == "started", f"server did not start: {note}"
+    time.sleep(0.3)
+
+    def send(rcpts, subject, body="x" * 2000):
+        msg = MIMEText(body + "\n")
+        msg["Subject"] = subject
+        msg["From"] = "bob@example.invalid"
+        msg["To"] = ", ".join(rcpts)
+        s = smtplib.SMTP(HOST, SMTP_PORT, timeout=10)
+        try:
+            s.sendmail("bob@example.invalid", rcpts, msg.as_string())
+            return None
+        finally:
+            try:
+                s.quit()
+            except Exception:
+                pass
+
+    try:
+        # Unlimited by default: the ceiling only exists once somebody sets one.
+        assert send(["quotaman@quackmail.test"], "before any quota") is None
+
+        used = con.execute(
+            "SELECT used_bytes FROM qm_quota_status('quotaman')").fetchone()[0]
+        assert used > 2000, f"delivered mail did not count towards usage: {used}"
+
+        # The wire size is what is counted, and for a message that arrived by
+        # mail (format 4) that is the stored blob exactly. This is the number
+        # IMAP reports as RFC822.SIZE, so the two cannot drift.
+        rows = con.execute(
+            "SELECT size_bytes, octet_length(raw) FROM citadel_messages "
+            "WHERE format_type = 4"
+        ).fetchall()
+        assert rows and all(a == b for a, b in rows), f"size_bytes disagrees with the blob: {rows}"
+
+        # A ceiling just under what is already stored, so the mailbox is full.
+        assert con.execute(
+            "SELECT ok FROM qm_quota_set('quotaman', ?)", [used - 1]).fetchone()[0]
+        assert con.execute("SELECT over FROM qm_quota_status('quotaman')").fetchone()[0]
+
+        # 452, not 550: a full mailbox clears, so the sender must hold and retry
+        # rather than bounce the message back to a stranger.
+        try:
+            send(["quotaman@quackmail.test"], "over quota")
+            raise AssertionError("an over-quota mailbox should refuse mail")
+        except smtplib.SMTPRecipientsRefused as e:
+            code, text = list(e.recipients.values())[0]
+            assert code == 452, f"over-quota reply was {code} {text!r}, wanted 452"
+            assert b"4.2.2" in text, f"wrong enhanced status: {text!r}"
+
+        # The message that crossed the line was still accepted — the refusal is
+        # on the *next* one. This is what pins IsOver against WouldExceed at RCPT.
+        n = con.execute(
+            "SELECT count(*) FROM citadel_room_msgs rm JOIN citadel_rooms r "
+            "ON r.room_num = rm.room_num WHERE r.mailbox_owner = "
+            "(SELECT usernum FROM citadel_users WHERE username = 'quotaman')"
+        ).fetchone()[0]
+        assert n >= 1, "the message that filled the mailbox was not kept"
+
+        # One full mailbox does not refuse the message for everybody else it was
+        # addressed to.
+        assert send(["quotaman@quackmail.test", "roomy@quackmail.test"], "shared") is None
+        got = con.execute(
+            "SELECT count(*) FROM citadel_room_msgs rm JOIN citadel_rooms r "
+            "ON r.room_num = rm.room_num WHERE r.mailbox_owner = "
+            "(SELECT usernum FROM citadel_users WHERE username = 'roomy')"
+        ).fetchone()[0]
+        assert got == 1, f"the recipient with room got {got} messages"
+
+        # Lifting the ceiling lets mail through again without anything else
+        # changing: nothing was cached, so nothing has to be invalidated.
+        assert con.execute("SELECT ok FROM qm_quota_set('quotaman', 0)").fetchone()[0]
+        assert send(["quotaman@quackmail.test"], "unlimited again") is None
+    finally:
+        con.execute("CALL qm_smtp_in_stop()").fetchall()
 
 
 def check_policy(con):

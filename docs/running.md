@@ -72,7 +72,8 @@ is the control channel's error return path, and `quackcitadm.sh` reads a failed
 request's error text out of it byte for byte. Neither file is rotated yet.
 
 `quackcitadm.sh` administers the server — users, domains, aliases, access
-rules, DKIM keys, quotas, Sieve scripts, the outbound queue and server config:
+rules, DKIM keys, send and storage quotas, Sieve scripts, the outbound queue and
+server config:
 
 ```bash
 deploy/quackcitadm.sh user add alice s3cret
@@ -83,7 +84,8 @@ deploy/quackcitadm.sh acl block ip 192.0.2.0/24 'noisy range'
 deploy/quackcitadm.sh acl allow ip 192.0.2.7 'except this host'
 deploy/quackcitadm.sh rbl add zen.spamhaus.org
 deploy/quackcitadm.sh dkim keygen example.com mail
-deploy/quackcitadm.sh ratelimit status alice
+deploy/quackcitadm.sh ratelimit status alice               # how much may they send
+deploy/quackcitadm.sh quota set alice 500MB               # how much may they keep
 deploy/quackcitadm.sh queue list
 deploy/quackcitadm.sh help
 ```

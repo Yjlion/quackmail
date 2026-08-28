@@ -570,13 +570,37 @@ def main():
             "the object's UID is not its Message-ID, so the two views disagree about identity"
         im.logout()
 
+        # ---- the storage-quota backstop -------------------------------------
+        #
+        # A DAV PUT is one of the doors that never asks about quota itself: it
+        # goes straight to citadel::InsertMessage, as do IMAP APPEND, NNTP POST,
+        # Citadel ENT0 and webmail's own Sent Items copy. Enforcing only at the
+        # front-ends that remembered would leak within a release, so the check
+        # lives inside InsertMessage — and this is the test that proves it.
+        con.execute(f"SELECT ok FROM qm_quota_set('{USER}', 1)").fetchall()
+        try:
+            status, _, _ = d.go("PUT", calendar + "over-quota.ics", EVENT.replace(
+                EVENT_UID, "over-quota-uid").encode(),
+                {"Content-Type": "text/calendar; charset=utf-8"})
+            assert status >= 400, f"an over-quota PUT was accepted with {status}"
+        finally:
+            con.execute(f"SELECT ok FROM qm_quota_set('{USER}', 0)").fetchall()
+
+        # And it works again once the ceiling is lifted, so the refusal was the
+        # quota rather than something else about the request.
+        status, _, _ = d.go("PUT", calendar + "over-quota.ics", EVENT.replace(
+            EVENT_UID, "over-quota-uid").encode(),
+            {"Content-Type": "text/calendar; charset=utf-8"})
+        assert status in (200, 201, 204), f"the PUT still failed after lifting the quota: {status}"
+
     finally:
         con.execute("CALL qm_http_stop()")
         con.execute("CALL qm_imap_stop()")
         con.close()
 
     print("PASS: CalDAV and CardDAV (discovery, Basic auth, PROPFIND, REPORT, "
-          "conditional writes, sync-collection, permissions, IMAP parity)")
+          "conditional writes, sync-collection, permissions, storage quota, "
+          "IMAP parity)")
 
 
 if __name__ == "__main__":

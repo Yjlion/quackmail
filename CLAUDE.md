@@ -85,6 +85,11 @@ or a timer-driven background worker.
 - `spf.hpp`, `dkim.hpp` (sign, verify, keygen), `dmarc.hpp`, `rbl.hpp` — mail
   authentication. `dkim::Verify` takes an injectable `KeyLookup` so it can read
   locally stored keys instead of DNS; that is what makes it testable offline.
+- `quota.hpp` — per-user **storage** quota (not `mailpolicy.hpp`'s send quota):
+  `Usage`/`UsageAlways`, `WouldExceed`, `IsOver`, `SetQuota`, `ListQuotas`.
+  The choke point is inside `citadel::InsertMessage`, gated by
+  `qm_quota_enforce_store` — a front-end that only checks at its own door leaks
+  through IMAP `APPEND`, NNTP `POST`, `ENT0` or a DAV `PUT`.
 - `sieve.hpp` — RFC 5228 `Evaluate` (returns a *list* of actions with implicit
   keep) and `Check` for ManageSieve validation, plus `imap4flags` (flags ride on
   the KEEP/FILEINTO they were set for), `variables` and `vacation`. `Evaluate`

@@ -97,8 +97,16 @@ presence, `vcard-temp`, `urn:xmpp:ping` and service discovery.
 
 Like Citadel, there is no stored roster: **the roster and presence list are the
 people currently logged in** — read from `citadel_sessions`, so XMPP clients,
-telnet users and native Citadel clients all see one another. A `<message>` is
-written to `citadel_express`, the same queue the native protocol's `SEXP`/`GEXP`
-uses, and queued messages are pushed to connected XMPP clients as `<message>`
-stanzas. Sending from XMPP and reading with `GEXP` from a Citadel client (or the
-BBS shell) works in both directions.
+telnet users, native Citadel clients and anyone signed in to the web interface
+all see one another. A `<message>` is written to `citadel_express`, the same
+queue the native protocol's `SEXP`/`GEXP` uses, and queued messages are pushed
+to connected XMPP clients as `<message>` stanzas. Sending from XMPP and reading
+with `GEXP` from a Citadel client, from the BBS shell, or in a browser at
+`/chat` works in every direction: there is one queue, and it is a table.
+
+A browser is a presence row like any other — see
+[Who is online](web.md) — which also means a `citadel_sessions` row now has to
+be *reaped* rather than only unregistered. A front-end that declares a
+heartbeat is held to it; one that cannot (a telnet session blocked in a read
+has no timer) unregisters on a clean disconnect and is otherwise swept after
+`qm_session_stale_secs`.

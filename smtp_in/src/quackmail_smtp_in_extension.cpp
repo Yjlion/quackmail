@@ -13,6 +13,7 @@
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/mime.hpp"
+#include "quackmail/quota.hpp"
 #include "quackmail/rbl.hpp"
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
@@ -418,6 +419,34 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				stream.WriteLine("550 5.1.1 No such user here");
 				continue;
 			}
+			// Storage quota, at RCPT rather than at DATA: a full mailbox should
+			// cost the sender one command, not a whole message body.
+			//
+			// IsOver and not WouldExceed, because this server advertises SIZE but
+			// never reads the parameter back off MAIL FROM — there is no size to
+			// test yet. The sized check is in LocalDeliver, which has the bytes.
+			//
+			// 452 4.2.2 and not 552: a mailbox that is full now may not be full in
+			// an hour, and a transient code is what makes a sending MTA hold the
+			// message and retry rather than bounce it to a stranger.
+			//
+			// Refused only when *every* destination is full — one envelope
+			// recipient may expand through an alias to several users, and one of
+			// them having room is reason enough to take the mail. This is the same
+			// rule reject_reason() applies at DATA.
+			if (!r.destinations.empty()) {
+				bool all_full = true;
+				for (const auto &dest : r.destinations) {
+					if (!quota::IsOver(con, util::LocalPart(dest))) {
+						all_full = false;
+						break;
+					}
+				}
+				if (all_full) {
+					stream.WriteLine("452 4.2.2 Mailbox full");
+					continue;
+				}
+			}
 			s.rcpts.push_back(std::move(r));
 			stream.WriteLine("250 2.1.5 OK");
 		} else if (verb == "DATA") {
@@ -604,6 +633,30 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				return reason;
 			};
 
+			// The same fold for a full mailbox. Separate from reject_reason
+			// because the two earn different codes: a Sieve reject is the user's
+			// own permanent decision (5.x.x), a full mailbox is a condition that
+			// clears (4.x.x), and folding them would turn a deferral the sender
+			// would have retried into a bounce they cannot.
+			auto over_quota = [&](const Recipient &r) -> bool {
+				if (r.destinations.empty()) {
+					return false;
+				}
+				for (const auto &dest : r.destinations) {
+					bool found = false;
+					for (const auto &full : outcome.over_quota) {
+						if (full == dest) {
+							found = true;
+							break;
+						}
+					}
+					if (!found) {
+						return false; // at least one destination had room
+					}
+				}
+				return true;
+			};
+
 			// What happened to one envelope recipient, in words, for both the
 			// audit log and the LMTP reply.
 			auto list_detail = [&](const Recipient &r) -> std::string {
@@ -618,18 +671,20 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 
 			for (const auto &r : s.rcpts) {
 				std::string refused = ok ? reject_reason(r) : "";
-				const char *disposition = !ok ? "defer"
-				                              : (!refused.empty() ? "reject"
-				                                                  : (quarantine ? "quarantine" : "accept"));
+				bool full = ok && refused.empty() && over_quota(r);
+				const char *disposition = (!ok || full) ? "defer"
+				                                        : (!refused.empty() ? "reject"
+				                                                            : (quarantine ? "quarantine" : "accept"));
 				std::string list_note = list_detail(r);
 				log_one(r.envelope, disposition,
 				        !ok ? outcome.err
-				            : (!list_note.empty()
-				                   ? list_note
-				                   : (!r.destinations.empty()
-				                          ? refused
-				                          : (!r.rooms.empty() ? std::string("delivered to room")
-				                                              : "forwarded"))));
+				            : (full ? std::string("mailbox full")
+				                    : (!list_note.empty()
+				                           ? list_note
+				                           : (!r.destinations.empty()
+				                                  ? refused
+				                                  : (!r.rooms.empty() ? std::string("delivered to room")
+				                                                      : "forwarded")))));
 
 				// LMTP owes one reply per envelope recipient; SMTP sends a
 				// single reply for the transaction, emitted after this loop.
@@ -638,6 +693,8 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 				}
 				if (!ok) {
 					stream.WriteLine("451 4.3.0 <" + r.envelope + "> local storage error");
+				} else if (full) {
+					stream.WriteLine("452 4.2.2 <" + r.envelope + "> mailbox full");
 				} else if (!refused.empty()) {
 					stream.WriteLine("550 5.7.1 <" + r.envelope + "> " + refused);
 				} else if (!list_note.empty()) {
@@ -652,8 +709,22 @@ void HandleInbound(DatabaseInstance &db, net::ClientStream &stream, ServerContro
 			}
 
 			if (!lmtp) {
+				// SMTP has one reply for the whole transaction, so a full mailbox
+				// defers it only when *every* envelope recipient was full — the
+				// same rule RCPT applies, and for the same reason. A recipient
+				// that resolved to a public room or an off-site forward is never
+				// over quota, so those keep the message accepted.
+				bool all_full = !s.rcpts.empty();
+				for (const auto &r : s.rcpts) {
+					if (!over_quota(r)) {
+						all_full = false;
+						break;
+					}
+				}
 				if (!ok) {
 					stream.WriteLine("451 4.3.0 Local storage error");
+				} else if (all_full) {
+					stream.WriteLine("452 4.2.2 Mailbox full");
 				} else if (!outcome.rejected.empty()) {
 					stream.WriteLine("550 5.7.1 " + outcome.rejected[0].second);
 				} else {

@@ -35,7 +35,7 @@ const Locale kLocales[] = {
     {"fr", "Français", 2},
 };
 
-const char *Column(const Msg &m, size_t col) {
+const char *Translated(const Msg &m, size_t col) {
 	switch (col) {
 	case 1:
 		return m.de;
@@ -165,6 +165,25 @@ const Msg kMessages[] = {
     {"compose.save_draft", "Save as draft", "Als Entwurf speichern", "Enregistrer comme brouillon"},
     {"compose.cancel", "Cancel", "Abbrechen", "Annuler"},
     {"compose.address_book", "Address book", "Adressbuch", "Carnet d’adresses"},
+    {"compose.from", "From", "Von", "De"},
+    {"compose.bcc", "Bcc", "Bcc", "Cci"},
+    {"compose.bcc_note", "Blind copies receive the message; nobody else is told they did.",
+     "Blindkopien erhalten die Nachricht, ohne dass es jemand anderes erfährt.",
+     "Les destinataires en copie cachée reçoivent le message sans que personne d’autre le sache."},
+    {"compose.attach_limit", "One message, attachments included, may be up to 10 MB.",
+     "Eine Nachricht darf mit Anhängen bis zu 10 MB groß sein.",
+     "Un message, pièces jointes comprises, peut atteindre 10 Mo."},
+    {"compose.attach_remove", "Remove", "Entfernen", "Retirer"},
+    {"compose.attach_toobig", "That is over the 10 MB limit. Remove something first.",
+     "Das überschreitet die Grenze von 10 MB. Entfernen Sie zuerst etwas.",
+     "Cela dépasse la limite de 10 Mo. Retirez d’abord quelque chose."},
+    {"compose.forward_attached", "The original message is attached, with its own attachments.",
+     "Die ursprüngliche Nachricht ist mitsamt ihren Anhängen angehängt.",
+     "Le message d’origine est joint, avec ses propres pièces jointes."},
+    {"compose.search", "Search contacts", "Kontakte durchsuchen", "Rechercher des contacts"},
+    {"compose.saved", "Draft saved", "Entwurf gespeichert", "Brouillon enregistré"},
+    {"compose.unsaved", "This message has not been sent yet.",
+     "Diese Nachricht wurde noch nicht gesendet.", "Ce message n’a pas encore été envoyé."},
 
     // ---- the keyboard help overlay ------------------------------------------
     {"keys.title", "Keyboard shortcuts", "Tastenkürzel", "Raccourcis clavier"},
@@ -182,6 +201,45 @@ const Msg kMessages[] = {
     {"keys.search", "Search", "Suchen", "Rechercher"},
     {"keys.goto", "Go to the inbox", "Zum Posteingang", "Aller à la boîte de réception"},
     {"keys.help", "This list", "Diese Liste", "Cette liste"},
+
+    // ---- chat (instant messages) --------------------------------------------
+    {"chat.title", "Chat", "Chat", "Discussion"},
+    {"chat.people", "People", "Personen", "Personnes"},
+    {"chat.everyone", "Everyone", "Alle", "Tout le monde"},
+    {"chat.to", "To", "An", "À"},
+    {"chat.message", "Message", "Nachricht", "Message"},
+    {"chat.send", "Send", "Senden", "Envoyer"},
+    {"chat.empty", "Nothing yet.", "Noch nichts.", "Rien pour l'instant."},
+    {"chat.note",
+     "Instant messages reach Citadel, telnet and XMPP clients alike — they all read the same queue.",
+     "Sofortnachrichten erreichen Citadel-, Telnet- und XMPP-Clients gleichermaßen — alle lesen "
+     "dieselbe Warteschlange.",
+     "Les messages instantanés atteignent aussi bien les clients Citadel, telnet que XMPP — ils "
+     "lisent tous la même file."},
+
+    // ---- out of office ------------------------------------------------------
+    {"vacation.title", "Out of office", "Abwesenheitsnotiz", "Absence du bureau"},
+    {"vacation.enabled", "Reply automatically", "Automatisch antworten", "Répondre automatiquement"},
+    {"vacation.enabled_label", "I am away", "Ich bin abwesend", "Je suis absent"},
+    {"vacation.subject", "Subject", "Betreff", "Objet"},
+    {"vacation.message", "Message", "Nachricht", "Message"},
+    {"vacation.frequency", "Answer each person", "Jede Person antworten",
+     "Répondre à chaque personne"},
+    {"vacation.save", "Save", "Speichern", "Enregistrer"},
+    {"vacation.scripts", "Filter scripts", "Filterskripte", "Scripts de filtrage"},
+    {"vacation.note",
+     "Mailing lists, bounces and other automatic mail are never answered, and each correspondent "
+     "hears from you at most once in the period above.",
+     "Mailinglisten, Unzustellbarkeitsnachrichten und andere automatische Post werden nie "
+     "beantwortet, und jeder Korrespondent hört höchstens einmal im obigen Zeitraum von Ihnen.",
+     "Les listes de diffusion, les rejets et les autres courriers automatiques ne reçoivent jamais "
+     "de réponse, et chaque correspondant a de vos nouvelles au plus une fois par période "
+     "ci-dessus."},
+
+    // ---- preferences --------------------------------------------------------
+    {"prefs.storage", "Storage", "Speicher", "Stockage"},
+    {"prefs.storage_of", "%1 of %2", "%1 von %2", "%1 sur %2"},
+    {"prefs.storage_nolimit", "%1 (no limit)", "%1 (kein Limit)", "%1 (sans limite)"},
 };
 
 // key -> row, built once. The catalog is consulted on the order of a hundred
@@ -305,7 +363,7 @@ std::string Tr(const Ctx &ctx, const std::string &key) {
 		// a screenshot, which is what gets a missing string noticed.
 		return key;
 	}
-	const char *text = Column(*it->second, ColumnFor(EffectiveLocale(ctx)));
+	const char *text = Translated(*it->second, ColumnFor(EffectiveLocale(ctx)));
 	if (text == nullptr || text[0] == '\0') {
 		// Present but untranslated in this locale. English reads as a mixed
 		// page; the key reads as debris.

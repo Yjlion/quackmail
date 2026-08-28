@@ -61,20 +61,83 @@ std::string ItemHref(const Room &room, int64_t msgnum, const char *suffix = "") 
 	return RoomHref(room, "/item/" + std::to_string(msgnum) + suffix);
 }
 
-// The note's own colour, if it set one. Validated rather than interpolated
-// blindly: this ends up in a style attribute, and the value came out of a file
-// somebody else's client wrote.
-std::string ColorStyle(const std::string &color) {
+// Is this a colour we are willing to put in a stylesheet? Validated rather than
+// interpolated blindly: the value came out of a file somebody else's client
+// wrote, and it ends up in CSS rather than in escaped text.
+bool ValidColor(const std::string &color) {
 	if (color.size() != 7 || color[0] != '#') {
-		return std::string();
+		return false;
 	}
 	for (size_t i = 1; i < color.size(); i++) {
 		if (std::isxdigit((unsigned char)color[i]) == 0) {
-			return std::string();
+			return false;
 		}
 	}
-	return " style=\"--note:" + color + "\"";
+	return true;
 }
+
+// The colours one page turned out to need, gathered as it renders and emitted
+// once as a nonced <style> block.
+//
+// This used to be a style attribute per note, which never worked: style-src
+// carries a nonce and no 'unsafe-inline', and a nonce covers <style> elements
+// only — never attributes — so every browser dropped the declaration and both
+// the swatches and the cards fell back to the card background. White, in the
+// light theme, which is the bug.
+//
+// A class per colour rather than a fixed palette class per swatch, because
+// X-OUTLOOK-COLOR is whatever hex the client that wrote the note chose: real
+// Outlook's five differ from ours, and a note somebody else coloured should
+// still show its own colour rather than being rounded to the nearest we offer.
+class ColorSheet {
+public:
+	// The tint class for `color`, or "" for a note that set none. Records the
+	// colour so Css() can declare it.
+	std::string ClassFor(const std::string &color) {
+		if (!ValidColor(color)) {
+			return std::string();
+		}
+		std::string lower = color;
+		for (auto &ch : lower) {
+			ch = (char)std::tolower((unsigned char)ch);
+		}
+		size_t i = 0;
+		for (; i < colors_.size(); i++) {
+			if (colors_[i] == lower) {
+				break;
+			}
+		}
+		if (i == colors_.size()) {
+			colors_.push_back(lower);
+		}
+		return "note-c" + std::to_string(i);
+	}
+
+	// The class attribute for an element that is tinted or not. `base` is the
+	// element's own class; "tinted" is what qc.css keys the forced dark text off.
+	std::string Attr(const std::string &base, const std::string &color) {
+		std::string tint = ClassFor(color);
+		std::string all = base;
+		if (!tint.empty()) {
+			if (!all.empty()) {
+				all += " ";
+			}
+			all += "tinted " + tint;
+		}
+		return all.empty() ? std::string() : " class=\"" + A(all) + "\"";
+	}
+
+	std::string Css() const {
+		std::string css;
+		for (size_t i = 0; i < colors_.size(); i++) {
+			css += ".note-c" + std::to_string(i) + "{--note:" + colors_[i] + "}";
+		}
+		return css;
+	}
+
+private:
+	std::vector<std::string> colors_;
+};
 
 // The Post-it palette. A vector rather than a fixed array because Edit()
 // hands it straight to the swatch renderer, which needs to know how many
@@ -94,7 +157,7 @@ const std::vector<std::pair<std::string, std::string>> &NoteColors() {
 // radio inputs, each hidden behind a styled <span> sibling — the same
 // checked-sibling-selector trick as the mobile nav toggle, so this needs no
 // script.
-std::string ColorSwatches(const std::string &selected) {
+std::string ColorSwatches(ColorSheet &sheet, const std::string &selected) {
 	std::string out = "<div class=\"swatches\">";
 	for (auto &c : NoteColors()) {
 		bool checked = c.first == selected;
@@ -102,7 +165,10 @@ std::string ColorSwatches(const std::string &selected) {
 		       "\" title=\"" + A(c.second) + "\">";
 		out += "<input type=\"radio\" name=\"color\" value=\"" + A(c.first) + "\"" +
 		       (checked ? " checked" : "") + ">";
-		out += "<span" + RawHtml(ColorStyle(c.first)) + "></span>";
+		// No "tinted" on a swatch dot: that class is the note card's dark-text
+		// override, and a dot has no text.
+		std::string tint = sheet.ClassFor(c.first);
+		out += "<span" + (tint.empty() ? std::string() : " class=\"" + A(tint) + "\"") + "></span>";
 		out += "<span class=\"vh\">" + T(c.second) + "</span>";
 		out += "</label>";
 	}
@@ -120,13 +186,14 @@ void Index(Ctx &ctx, const Room &room) {
 	toolbar += Link(RoomHref(room) + "?view=raw", "View as messages", "btn sec");
 	toolbar += "</div>";
 
+	ColorSheet sheet;
 	std::string body;
 	if (notes.empty()) {
 		body += "<p class=\"muted\">No notes here yet.</p>";
 	} else {
 		body += "<div class=\"notegrid\">";
 		for (auto &s : notes) {
-			body += "<div class=\"note\"" + RawHtml(ColorStyle(s.note.color)) + ">";
+			body += "<div" + RawHtml(sheet.Attr("note", s.note.color)) + ">";
 			body += "<h3>" + Link(ItemHref(room, s.msgnum), vnote::TitleOf(s.note)) + "</h3>";
 			// A preview, not the whole note: a pinboard of full essays is not a
 			// pinboard. The detail page has the rest.
@@ -145,6 +212,7 @@ void Index(Ctx &ctx, const Room &room) {
 	opts.view = (int)room.default_view;
 	opts.wide = true;
 	opts.toolbar = toolbar;
+	opts.style = sheet.Css();
 	Render(ctx, room.display_name, body, opts);
 }
 
@@ -207,7 +275,8 @@ void Edit(Ctx &ctx, const Room &room, int64_t msgnum) {
 	                {kMarkdownContentType, "Markdown"}},
 	               note.content_type) +
 	        "</label>";
-	body += "<div class=\"field\"><span>Colour</span>" + ColorSwatches(note.color) + "</div>";
+	ColorSheet sheet;
+	body += "<div class=\"field\"><span>Colour</span>" + ColorSwatches(sheet, note.color) + "</div>";
 	body += "<p>" + Button(editing ? "Save" : "Add note") + " " +
 	        Link(editing ? ItemHref(room, msgnum) : RoomHref(room), "Cancel") + "</p>";
 	body += FormEnd();
@@ -215,6 +284,7 @@ void Edit(Ctx &ctx, const Room &room, int64_t msgnum) {
 	PageOpts opts;
 	opts.active = "notes";
 	opts.view = (int)room.default_view;
+	opts.style = sheet.Css();
 	Render(ctx, editing ? "Edit note" : "New note", body, opts);
 }
 
@@ -252,7 +322,7 @@ void Save(Ctx &ctx, const Room &room) {
 	}
 	std::string color = ctx.req.Form("color");
 	// Only a colour we offer; anything else clears it rather than being stored.
-	note.color = ColorStyle(color).empty() ? "" : color;
+	note.color = ValidColor(color) ? color : "";
 
 	if (note.uid.empty()) {
 		note.uid = vnote::NewUid(ConfigStr(ctx.con, "c_fqdn", "localhost"));

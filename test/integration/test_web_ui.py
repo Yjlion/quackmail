@@ -39,6 +39,7 @@ PORT = 18081
 BASE = f"http://{HOST}:{PORT}"
 
 USER, PASSWORD = "webui", "correct-horse"
+OTHER = "webpal"
 
 DESKTOP = {"width": 1440, "height": 900}
 MOBILE = {"width": 390, "height": 844}
@@ -57,6 +58,7 @@ def start_server():
     con.execute("SELECT count(*) FROM qm_status()")
 
     con.execute(f"CALL qm_user_add('{USER}', '{PASSWORD}')")
+    con.execute(f"CALL qm_user_add('{OTHER}', '{PASSWORD}')")
     con.execute(
         "INSERT INTO citadel_users (username, usernum, axlevel) "
         f"VALUES ('{USER}', nextval('citadel_user_seq'), 4)"
@@ -244,6 +246,120 @@ def main():
                 [USER, "web_mail_threaded"],
             )
 
+            # ---- note colours -------------------------------------------
+            # The one check urllib cannot make. The colour used to arrive as a
+            # style= attribute, which CSP drops in silence — the markup was
+            # right, the assertion on the markup passed, and every swatch and
+            # card rendered white. Only a computed style catches that.
+            print("notes")
+            notes_room = con.execute(
+                "SELECT room_num FROM citadel_rooms WHERE display_name = 'Notes' "
+                "AND mailbox_owner = (SELECT usernum FROM citadel_users WHERE username = ?)",
+                [USER],
+            ).fetchone()[0]
+            page.goto(f"{BASE}/bbs/room/{notes_room}/item/new", wait_until="networkidle")
+            swatch = page.evaluate(
+                "() => getComputedStyle("
+                "document.querySelector('.swatch input[value=\"#ffff88\"] + span'))"
+                ".backgroundColor")
+            check("the swatch shows its own colour", swatch == "rgb(255, 255, 136)", swatch)
+            page.fill('input[name="summary"]', "Post-it")
+            page.fill('textarea[name="body"]', "Milk, bread, a new BBS.")
+            page.check('.swatch input[value="#ffff88"]')
+            page.click('form[action$="/item/save"] button')
+            page.wait_for_load_state("networkidle")
+            page.wait_for_selector(".note", timeout=5000)
+            card = page.evaluate(
+                "() => getComputedStyle(document.querySelector('.note')).backgroundColor")
+            check("the note card is a Post-it", card == "rgb(255, 255, 136)", card)
+            # Pale Outlook colours need dark text in every theme, so the card
+            # must not inherit the theme's foreground.
+            ink = page.evaluate(
+                "() => getComputedStyle(document.querySelector('.note')).color")
+            check("a tinted card forces dark ink", ink == "rgb(28, 27, 25)", ink)
+
+            # ---- chat, live ---------------------------------------------
+            #
+            # The polling half, which urllib cannot see: a message sent from a
+            # second browser has to appear without a reload. Everything else
+            # about chat is asserted mechanically in test_http.py.
+            print("chat")
+            page.goto(BASE + "/chat", wait_until="networkidle")
+            check("the chat log polls",
+                  page.locator("#chatlog[hx-trigger]").count() == 1)
+
+            pal_ctx = browser.new_context(viewport=DESKTOP)
+            pal = pal_ctx.new_page()
+            pal.goto(BASE + "/login", wait_until="networkidle")
+            pal.fill('input[name="username"]', OTHER)
+            pal.fill('input[name="password"]', PASSWORD)
+            pal.click('form[action="/login"] button')
+            pal.wait_for_load_state("networkidle")
+            pal.goto(f"{BASE}/chat?with={USER}", wait_until="networkidle")
+            pal.fill('input[name="text"]', "knock knock")
+            pal.click('form[action="/chat/send"] button')
+            pal.wait_for_load_state("networkidle")
+
+            # The poll interval is 5s; allow two of them before giving up.
+            try:
+                page.wait_for_selector("text=knock knock", timeout=12000)
+                arrived = True
+            except Exception:
+                arrived = False
+            check("a page arrives without a reload", arrived)
+
+            # Both browsers are presence rows, so each is discoverable by the
+            # other and by every other front-end.
+            page.goto(BASE + "/bbs/who", wait_until="networkidle")
+            who = page.content()
+            check("both browsers are in the who-list",
+                  who.count("Web session") >= 2, who.count("Web session"))
+            pal_ctx.close()
+
+            # ---- the composer -------------------------------------------
+            # Compose docks into the reading pane rather than replacing the
+            # mailbox, the recipient fields become chips, and an attachment can
+            # be taken back off again.
+            print("compose")
+            page.goto(f"{BASE}/bbs/room/{room}", wait_until="networkidle")
+            page.click('a[hx-get="/mail/compose"]')
+            page.wait_for_selector("#reader form[data-compose]", timeout=8000)
+            check("compose docks in the reading pane",
+                  page.locator(".panes > .list").count() == 1)
+            check("the mailbox is still there behind it",
+                  page.locator(".msglist").count() == 1)
+
+            # Chips: typing an address and pressing Enter commits it, and the
+            # hidden field the server actually reads keeps up.
+            page.fill("#compose-to", "bob@example.org")
+            page.press("#compose-to", "Enter")
+            page.fill("#compose-to", "nonsense address")
+            page.press("#compose-to", "Enter")
+            check("an address becomes a chip",
+                  page.locator("#reader .chips .chip").count() == 2,
+                  page.locator("#reader .chips .chip").count())
+            check("an undeliverable one is marked",
+                  page.locator("#reader .chips .chip.bad").count() == 1)
+            check("the submitted field follows the chips",
+                  "bob@example.org" in page.evaluate(
+                      "() => document.querySelector('input[type=hidden][name=to]').value"))
+            page.locator("#reader .chips .chip.bad .chipx").click()
+            check("removing a chip removes it from the field",
+                  "nonsense" not in page.evaluate(
+                      "() => document.querySelector('input[type=hidden][name=to]').value"))
+
+            # Attachments list themselves, with a way to drop one.
+            page.set_input_files('input[type="file"][name="attachment"]',
+                                 {"name": "note.txt", "mimeType": "text/plain",
+                                  "buffer": b"hello"})
+            check("an attachment is listed", page.locator("#attachlist li").count() == 1)
+            check("the limit is stated", page.locator("[data-maxbody]").count() == 1)
+            page.locator("#attachlist li button").click()
+            check("an attachment can be taken off",
+                  page.evaluate(
+                      "() => document.querySelector('input[type=file][name=attachment]').files.length")
+                  == 0)
+
             # ---- themes -------------------------------------------------
             print("themes")
             page.goto(BASE + "/prefs", wait_until="networkidle")
@@ -257,6 +373,60 @@ def main():
             page.select_option('select[name="theme"]', "auto")
             page.click('form[action="/prefs/settings"] button')
             page.wait_for_load_state("networkidle")
+
+            # ---- movable and resizable columns --------------------------
+            # Order and width belong to this browser, not to the account, so
+            # they live in localStorage and survive a reload.
+            print("columns")
+            page.goto(f"{BASE}/mail/", wait_until="networkidle")
+            check("the folder listing is a data table",
+                  page.locator("table.datatable[data-table='mail-folders']").count() == 1)
+            check("it has a colgroup to write widths on",
+                  page.locator("table.datatable colgroup col").count() == 3)
+            check("the headers became sort links",
+                  page.locator("table.datatable th a.sortlink").count() == 3)
+
+            # Resize by dragging the first header's grip, then reload and check
+            # the width came back.
+            grip = page.locator("table.datatable th").first.locator(".colgrip")
+            box = grip.bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.down()
+            page.mouse.move(box["x"] + 120, box["y"] + box["height"] / 2, steps=8)
+            page.mouse.up()
+            stored = page.evaluate("() => window.localStorage.getItem('qc.cols.mail-folders')")
+            check("a resize is remembered", stored is not None and "widths" in (stored or ""), stored)
+
+            page.reload(wait_until="networkidle")
+            applied = page.evaluate(
+                "() => document.querySelector('table.datatable colgroup col').style.width")
+            check("the width is applied on the next visit", applied.endswith("px"), applied)
+
+            # Reordering is a drag between two headers. Simulated through the
+            # same drag events a mouse would produce, since Playwright's
+            # drag_to does not synthesise HTML5 dataTransfer in all engines.
+            page.evaluate("""() => {
+              const ths = document.querySelectorAll('table.datatable thead th');
+              const dt = new DataTransfer();
+              ths[0].dispatchEvent(new DragEvent('dragstart', {dataTransfer: dt, bubbles: true}));
+              ths[2].dispatchEvent(new DragEvent('dragover', {dataTransfer: dt, bubbles: true}));
+              ths[2].dispatchEvent(new DragEvent('drop', {dataTransfer: dt, bubbles: true}));
+            }""")
+            order = page.evaluate(
+                "() => Array.from(document.querySelectorAll('table.datatable thead th'))"
+                ".map(th => th.getAttribute('data-col')).join(',')")
+            check("a column can be moved", order == "unread,total,folder", order)
+            page.reload(wait_until="networkidle")
+            after = page.evaluate(
+                "() => Array.from(document.querySelectorAll('table.datatable thead th'))"
+                ".map(th => th.getAttribute('data-col')).join(',')")
+            check("the order survives a reload", after == order, after)
+            # And the cells moved with the headers, rather than the headings
+            # sliding off their own data.
+            first_cell = page.evaluate(
+                "() => document.querySelector('table.datatable tbody td').getAttribute('data-label')")
+            check("the cells moved with them", first_cell == "Unread", first_cell)
+            page.evaluate("() => window.localStorage.clear()")
 
             # ---- the phone layout ---------------------------------------
             print("mobile")

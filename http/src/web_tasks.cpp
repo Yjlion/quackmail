@@ -143,7 +143,13 @@ void Index(Ctx &ctx, const Room &room) {
 
 	std::string body;
 	int64_t shown = 0, done_count = 0;
-	std::string rows;
+	// The due column sorts on the epoch rather than on the rendered date, and an
+	// undated task sorts last rather than first — "no due date" is not the
+	// beginning of time.
+	Table table(ctx, "tasks",
+	            {Column("", ""), Column("task", "Task"), Column("due", "Due", "", true),
+	             Column::Num("priority", "Priority"), Column::Num("done", "Done")});
+	table.ExtraClass("longlist");
 	for (auto &s : tasks) {
 		bool done = IsDone(s.item);
 		if (done) {
@@ -154,35 +160,32 @@ void Index(Ctx &ctx, const Room &room) {
 		}
 		shown++;
 		bool overdue = !done && s.item.due.valid && s.item.due.epoch < now;
-		rows += "<tr class=\"" + std::string(done ? "taskdone" : (overdue ? "unread" : "")) + "\">";
+		auto row = table.Add(done ? "taskdone" : (overdue ? "unread" : ""));
+
 		// The checkbox is a one-field form rather than a link: completing a task
 		// changes state, and a GET that changes state is prefetchable.
-		rows += "<td>";
+		std::string complete;
 		if (may_post) {
-			rows += FormStart(ctx, RoomHref(room, "/item/complete"), "inline") +
-			        Hidden("msgnum", std::to_string(s.msgnum)) + Hidden("done", done ? "0" : "1") +
-			        Button(done ? "Reopen" : "Done", "sec") + FormEnd();
+			complete = FormStart(ctx, RoomHref(room, "/item/complete"), "inline") +
+			           Hidden("msgnum", std::to_string(s.msgnum)) + Hidden("done", done ? "0" : "1") +
+			           Button(done ? "Reopen" : "Done", "sec") + FormEnd();
 		}
-		rows += "</td>";
-		rows += "<td>" + Link(ItemHref(room, s.msgnum), s.item.summary.empty() ? "(no title)"
-		                                                                      : s.item.summary) +
-		        "</td>";
-		rows += Cell(s.item.due.valid ? DateOnly(zone, s.item.due) : "");
-		rows += "<td class=\"num\">" + T(s.item.priority > 0 ? std::to_string(s.item.priority) : "") +
-		        "</td>";
-		rows += "<td class=\"num\">" +
-		        T(s.item.percent_complete > 0 ? std::to_string(s.item.percent_complete) + "%" : "") +
-		        "</td>";
-		rows += "</tr>";
+		row.Html(complete);
+
+		std::string title = s.item.summary.empty() ? "(no title)" : s.item.summary;
+		row.Html(Link(ItemHref(room, s.msgnum), title), title);
+		row.Html(T(s.item.due.valid ? DateOnly(zone, s.item.due) : ""),
+		         s.item.due.valid ? std::to_string(s.item.due.epoch) : "99999999999");
+		row.Html(T(s.item.priority > 0 ? std::to_string(s.item.priority) : ""),
+		         std::to_string(s.item.priority));
+		row.Html(T(s.item.percent_complete > 0 ? std::to_string(s.item.percent_complete) + "%" : ""),
+		         std::to_string(s.item.percent_complete));
 	}
 
 	if (shown == 0) {
 		body += "<p class=\"muted\">Nothing to do here.</p>";
 	} else {
-		body += "<div class=\"wrap\"><table class=\"longlist\"><tr>" + Head("") + Head("Task") +
-		        Head("Due") + "<th class=\"num\">Priority</th>" + "<th class=\"num\">Done</th></tr>";
-		body += RawHtml(rows);
-		body += "</table></div>";
+		body += table.Render();
 	}
 	if (done_count > 0 && !show_done) {
 		body += "<p class=\"muted\">" + T(std::to_string(done_count)) +

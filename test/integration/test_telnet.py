@@ -16,10 +16,15 @@ endings per line), which empties the following prompt.
 
     (printf "leo\\nleo\\nK\\nT\\n"; sleep 4) | telnet 127.0.0.1 2300
 """
+import http.cookiejar
 import os
+import re
 import socket
 import ssl
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import duckdb
 
@@ -28,6 +33,7 @@ EXT_DIR = os.path.join(REPO, "build", "release", "extension")
 HOST = "127.0.0.1"
 PORT = 12300
 PORT_TLS = 12992
+WEB_PORT = 12993
 
 
 def ext(name):
@@ -276,6 +282,8 @@ def main():
         ).fetchall()
         assert pending == [("bbsuser", "ping from the BBS")], pending
 
+        check_web_crossover(con)
+
         # What the Lobby holds now: the message posted over telnet was read back
         # earlier and then removed by the <D>elete test, so only the fixture
         # message planted for the skip/goto check should remain.
@@ -308,7 +316,63 @@ def main():
         con.execute("CALL qm_telnet_stop()").fetchall()
         con.execute("CALL qm_telnets_stop()").fetchall()
 
-    print("PASS: telnet login, Lobby, enter/read message, known rooms, who, page, telnets")
+    print("PASS: telnet login, Lobby, enter/read message, known rooms, who, page, telnets,")
+    print("      and the telnet/web crossover in both directions")
+
+
+def check_web_crossover(con):
+    """The "tables are the bus" claim, exercised across two front-ends.
+
+    A message paged from telnet has to reach a browser, and a browser has to
+    show up in the telnet who-list. Neither worked before: nothing on the web
+    side ever called PendingExpress, and nothing on the web side ever registered
+    a presence row.
+    """
+    con.execute(f"LOAD '{ext('quackmail_http')}'")
+    con.execute("CALL qm_config_set('qm_web_force_https', '0')")
+    con.execute(f"CALL qm_http_start('{HOST}', {WEB_PORT})")
+    time.sleep(0.4)
+    base = f"http://{HOST}:{WEB_PORT}"
+    try:
+        jar = http.cookiejar.CookieJar()
+        op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        page = op.open(base + "/login").read().decode()
+        tok = re.search(r'name="_csrf" value="([^"]*)"', page).group(1)
+        op.open(base + "/login", urllib.parse.urlencode(
+            {"_csrf": tok, "username": "pageme", "password": "secret"}).encode()).read()
+
+        # The browser is now a presence row, so RWHO and the telnet who-list see
+        # it — a web user was previously undiscoverable and therefore unpageable.
+        rows = con.execute(
+            "SELECT client FROM citadel_sessions WHERE username = 'pageme'").fetchall()
+        assert rows == [("Web session",)], f"the browser is not in citadel_sessions: {rows}"
+
+        # And the page telnet sent earlier arrives in the browser's chat.
+        chat = op.open(base + "/chat").read().decode()
+        assert "ping from the BBS" in chat, "a message paged from telnet never reached the web"
+        assert "bbsuser" in chat, "the sender is not named in the web transcript"
+
+        # Reading it delivered it, the same way ShowPendingExpress does at the
+        # telnet prompt — so the two front-ends agree about what is unread.
+        left = con.execute(
+            "SELECT count(*) FROM citadel_express WHERE lower(to_user) = 'pageme' "
+            "AND NOT delivered").fetchone()[0]
+        assert left == 0, "the web read the message without marking it delivered"
+
+        # Signing out takes the presence row with it. The cascade lives in
+        # websession.cpp rather than in the logout handler, so that no revoke
+        # path — logout, admin revoke, password change, expiry sweep — can
+        # forget it.
+        out_tok = re.search(r'name="_csrf" value="([^"]*)"', chat).group(1)
+        try:
+            op.open(base + "/logout", urllib.parse.urlencode({"_csrf": out_tok}).encode()).read()
+        except urllib.error.HTTPError:
+            pass
+        rows = con.execute(
+            "SELECT count(*) FROM citadel_sessions WHERE client = 'Web session'").fetchone()[0]
+        assert rows == 0, "signing out left the browser's presence row behind"
+    finally:
+        con.execute("CALL qm_http_stop()").fetchall()
 
 
 if __name__ == "__main__":

@@ -126,6 +126,7 @@ struct JmapEntry {
 void RegisterCoreMethods(std::vector<JmapEntry> &out);
 void RegisterMailMethods(std::vector<JmapEntry> &out);
 void RegisterSubmissionMethods(std::vector<JmapEntry> &out);
+void RegisterQuotaMethods(std::vector<JmapEntry> &out);
 // The blob-download route, contributed by jmap_submission.cpp because that is
 // where the blob resolver lives.
 void RegisterJmapDownloadRoute(std::vector<Route> &out);

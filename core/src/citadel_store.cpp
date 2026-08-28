@@ -1,5 +1,7 @@
 #include "quackmail/citadel_store.hpp"
 
+#include "quackmail/citadel_msg.hpp"
+#include "quackmail/quota.hpp"
 #include "quackmail/wiki.hpp"
 
 #include "duckdb/main/materialized_query_result.hpp"
@@ -179,6 +181,25 @@ void EnsureCitadelSchema(Connection &con) {
 		)
 	)");
 
+	// The RFC822 wire size of this message: what IMAP reports as RFC822.SIZE and
+	// what a storage quota is counted in. Stored rather than derived, because it
+	// is not octet_length(raw) — a format-0 message has no header block on disk
+	// and RenderRfc822 synthesizes one, so the bytes a client is served and the
+	// bytes the BLOB holds are two different numbers. Counting the wrong one
+	// would make GETQUOTA disagree with the sum of the FETCH sizes in the same
+	// mailbox, which is the one piece of the arithmetic a user can check.
+	//
+	// -1, not 0, is "not yet computed": 0 is a legitimate size, and a database
+	// that predates this column has to be distinguishable from one holding empty
+	// messages.
+	con.Query("ALTER TABLE citadel_messages ADD COLUMN IF NOT EXISTS size_bytes BIGINT DEFAULT -1");
+	// The easy half, in SQL. Format 4 is stored as the RFC822 bytes themselves,
+	// so for those the blob length *is* the wire length — and that is every
+	// message that ever arrived by mail. The synthesized formats are finished off
+	// by quota::BackfillSizes, which has to render each one.
+	con.Query("UPDATE citadel_messages SET size_bytes = octet_length(raw) "
+	          "WHERE size_bytes < 0 AND format_type = 4");
+
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_msgs (
 			room_num BIGINT,
@@ -186,6 +207,10 @@ void EnsureCitadelSchema(Connection &con) {
 			PRIMARY KEY (room_num, msgnum)
 		)
 	)");
+
+	// mailbox_owner is the whole storage-quota predicate and citadel_rooms has
+	// no index on it. The table is small, but the usage sum runs once per RCPT.
+	con.Query("CREATE INDEX IF NOT EXISTS idx_rooms_owner ON citadel_rooms(mailbox_owner)");
 
 	// Groupware looks messages up by euid rather than by number — that is how a
 	// contact or event is replaced in place. Without this every such lookup is a
@@ -288,6 +313,15 @@ void EnsureCitadelSchema(Connection &con) {
 	)");
 	// `client` was added after the table shipped; keep older database files working.
 	con.Query("ALTER TABLE citadel_sessions ADD COLUMN IF NOT EXISTS client VARCHAR DEFAULT ''");
+	// How often this front-end promises to touch its own row, in seconds. 0 means
+	// "this front-end does not heartbeat" — a Citadel or telnet session blocked
+	// in a read has no timer to hang one off — and such a row is only swept after
+	// the long crashed-process grace.
+	//
+	// A number on the row rather than a list of client strings inside the reaper:
+	// the next listener somebody adds gets the safe behaviour by default instead
+	// of being silently evicted by a predicate that never heard of it.
+	con.Query("ALTER TABLE citadel_sessions ADD COLUMN IF NOT EXISTS heartbeat_secs BIGINT DEFAULT 0");
 
 	// String-valued per-user preferences. The US_* bit field covers the boolean
 	// BBS toggles; anything with a value (the web theme, so far) lives here.
@@ -320,6 +354,20 @@ void EnsureCitadelSchema(Connection &con) {
 			delivered BOOLEAN DEFAULT false
 		)
 	)");
+	// When a message was handed to a live client. `delivered` has always meant
+	// "some session has shown this to its user"; this records when, which is what
+	// turns a queue into a transcript. Rows were never deleted on delivery —
+	// MarkExpressDelivered was always an UPDATE — so no existing consumer changes
+	// behaviour: the web chat simply reads what was already there.
+	con.Query("ALTER TABLE citadel_express ADD COLUMN IF NOT EXISTS delivered_at BIGINT DEFAULT 0");
+	// Rows drained before the column existed. Stamping them with sent_at is a
+	// better lie than leaving them at the epoch, where a transcript would show
+	// every historic page as delivered in 1970.
+	con.Query("UPDATE citadel_express SET delivered_at = sent_at WHERE delivered AND delivered_at = 0");
+	// Every query against this table is "one end of this conversation is me",
+	// in id order.
+	con.Query("CREATE INDEX IF NOT EXISTS idx_express_to ON citadel_express(to_user, id)");
+	con.Query("CREATE INDEX IF NOT EXISTS idx_express_from ON citadel_express(from_user, id)");
 
 	// Personal room keys used to be "<usernum>.<room>" without padding; Citadel
 	// pads the user number to ten digits and that name is visible over NNTP.
@@ -1068,7 +1116,8 @@ std::string NewsgroupToRoom(const std::string &newsgroup) {
 	return out;
 }
 
-int64_t RegisterSession(Connection &con, const std::string &client, const std::string &host) {
+int64_t RegisterSession(Connection &con, const std::string &client, const std::string &host,
+                        int64_t heartbeat_secs) {
 	auto sid = ScalarP(con, "SELECT nextval('citadel_session_seq')", {});
 	if (sid.IsNull()) {
 		return 0;
@@ -1081,9 +1130,10 @@ int64_t RegisterSession(Connection &con, const std::string &client, const std::s
 		where = "localhost";
 	}
 	ExecP(con,
-	      "INSERT INTO citadel_sessions (session_id, client, host, since, last_seen) "
-	      "VALUES ($1, $2, $3, $4, $4)",
-	      {Value::BIGINT(id), Value(client), Value(where), Value::BIGINT(NowEpoch())});
+	      "INSERT INTO citadel_sessions (session_id, client, host, since, last_seen, heartbeat_secs) "
+	      "VALUES ($1, $2, $3, $4, $4, $5)",
+	      {Value::BIGINT(id), Value(client), Value(where), Value::BIGINT(NowEpoch()),
+	       Value::BIGINT(heartbeat_secs < 0 ? 0 : heartbeat_secs)});
 	return id;
 }
 
@@ -1106,27 +1156,64 @@ void UnregisterSession(Connection &con, int64_t session_id) {
 	ExecP(con, "DELETE FROM citadel_sessions WHERE session_id=$1", {Value::BIGINT(session_id)});
 }
 
+namespace {
+
+// "This row is still alive", shared by ListSessions and ReapSessions so a read
+// and a sweep cannot disagree about who is online. $1 is now, $2 the grace for a
+// front-end that declared no heartbeat.
+//
+// A row still being registered has last_seen 0 and is never swept on that basis.
+const char *kSessionLive = "(last_seen <= 0 OR last_seen >= CASE WHEN heartbeat_secs > 0 "
+                           "THEN $1 - (heartbeat_secs * 3) ELSE $1 - $2 END)";
+
+// The grace for a front-end that does not heartbeat. A day, because this is a
+// crashed-process sweep and not a liveness test: a telnet user reading a long
+// post is blocked in a read with no timer to hang a heartbeat off, and evicting
+// them would be worse than carrying a dead row for a while.
+int64_t StaleGrace(Connection &con) {
+	std::string v = GetConfig(con, "qm_session_stale_secs", "86400");
+	int64_t n = std::atoll(v.c_str());
+	return n > 0 ? n : 86400;
+}
+
+} // namespace
+
 std::vector<SessionInfo> ListSessions(Connection &con) {
 	std::vector<SessionInfo> out;
-	auto r = con.Query("SELECT session_id, username, host, room, last_cmd, client, axlevel, since, last_seen "
-	                   "FROM citadel_sessions ORDER BY session_id");
-	if (r->HasError()) {
+	auto r = ExecP(con,
+	               std::string("SELECT session_id, username, host, room, last_cmd, client, axlevel, "
+	                           "since, last_seen FROM citadel_sessions WHERE ") +
+	                   kSessionLive + " ORDER BY session_id",
+	               {Value::BIGINT(NowEpoch()), Value::BIGINT(StaleGrace(con))});
+	if (!r) {
 		return out;
 	}
-	for (idx_t i = 0; i < r->RowCount(); i++) {
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
 		SessionInfo s;
-		s.session_id = AsBigint(r->GetValue(0, i));
-		s.username = r->GetValue(1, i).IsNull() ? "" : r->GetValue(1, i).ToString();
-		s.host = r->GetValue(2, i).IsNull() ? "" : r->GetValue(2, i).ToString();
-		s.room = r->GetValue(3, i).IsNull() ? "" : r->GetValue(3, i).ToString();
-		s.last_cmd = r->GetValue(4, i).IsNull() ? "" : r->GetValue(4, i).ToString();
-		s.client = r->GetValue(5, i).IsNull() ? "" : r->GetValue(5, i).ToString();
-		s.axlevel = AsBigint(r->GetValue(6, i));
-		s.since = AsBigint(r->GetValue(7, i));
-		s.last_seen = AsBigint(r->GetValue(8, i));
+		s.session_id = AsBigint(mat.GetValue(0, i));
+		s.username = AsString(mat.GetValue(1, i));
+		s.host = AsString(mat.GetValue(2, i));
+		s.room = AsString(mat.GetValue(3, i));
+		s.last_cmd = AsString(mat.GetValue(4, i));
+		s.client = AsString(mat.GetValue(5, i));
+		s.axlevel = AsBigint(mat.GetValue(6, i));
+		s.since = AsBigint(mat.GetValue(7, i));
+		s.last_seen = AsBigint(mat.GetValue(8, i));
 		out.push_back(std::move(s));
 	}
 	return out;
+}
+
+int64_t ReapSessions(Connection &con, int64_t grace_seconds) {
+	if (grace_seconds <= 0) {
+		grace_seconds = 86400;
+	}
+	int64_t before = AsBigint(ScalarP(con, "SELECT count(*) FROM citadel_sessions", {}));
+	ExecP(con, std::string("DELETE FROM citadel_sessions WHERE NOT ") + kSessionLive,
+	      {Value::BIGINT(NowEpoch()), Value::BIGINT(grace_seconds)});
+	int64_t after = AsBigint(ScalarP(con, "SELECT count(*) FROM citadel_sessions", {}));
+	return before - after;
 }
 
 bool SendExpress(Connection &con, const std::string &to, const std::string &from, const std::string &text) {
@@ -1167,8 +1254,128 @@ std::vector<Express> PendingExpress(Connection &con, const std::string &user) {
 	return out;
 }
 
+std::vector<ExpressLine> ExpressHistory(Connection &con, const std::string &user,
+                                       const std::string &with_user, int64_t window_seconds,
+                                       int64_t limit) {
+	std::vector<ExpressLine> out;
+	if (user.empty()) {
+		return out;
+	}
+	if (limit <= 0) {
+		limit = 200;
+	}
+	int64_t since = window_seconds > 0 ? NowEpoch() - window_seconds : 0;
+	// DESC + LIMIT so the cap keeps the *newest* messages, then reversed below:
+	// an ascending query with a LIMIT would keep the oldest, which is the wrong
+	// end of a conversation.
+	auto r = ExecP(con,
+	               "SELECT id, from_user, to_user, text, sent_at, delivered, delivered_at "
+	               "FROM citadel_express "
+	               "WHERE (lower(to_user) = lower($1) OR lower(from_user) = lower($1)) "
+	               "  AND ($2 = '' OR lower(to_user) = lower($2) OR lower(from_user) = lower($2)) "
+	               "  AND sent_at >= $3 "
+	               "ORDER BY id DESC LIMIT $4",
+	               {Value(user), Value(with_user), Value::BIGINT(since), Value::BIGINT(limit)});
+	if (!r) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		ExpressLine e;
+		e.id = AsBigint(mat.GetValue(0, i));
+		e.from_user = AsString(mat.GetValue(1, i));
+		e.to_user = AsString(mat.GetValue(2, i));
+		e.text = AsString(mat.GetValue(3, i));
+		e.sent_at = AsBigint(mat.GetValue(4, i));
+		Value d = mat.GetValue(5, i);
+		e.delivered = !d.IsNull() && d.GetValue<bool>();
+		e.delivered_at = AsBigint(mat.GetValue(6, i));
+		out.push_back(std::move(e));
+	}
+	std::reverse(out.begin(), out.end());
+	return out;
+}
+
+std::vector<std::string> ExpressCorrespondents(Connection &con, const std::string &user,
+                                               int64_t window_seconds) {
+	std::vector<std::string> out;
+	if (user.empty()) {
+		return out;
+	}
+	int64_t since = window_seconds > 0 ? NowEpoch() - window_seconds : 0;
+	// The other end of each line, whichever end that is, most recently active
+	// first. Grouped case-insensitively but reported with the spelling the
+	// message carried, because a Citadel user name is a display name.
+	auto r = ExecP(con,
+	               "SELECT any_value(other) AS name, max(id) AS recent FROM ("
+	               "  SELECT CASE WHEN lower(to_user) = lower($1) THEN from_user ELSE to_user END "
+	               "         AS other, id "
+	               "  FROM citadel_express "
+	               "  WHERE (lower(to_user) = lower($1) OR lower(from_user) = lower($1)) "
+	               "    AND sent_at >= $2) "
+	               "WHERE other <> '' AND lower(other) <> lower($1) "
+	               "GROUP BY lower(other) ORDER BY recent DESC",
+	               {Value(user), Value::BIGINT(since)});
+	if (!r) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		std::string name = AsString(mat.GetValue(0, i));
+		if (!name.empty()) {
+			out.push_back(name);
+		}
+	}
+	return out;
+}
+
+int64_t PendingExpressCount(Connection &con, const std::string &user) {
+	if (user.empty()) {
+		return 0;
+	}
+	return AsBigint(ScalarP(con,
+	                        "SELECT count(*) FROM citadel_express "
+	                        "WHERE lower(to_user) = lower($1) AND delivered = false",
+	                        {Value(user)}));
+}
+
+void MarkExpressDeliveredThrough(Connection &con, const std::string &user, int64_t max_id) {
+	if (user.empty() || max_id <= 0) {
+		return;
+	}
+	ExecP(con,
+	      "UPDATE citadel_express SET delivered = true, delivered_at = $3 "
+	      "WHERE lower(to_user) = lower($1) AND delivered = false AND id <= $2",
+	      {Value(user), Value::BIGINT(max_id), Value::BIGINT(NowEpoch())});
+}
+
+int64_t ExpressChangeToken(Connection &con, const std::string &user) {
+	if (user.empty()) {
+		return 0;
+	}
+	return AsBigint(ScalarP(con,
+	                        "SELECT coalesce(max(id), 0) FROM citadel_express "
+	                        "WHERE lower(to_user) = lower($1) OR lower(from_user) = lower($1)",
+	                        {Value(user)}));
+}
+
+void PruneExpress(Connection &con, int64_t older_than_seconds) {
+	if (older_than_seconds <= 0) {
+		return;
+	}
+	// delivered_at > 0 matters: without it, a row marked delivered by an older
+	// binary before the column existed would be swept the moment this runs.
+	ExecP(con,
+	      "DELETE FROM citadel_express "
+	      "WHERE delivered AND delivered_at > 0 AND delivered_at < $1",
+	      {Value::BIGINT(NowEpoch() - older_than_seconds)});
+}
+
 void MarkExpressDelivered(Connection &con, int64_t id) {
-	ExecP(con, "UPDATE citadel_express SET delivered=true WHERE id=$1", {Value::BIGINT(id)});
+	// Stamped as well as flagged, so every existing consumer — telnet, XMPP,
+	// GEXP — contributes to the transcript without a second edit each.
+	ExecP(con, "UPDATE citadel_express SET delivered=true, delivered_at=$2 WHERE id=$1",
+	      {Value::BIGINT(id), Value::BIGINT(NowEpoch())});
 }
 
 RoomStats GetRoomStats(Connection &con, const std::string &username, int64_t room_num) {
@@ -1543,21 +1750,68 @@ int64_t InsertMessage(Connection &con, const Message &msg, const std::vector<int
 		return -1;
 	};
 
+	// Storage quota, as a backstop rather than as the enforcement point.
+	//
+	// The front-ends check first, with better error text and the right protocol
+	// code (452 at SMTP RCPT, [OVERQUOTA] at IMAP APPEND). This is the check that
+	// catches the doors nobody remembered: a DAV PUT of a calendar event, an NNTP
+	// POST into a personal room, ENT0 over the native protocol, the "Sent Items"
+	// copy webmail files with its own InsertMessage. Every one of those lands in
+	// a room with mailbox_owner set, and every one would otherwise be a way
+	// around the number an admin typed in.
+	//
+	// IsOver, not WouldExceed: ReplaceByEuid inserts the new object before
+	// unlinking the old one, so a user sitting exactly on their limit must still
+	// be able to re-save a contact. Only an account already past the ceiling is
+	// stopped. Public rooms (mailbox_owner = 0) are skipped entirely, so BBS
+	// posting, the Aide log and list distribution pay nothing.
+	if (GetConfig(con, "qm_quota_enforce_store", "1") == "1") {
+		std::vector<int64_t> owners;
+		for (int64_t room : rooms) {
+			int64_t owner = AsBigint(ScalarP(con, "SELECT mailbox_owner FROM citadel_rooms WHERE room_num = $1",
+			                                 {Value::BIGINT(room)}));
+			if (owner > 0 && std::find(owners.begin(), owners.end(), owner) == owners.end()) {
+				owners.push_back(owner);
+			}
+		}
+		for (int64_t owner : owners) {
+			std::string who = AsString(ScalarP(con, "SELECT username FROM citadel_users WHERE usernum = $1",
+			                                   {Value::BIGINT(owner)}));
+			if (!who.empty() && quota::IsOver(con, who)) {
+				return fail("mailbox is over its storage quota: " + who);
+			}
+		}
+	}
+
 	auto num_v = ScalarP(con, "SELECT nextval('citadel_msg_seq')", {});
 	if (num_v.IsNull()) {
 		return fail("could not allocate message number");
 	}
 	int64_t msgnum = num_v.GetValue<int64_t>();
 
+	// The wire size, settled here because this is the only place a message
+	// becomes a row. msgnum has to be on the copy first: RenderRfc822 puts
+	// MessageId() into the Message-ID header of a synthesized message, and that
+	// is a function of the number just allocated.
+	int64_t size_bytes;
+	if (msg.format_type == 4) {
+		size_bytes = (int64_t)msg.raw.size();
+	} else {
+		Message sized = msg;
+		sized.msgnum = msgnum;
+		size_bytes = quota::MessageSize(sized, GetConfig(con, "c_nodename", "quackcit"));
+	}
+
 	auto ins = ExecP(con,
 	                 "INSERT INTO citadel_messages (msgnum, euid, author, author_usernum, recipient, node, "
-	                 "msgtime, subject, format_type, refs, origin_room, raw) "
-	                 "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+	                 "msgtime, subject, format_type, refs, origin_room, raw, size_bytes) "
+	                 "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
 	                 {Value::BIGINT(msgnum), Value(msg.euid), Value(msg.author),
 	                  Value::BIGINT(msg.author_usernum), Value(msg.recipient), Value(msg.node),
 	                  Value::BIGINT(msg.msgtime), Value(msg.subject), Value::INTEGER(msg.format_type),
 	                  Value(msg.references), Value(msg.origin_room),
-	                  Value::BLOB(reinterpret_cast<const duckdb::data_t *>(msg.raw.data()), msg.raw.size())});
+	                  Value::BLOB(reinterpret_cast<const duckdb::data_t *>(msg.raw.data()), msg.raw.size()),
+	                  Value::BIGINT(size_bytes)});
 	if (!ins) {
 		return fail("message insert failed");
 	}

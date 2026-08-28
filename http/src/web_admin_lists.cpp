@@ -65,9 +65,11 @@ bool ListFromPath(Ctx &ctx, listserv::List &out) {
 void GetLists(Ctx &ctx) {
 	auto lists = listserv::ListLists(ctx.con);
 
-	std::string body = "<div class=\"wrap\"><table><tr>" + Head("Room") + Head("Address") + Head("Mode") +
-	                   Head("Who may post") + Head("Subscribers") + Head("Held") + Head("Enabled") +
-	                   Head("") + "</tr>";
+	std::string body;
+	Table table(ctx, "admin-lists",
+	            {Column("room", "Room"), Column("address", "Address"), Column("mode", "Mode"),
+	             Column("policy", "Who may post"), Column::Num("subs", "Subscribers"),
+	             Column::Num("held", "Held"), Column("enabled", "Enabled"), Column("", "")});
 	for (auto &l : lists) {
 		int64_t active = 0;
 		for (auto &s : listserv::Subscribers(ctx.con, l.room_num, "active")) {
@@ -75,18 +77,17 @@ void GetLists(Ctx &ctx) {
 			active++;
 		}
 		int64_t held = (int64_t)listserv::HeldMessages(ctx.con, l.room_num, "held").size();
-		body += "<tr>";
-		body += Cell(l.display_name);
-		body += Cell(listserv::ListAddress(ctx.con, l));
-		body += Cell(ModeValue(l.mode));
-		body += Cell(PolicyValue(l.post_policy));
-		body += Cell(std::to_string(active));
-		body += Cell(held > 0 ? std::to_string(held) : "");
-		body += Cell(l.enabled ? "yes" : "no");
-		body += "<td>" + Link("/admin/lists/" + std::to_string(l.room_num), "Manage", "btn sec") + "</td>";
-		body += "</tr>";
+		table.Add()
+		    .Text(l.display_name)
+		    .Text(listserv::ListAddress(ctx.con, l))
+		    .Text(ModeValue(l.mode))
+		    .Text(PolicyValue(l.post_policy))
+		    .Number(active)
+		    .Html(T(held > 0 ? std::to_string(held) : ""), std::to_string(held))
+		    .Text(l.enabled ? "yes" : "no")
+		    .Html(Link("/admin/lists/" + std::to_string(l.room_num), "Manage", "btn sec"));
 	}
-	body += "</table></div>";
+	body += table.Render();
 	if (lists.empty()) {
 		body += "<p class=\"muted\">No mailing lists yet.</p>";
 	}
@@ -441,9 +442,12 @@ std::string KindLabel(quackmail::fetch::Kind k) {
 void GetFeeds(Ctx &ctx) {
 	auto feeds = quackmail::fetch::ListFeeds(ctx.con);
 
-	std::string body = "<div class=\"wrap\"><table><tr>" + Head("Name") + Head("Kind") + Head("Source") +
-	                   Head("Target") + Head("Every") + Head("Last run") + Head("Status") +
-	                   Head("Pulled") + Head("") + "</tr>";
+	std::string body;
+	Table table(ctx, "admin-feeds",
+	            {Column("name", "Name"), Column("kind", "Kind"), Column("source", "Source"),
+	             Column("target", "Target"), Column::Num("every", "Every"),
+	             Column("lastrun", "Last run", "", true), Column("status", "Status"),
+	             Column::Num("pulled", "Pulled"), Column("", "")});
 	for (auto &f : feeds) {
 		std::string source = f.kind == quackmail::fetch::Kind::Rss
 		                         ? f.url
@@ -456,23 +460,23 @@ void GetFeeds(Ctx &ctx) {
 			             ? room.display_name
 			             : ("room " + std::to_string(f.target_room));
 		}
-		body += "<tr>";
-		body += Cell(f.name + (f.enabled ? "" : " (disabled)"));
-		body += Cell(KindLabel(f.kind));
-		body += Cell(source);
-		body += Cell(target);
-		body += Cell(std::to_string(f.interval_secs) + "s");
-		body += Cell(f.last_run_at > 0 ? FormatTime(ctx, f.last_run_at) : "never");
-		body += Cell(f.last_status + (f.last_error.empty() ? "" : (": " + f.last_error)));
-		body += Cell(std::to_string(f.messages_pulled));
-		body += "<td>" + FormStart(ctx, "/admin/feeds/run", "inline") + Hidden("name", f.name) +
-		        Button("Run") + FormEnd() + FormStart(ctx, "/admin/feeds/test", "inline") +
-		        Hidden("name", f.name) + Button("Test", "sec") + FormEnd() +
-		        FormStart(ctx, "/admin/feeds/remove", "inline") + Hidden("name", f.name) +
-		        Button("Remove", "danger") + FormEnd() + "</td>";
-		body += "</tr>";
+		table.Add()
+		    .Text(f.name + (f.enabled ? "" : " (disabled)"))
+		    .Text(KindLabel(f.kind))
+		    .Text(source)
+		    .Text(target)
+		    .Html(T(std::to_string(f.interval_secs) + "s"), std::to_string(f.interval_secs))
+		    .Html(T(f.last_run_at > 0 ? FormatTime(ctx, f.last_run_at) : "never"),
+		          std::to_string(f.last_run_at))
+		    .Text(f.last_status + (f.last_error.empty() ? "" : (": " + f.last_error)))
+		    .Number(f.messages_pulled)
+		    .Html(FormStart(ctx, "/admin/feeds/run", "inline") + Hidden("name", f.name) +
+		          Button("Run") + FormEnd() + FormStart(ctx, "/admin/feeds/test", "inline") +
+		          Hidden("name", f.name) + Button("Test", "sec") + FormEnd() +
+		          FormStart(ctx, "/admin/feeds/remove", "inline") + Hidden("name", f.name) +
+		          Button("Remove", "danger") + FormEnd());
 	}
-	body += "</table></div>";
+	body += table.Render();
 	if (feeds.empty()) {
 		body += "<p class=\"muted\">No feeds configured.</p>";
 	}

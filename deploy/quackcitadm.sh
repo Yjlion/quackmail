@@ -172,6 +172,37 @@ cmd_ratelimit() {
     esac
 }
 
+# A byte count, with the suffixes anybody typing a storage quota reaches for.
+# Kept out of sql_int because every other number this script takes is a plain
+# one, and a KB where a count was meant would be a silent thousandfold error.
+quota_bytes() {
+    n=$1
+    mult=1
+    case "$n" in
+        *[kK][bB]|*[kK]) mult=1024;       n=${n%[bB]}; n=${n%[kK]} ;;
+        *[mM][bB]|*[mM]) mult=1048576;    n=${n%[bB]}; n=${n%[mM]} ;;
+        *[gG][bB]|*[gG]) mult=1073741824; n=${n%[bB]}; n=${n%[gG]} ;;
+        *[bB])           mult=1;          n=${n%[bB]} ;;
+    esac
+    n=$(sql_int "$n") || return 1
+    echo $((n * mult))
+}
+
+cmd_quota() {
+    action=${1:-list}; shift 2>/dev/null || true
+    case "$action" in
+        # 0 is unlimited, which is the shipped default; the '' user is the
+        # site-wide ceiling everybody without a row of their own inherits.
+        set)
+            need 2 "$@"
+            limit=$(quota_bytes "$2")
+            q "SELECT ok, note FROM qm_quota_set($(sql_str "$1"), $limit)" ;;
+        list)   q "SELECT * FROM qm_quotas()" ;;
+        status) need 1 "$@"; q "SELECT * FROM qm_quota_status($(sql_str "$1"))" ;;
+        *) die "unknown quota command '$action' (set|list|status)" ;;
+    esac
+}
+
 cmd_config() {
     action=${1:-list}; shift 2>/dev/null || true
     case "$action" in
@@ -401,6 +432,10 @@ usage: quackcitadm.sh <object> <action> [arguments]
               Let's Encrypt *staging* — see QUACKCIT_ACME_* in quackcit.conf
   ratelimit set <user|''> <burst_max> <burst_secs> <daily_max> | list | status <user>
               the '' user is the default policy (100/300s, 500/24h)
+  quota     set <user|''> <bytes|500MB|2GB> | list | status <user>
+              storage, not sending. 0 is unlimited and is the default; the ''
+              user is the site-wide ceiling. Mail for a full mailbox is
+              deferred with a transient 452, not bounced
   sieve     list <user> | get <user> <name> | set <user> <name> <file>
             activate <user> <name> | check <file>
   config    get <name> | set <name> <value> | list
@@ -464,6 +499,7 @@ case "$object" in
     dkim)      cmd_dkim "$@" ;;
     acme)      cmd_acme "$@" ;;
     ratelimit) cmd_ratelimit "$@" ;;
+    quota)     cmd_quota "$@" ;;
     sieve)     cmd_sieve "$@" ;;
     config)    cmd_config "$@" ;;
     room)      cmd_room "$@" ;;

@@ -105,9 +105,15 @@ for it there: `citadel_store.hpp` (rooms, floors, messages, last-read, users,
 and the RFC 4314 permission helpers — every front-end that accepts a message
 must ask `CanPost`, never re-derive it), `citadel_msg.hpp`, `mime.hpp`,
 `auth.hpp`, `sasl.hpp`, `delivery.hpp`, `mailpolicy.hpp`, `spf.hpp`, `dkim.hpp`,
-`dmarc.hpp`, `rbl.hpp`, `sieve.hpp`, `listserv.hpp`, `worker.hpp`, `psl.hpp`,
-`tz.hpp`, `vcard.hpp`, `ical.hpp`, `vnote.hpp`, `html_sanitize.hpp`,
+`dmarc.hpp`, `rbl.hpp`, `sieve.hpp`, `quota.hpp`, `listserv.hpp`, `worker.hpp`,
+`psl.hpp`, `tz.hpp`, `vcard.hpp`, `ical.hpp`, `vnote.hpp`, `html_sanitize.hpp`,
 `http_client.hpp`, `mail_client.hpp`, `feed.hpp`, `net.hpp`.
+
+`quota.hpp` is storage quota rather than send quota, which is why it is not in
+`mailpolicy.hpp`: that file is scoped to SMTP site policy, whereas storage is
+asked by IMAP, JMAP, DAV, the web and `InsertMessage` itself. Putting it there
+would force `citadel_store.cpp` to include `mailpolicy.hpp` and invert the
+dependency.
 
 `net::Connect` is the shared dialer, with a connect timeout — never write
 another `getaddrinfo`/`connect` pair.

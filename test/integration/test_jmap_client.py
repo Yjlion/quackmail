@@ -61,6 +61,7 @@ FQDN = "jmap.example.com"
 CORE = "urn:ietf:params:jmap:core"
 MAIL = "urn:ietf:params:jmap:mail"
 SUBMIT = "urn:ietf:params:jmap:submission"
+QUOTA = "urn:ietf:params:jmap:quota"
 
 # The listener presents the ephemeral self-signed certificate core/src/tls.cpp
 # generates. Verifying it is not what this test is about.
@@ -124,7 +125,10 @@ def main():
         assert s.primary_accounts.submission == USER
         assert c.account_id == USER, f"account_id resolved to {c.account_id!r}"
 
-        assert s.capabilities.urns == {CORE, MAIL, SUBMIT}, \
+        # The exact set, not a subset: a capability advertised and not honoured
+        # is one a client builds a whole feature on and then fails, so adding
+        # one is meant to be a deliberate edit here.
+        assert s.capabilities.urns == {CORE, MAIL, SUBMIT, QUOTA}, \
             f"advertised capabilities are {sorted(s.capabilities.urns)}"
         assert s.capabilities.core.max_size_upload > 0, \
             "maxSizeUpload is 0, so a client will never try to attach anything"

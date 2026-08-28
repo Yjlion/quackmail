@@ -26,6 +26,7 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/mail_store.cpp
         ${QUACKMAIL_CORE_DIR}/src/citadel_store.cpp
         ${QUACKMAIL_CORE_DIR}/src/citadel_msg.cpp
+        ${QUACKMAIL_CORE_DIR}/src/quota.cpp
         ${QUACKMAIL_CORE_DIR}/src/net.cpp
         ${QUACKMAIL_CORE_DIR}/src/http.cpp
         ${QUACKMAIL_CORE_DIR}/src/websession.cpp

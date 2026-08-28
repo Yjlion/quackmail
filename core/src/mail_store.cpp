@@ -4,6 +4,7 @@
 #include "quackmail/fetch.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mailpolicy.hpp"
+#include "quackmail/quota.hpp"
 #include "quackmail/websession.hpp"
 
 #include "duckdb/main/materialized_query_result.hpp"
@@ -102,6 +103,20 @@ void EnsureSchema(Connection &con) {
 	// Must follow the Citadel schema: it seeds enforcement defaults into
 	// citadel_config.
 	policy::EnsureSchema(con);
+
+	// Per-user storage quotas. Must follow the Citadel schema: the usage sum
+	// reads citadel_rooms and citadel_room_msgs.
+	quota::EnsureSchema(con);
+
+	// Finish the size_bytes backfill EnsureCitadelSchema started in SQL. Only
+	// the synthesized formats are left, and each has to be rendered to be
+	// measured, so this is guarded by a marker rather than run on every
+	// connection — EnsureSchema runs on every one of them.
+	if (citadel::GetConfig(con, "qm_msgsize_backfill", "0") != "1") {
+		quota::BackfillSizes(con);
+		con.Query("INSERT INTO citadel_config (name, value) VALUES ('qm_msgsize_backfill', '1') "
+		          "ON CONFLICT (name) DO UPDATE SET value = '1'");
+	}
 
 	// Mailing lists over rooms, and remote message pulls into them. Both must
 	// follow the Citadel schema, which owns the rooms their rows point at.

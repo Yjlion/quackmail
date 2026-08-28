@@ -11,6 +11,7 @@
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mime.hpp"
+#include "quackmail/quota.hpp"
 #include "quackmail/sasl.hpp"
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
@@ -431,10 +432,147 @@ void FetchOne(Connection &con, Session &s, net::ClientStream &stream, size_t pos
 	}
 }
 
+// ---- storage quota (RFC 9208) ---------------------------------------------
+//
+// STORAGE is counted in *kibibytes*, not bytes — RFC 2087 §3 and RFC 9208 §5.1
+// both say "units of 1024 octets". Getting this wrong is the classic
+// implementation bug: it reports a 10 MB quota as 10 GB and every client
+// believes it.
+//
+// Usage rounds up and the limit rounds down, so the reported pair never claims
+// a user has room they do not: one stored byte shows as 1, and a 1500-byte
+// ceiling shows as 1 rather than as 2.
+int64_t UsedKib(int64_t bytes) {
+	return (bytes + 1023) / 1024;
+}
+int64_t LimitKib(int64_t bytes) {
+	return bytes / 1024;
+}
+
+// "* QUOTA "" (STORAGE <used> <limit>)", or "" when this user has no ceiling.
+//
+// The quota root is the empty string, and there is exactly one: a quota here is
+// citadel_rooms.mailbox_owner, and every one of a user's rooms has the same
+// owner. "" is also what Dovecot's default rule uses, which makes it the
+// best-tested value in the wild — a name like "User quota" is a Dovecot *rule*
+// name and would send a client looking for a second root that does not exist.
+std::string QuotaLine(Connection &con, const std::string &user) {
+	auto info = quackmail::quota::Usage(con, user);
+	if (!info.limited) {
+		return std::string();
+	}
+	return "* QUOTA \"\" (STORAGE " + std::to_string(UsedKib(info.used_bytes)) + " " +
+	       std::to_string(LimitKib(info.limit_bytes)) + ")";
+}
+
+std::string UnquoteMailbox(std::string v) {
+	while (!v.empty() && v.back() == ' ') {
+		v.pop_back();
+	}
+	while (!v.empty() && v.front() == ' ') {
+		v.erase(v.begin());
+	}
+	if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+		v = v.substr(1, v.size() - 2);
+	}
+	return v;
+}
+
+void QuotaCommand(Connection &con, net::ClientStream &stream, const std::string &tag,
+                  const std::string &cmd, const std::string &args, const std::string &user) {
+	if (cmd == "GETQUOTAROOT") {
+		std::string name = UnquoteMailbox(args);
+		int64_t room = ResolveMailbox(con, user, name);
+		if (room < 0) {
+			stream.WriteLine(tag + " NO GETQUOTAROOT mailbox not found");
+			return;
+		}
+		// A public room is owned by nobody, so it is in no quota root at all —
+		// and neither is any mailbox of a user with no ceiling. The correct
+		// answer in both cases is a QUOTAROOT line naming no roots, and no QUOTA
+		// line to follow it.
+		int64_t owner = 0;
+		auto stmt = con.Prepare("SELECT mailbox_owner FROM citadel_rooms WHERE room_num = $1");
+		if (!stmt->HasError()) {
+			duckdb::vector<Value> params = {Value::BIGINT(room)};
+			auto r = stmt->Execute(params, false);
+			if (!r->HasError()) {
+				auto &mat = r->Cast<MaterializedQueryResult>();
+				if (mat.RowCount() > 0 && !mat.GetValue(0, 0).IsNull()) {
+					owner = mat.GetValue(0, 0).GetValue<int64_t>();
+				}
+			}
+		}
+		std::string line = QuotaLine(con, user);
+		bool mine = owner > 0 && owner == citadel::GetOrAssignUserNum(con, user);
+		if (!mine || line.empty()) {
+			stream.WriteLine("* QUOTAROOT " + ImapQuote(name));
+		} else {
+			stream.WriteLine("* QUOTAROOT " + ImapQuote(name) + " \"\"");
+			stream.WriteLine(line);
+		}
+		stream.WriteLine(tag + " OK GETQUOTAROOT completed");
+		return;
+	}
+
+	if (cmd == "GETQUOTA") {
+		if (!UnquoteMailbox(args).empty()) {
+			stream.WriteLine(tag + " NO No such quota root");
+			return;
+		}
+		std::string line = QuotaLine(con, user);
+		if (!line.empty()) {
+			stream.WriteLine(line);
+		}
+		stream.WriteLine(tag + " OK GETQUOTA completed");
+		return;
+	}
+
+	// SETQUOTA <root> (STORAGE <n>)
+	//
+	// RFC 9208 §4.1: a server SHOULD refuse this from a user who may not set
+	// quotas. Aide is the same axlevel >= 6 threshold the web console uses.
+	if (citadel::GetAxLevel(con, user) < 6) {
+		stream.WriteLine(tag + " NO [NOPERM] Only an administrator may set a quota");
+		return;
+	}
+	size_t lp = args.find('(');
+	size_t rp = args.rfind(')');
+	if (lp == std::string::npos || rp == std::string::npos || rp < lp) {
+		stream.WriteLine(tag + " BAD SETQUOTA expects a resource list");
+		return;
+	}
+	if (!UnquoteMailbox(args.substr(0, lp)).empty()) {
+		stream.WriteLine(tag + " NO No such quota root");
+		return;
+	}
+	auto items = ImapArgs(args.substr(lp + 1, rp - lp - 1));
+	if (items.size() != 2 || util::Upper(items[0]) != "STORAGE") {
+		// Silently ignoring a resource we do not implement would leave the client
+		// believing it had set something.
+		stream.WriteLine(tag + " NO Unsupported resource");
+		return;
+	}
+	std::string err;
+	if (!quackmail::quota::SetQuota(con, user, std::atoll(items[1].c_str()) * 1024, err)) {
+		stream.WriteLine(tag + " NO " + err);
+		return;
+	}
+	std::string line = QuotaLine(con, user);
+	if (!line.empty()) {
+		stream.WriteLine(line);
+	}
+	stream.WriteLine(tag + " OK SETQUOTA completed");
+}
+
 // The CAPABILITY token list. STARTTLS is advertised only before the TLS upgrade;
 // mirrors a real Citadel server (which offers NAMESPACE, UIDPLUS, SASL, ID).
 std::string CapabilityLine(bool tls_active, bool starttls_avail) {
-	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS MOVE ACL IDLE AUTH=PLAIN AUTH=LOGIN";
+	// QUOTA is the RFC 2087 spelling every deployed client recognises;
+	// QUOTA=RES-STORAGE is what RFC 9208 §5 wants so a client learns which
+	// resource types exist without probing for them.
+	std::string caps = "IMAP4rev1 NAMESPACE ID UIDPLUS MOVE ACL IDLE QUOTA QUOTA=RES-STORAGE "
+	                   "AUTH=PLAIN AUTH=LOGIN";
 	if (!tls_active && starttls_avail) {
 		caps += " STARTTLS";
 	}
@@ -957,6 +1095,8 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 				stream.WriteLine("* STATUS " + ImapQuote(name) + " (" + resp + ")");
 				stream.WriteLine(tag + " OK STATUS completed");
 			}
+		} else if (cmd == "GETQUOTAROOT" || cmd == "GETQUOTA" || cmd == "SETQUOTA") {
+			QuotaCommand(con, stream, tag, cmd, args, s.user);
 		} else if (cmd == "SELECT" || cmd == "EXAMINE") {
 			std::string name = args;
 			if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
@@ -1274,6 +1414,13 @@ void HandleImap(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 			int64_t droom = ResolveMailbox(con, s.user, mbox);
 			if (droom < 0) {
 				stream.WriteLine(tag + " NO [TRYCREATE] mailbox not found");
+			} else if (quackmail::quota::WouldExceed(con, s.user, n)) {
+				// Refused before the continuation, so the literal never leaves the
+				// client. RFC 3501 §4.3 lets a server reject a command carrying a
+				// synchronizing literal outright; the alternative is reading up to
+				// the whole message in order to throw it away. RFC 9208 §5.1
+				// defines OVERQUOTA for exactly this.
+				stream.WriteLine(tag + " NO [OVERQUOTA] Mailbox is over its storage quota");
 			} else {
 				stream.WriteLine("+ Ready for literal data");
 				// Read exactly n bytes worth of message, reconstructing CRLFs.

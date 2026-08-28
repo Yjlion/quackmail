@@ -90,6 +90,19 @@ void EnsureSchema(Connection &con) {
 		)
 	)");
 
+	// The citadel_sessions row this browser occupies, so the web shows up in
+	// RWHO beside telnet and XMPP. 0 means "not registered yet".
+	//
+	// HTTP has no connection to hang presence off, so the browser session is the
+	// anchor: one presence row per signed-in browser, created by whatever request
+	// comes next (including the first one after a restart, when the cookie has
+	// outlived the process), refreshed on a timer, and reaped when no request
+	// comes at all.
+	//
+	// Keyed on the token hash rather than on (client, username): a user may have
+	// three browsers signed in, and signing out of one must not evict the others.
+	con.Query("ALTER TABLE quackmail_web_sessions ADD COLUMN IF NOT EXISTS presence_id BIGINT DEFAULT 0");
+
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS quackmail_web_login_fails (
 			peer_ip  VARCHAR,
@@ -160,8 +173,8 @@ bool LookupSession(Connection &con, const std::string &token, bool tls, Session 
 	// stored-plaintext prefix scan there is no timing channel to walk.
 	std::string hash = util::Sha256Hex(token);
 	auto r = ExecP(con,
-	               "SELECT username, created_at, expires_at, tls, revoked FROM quackmail_web_sessions "
-	               "WHERE token_hash = $1",
+	               "SELECT username, created_at, expires_at, tls, revoked, presence_id, peer_ip "
+	               "FROM quackmail_web_sessions WHERE token_hash = $1",
 	               {Value(hash)});
 	if (!r) {
 		return false;
@@ -175,6 +188,8 @@ bool LookupSession(Connection &con, const std::string &token, bool tls, Session 
 	int64_t expires_at = AsBigint(mat.GetValue(2, 0));
 	bool row_tls = AsBool(mat.GetValue(3, 0));
 	bool revoked = AsBool(mat.GetValue(4, 0));
+	int64_t presence_id = AsBigint(mat.GetValue(5, 0));
+	std::string peer_ip = AsString(mat.GetValue(6, 0));
 
 	int64_t now = NowEpoch();
 	if (revoked || expires_at <= now || created_at + kMaxLifetimeSeconds <= now) {
@@ -199,9 +214,14 @@ bool LookupSession(Connection &con, const std::string &token, bool tls, Session 
 	if (new_expiry > cap) {
 		new_expiry = cap;
 	}
+	bool presence_stale = false;
 	if (new_expiry > expires_at + kRefreshSlackSeconds) {
 		ExecP(con, "UPDATE quackmail_web_sessions SET last_seen = $2, expires_at = $3 WHERE token_hash = $1",
 		      {Value(hash), Value::BIGINT(now), Value::BIGINT(new_expiry)});
+		// This branch can only be reached once per kRefreshSlackSeconds — that is
+		// the whole point of the slack — so it is exactly the schedule presence
+		// wants, at the cost of no extra decision and no extra read.
+		presence_stale = true;
 	} else {
 		ExecP(con, "UPDATE quackmail_web_sessions SET last_seen = $2 WHERE token_hash = $1",
 		      {Value(hash), Value::BIGINT(now)});
@@ -212,6 +232,21 @@ bool LookupSession(Connection &con, const std::string &token, bool tls, Session 
 	out.csrf = CsrfToken(con, hash);
 	out.tls = row_tls;
 	out.axlevel = citadel::GetAxLevel(con, username);
+
+	// Presence is registered here rather than at login, because the cookie
+	// outlives the process: after a restart every signed-in browser has a valid
+	// session and no presence row, and login would never run again to create one.
+	if (presence_id <= 0) {
+		presence_id = citadel::RegisterSession(con, "Web session", peer_ip, kWebHeartbeatSeconds);
+		if (presence_id > 0) {
+			ExecP(con, "UPDATE quackmail_web_sessions SET presence_id = $2 WHERE token_hash = $1",
+			      {Value(hash), Value::BIGINT(presence_id)});
+			citadel::TouchSession(con, presence_id, username, "", "sign in", out.axlevel);
+			presence_stale = false; // just written
+		}
+	}
+	out.presence_id = presence_id;
+	out.presence_stale = presence_stale;
 	return true;
 }
 
@@ -268,12 +303,28 @@ bool CheckAnonCsrf(Connection &con, const std::string &peer_ip, const std::strin
 	return false;
 }
 
+namespace {
+
+// Drop the citadel_sessions rows anchored to the web sessions `where` selects,
+// before those rows go. Every revoke path funnels through one of these so no
+// caller has to remember — and so a future one cannot forget.
+void DropPresenceFor(Connection &con, const std::string &where, duckdb::vector<Value> params) {
+	ExecP(con,
+	      "DELETE FROM citadel_sessions WHERE session_id IN ("
+	      "SELECT presence_id FROM quackmail_web_sessions WHERE presence_id > 0 AND " +
+	          where + ")",
+	      std::move(params));
+}
+
+} // namespace
+
 void RevokeSession(Connection &con, const std::string &token) {
 	if (token.empty()) {
 		return;
 	}
-	ExecP(con, "DELETE FROM quackmail_web_sessions WHERE token_hash = $1",
-	      {Value(util::Sha256Hex(token))});
+	std::string hash = util::Sha256Hex(token);
+	DropPresenceFor(con, "token_hash = $1", {Value(hash)});
+	ExecP(con, "DELETE FROM quackmail_web_sessions WHERE token_hash = $1", {Value(hash)});
 }
 
 void RevokeByHash(Connection &con, const std::string &token_hash, const std::string &username) {
@@ -283,18 +334,23 @@ void RevokeByHash(Connection &con, const std::string &token_hash, const std::str
 	// The username qualifier is what keeps one user from revoking another's
 	// session by pasting in a hash; an admin passes "" to skip it.
 	if (username.empty()) {
+		DropPresenceFor(con, "token_hash = $1", {Value(token_hash)});
 		ExecP(con, "DELETE FROM quackmail_web_sessions WHERE token_hash = $1", {Value(token_hash)});
 	} else {
+		DropPresenceFor(con, "token_hash = $1 AND username = $2", {Value(token_hash), Value(username)});
 		ExecP(con, "DELETE FROM quackmail_web_sessions WHERE token_hash = $1 AND username = $2",
 		      {Value(token_hash), Value(username)});
 	}
 }
 
 void RevokeAllForUser(Connection &con, const std::string &username) {
+	DropPresenceFor(con, "username = $1", {Value(username)});
 	ExecP(con, "DELETE FROM quackmail_web_sessions WHERE username = $1", {Value(username)});
 }
 
 void PruneSessions(Connection &con) {
+	// Presence first, while the rows that name it still exist.
+	DropPresenceFor(con, "(revoked OR expires_at <= $1)", {Value::BIGINT(NowEpoch())});
 	ExecP(con, "DELETE FROM quackmail_web_sessions WHERE revoked OR expires_at <= $1",
 	      {Value::BIGINT(NowEpoch())});
 	ExecP(con, "DELETE FROM quackmail_web_login_fails WHERE at < $1",

@@ -201,7 +201,16 @@ std::string EmitMultipart(const std::string &subtype, const std::string &boundar
 } // namespace
 
 std::string ChooseEncoding(const BuildPart &part) {
-	if (!IsTextType(part.content_type.empty() ? "application/octet-stream" : part.content_type)) {
+	std::string type = part.content_type.empty() ? "application/octet-stream" : part.content_type;
+	// A message/* part carries a whole message, and RFC 2046 §5.2.1 allows it
+	// only 7bit, 8bit or binary — base64 or quoted-printable around one is
+	// illegal, and the clients that do accept it are the ones being generous.
+	// This is what makes "forward as attachment" produce something another
+	// client will open rather than offer to download.
+	if (util::Lower(type).rfind("message/", 0) == 0) {
+		return "8bit";
+	}
+	if (!IsTextType(type)) {
 		return "base64";
 	}
 	// Text: 8bit is the cheapest and keeps the message readable in a raw dump,

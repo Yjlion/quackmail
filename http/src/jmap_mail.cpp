@@ -4,6 +4,7 @@
 
 #include "quackmail/citadel_msg.hpp"
 #include "quackmail/mime.hpp"
+#include "quackmail/quota.hpp"
 #include "quackmail/util.hpp"
 
 #include <algorithm>
@@ -1210,6 +1211,15 @@ js::Value EmailSet(JmapCtx &jc, const js::Value &args) {
 		msg.origin_room = room.display_name;
 		msg.node = ConfigStr(ctx.con, "c_nodename", "");
 		msg.raw = mime::BuildMessage(headers, parts);
+
+		// Storage quota, before the insert rather than relying on the backstop
+		// inside InsertMessage: overQuota is the SetError JMAP defines for this,
+		// and serverFail would tell the client to retry something that cannot
+		// succeed.
+		if (quackmail::quota::WouldExceed(ctx.con, ctx.username, (int64_t)msg.raw.size())) {
+			not_created.Set(m.first, SetError("overQuota", "mailbox is over its storage quota"));
+			continue;
+		}
 
 		std::string store_err;
 		int64_t msgnum = quackmail::citadel::InsertMessage(ctx.con, msg, {room.room_num}, store_err);

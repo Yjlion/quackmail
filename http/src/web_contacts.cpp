@@ -90,37 +90,42 @@ void Index(Ctx &ctx, const Room &room) {
 	if (entries.empty()) {
 		body += "<p class=\"muted\">No contacts here yet.</p>";
 	} else {
-		body += "<div class=\"wrap\"><table class=\"longlist\"><tr>" + Head("Name") + Head("E-mail") +
-		        Head("Telephone") + Head("Organisation") + "</tr>";
+		Table table(ctx, "contacts",
+		            {Column("name", "Name"), Column("email", "E-mail"), Column("tel", "Telephone"),
+		             Column("org", "Organisation")});
+		table.ExtraClass("longlist");
 		for (auto &e : entries) {
-			body += "<tr>";
-			body += "<td>" + Link(ItemHref(room, e.msgnum), e.card.Fn()) + "</td>";
+			auto row = table.Add();
+			row.Html(Link(ItemHref(room, e.msgnum), e.card.Fn()), e.card.Fn());
 
-			std::string mails;
+			std::string mails, mails_sort;
 			for (auto &m : e.card.Emails()) {
 				if (!mails.empty()) {
 					mails += "<br>";
+					mails_sort += " ";
 				}
 				// A contact's address is a link that composes to them, which is
 				// the thing an address book is for.
 				mails += Link("/mail/compose?to=" + http::PercentEncode(m), m);
+				mails_sort += m;
 			}
-			body += "<td>" + RawHtml(mails) + "</td>";
+			row.Html(mails, mails_sort);
 
-			std::string tels;
+			std::string tels, tels_sort;
 			for (auto &t : e.card.Phones()) {
 				if (!tels.empty()) {
 					tels += "<br>";
+					tels_sort += " ";
 				}
 				tels += T(t);
+				tels_sort += t;
 			}
-			body += "<td>" + RawHtml(tels) + "</td>";
+			row.Html(tels, tels_sort);
 
 			const vcard::Property *org = e.card.Find("ORG");
-			body += Cell(org ? (org->values.empty() ? "" : org->values[0]) : "");
-			body += "</tr>";
+			row.Text(org ? (org->values.empty() ? "" : org->values[0]) : "");
 		}
-		body += "</table></div>";
+		body += table.Render();
 		body += "<p class=\"muted\">" + T(std::to_string(entries.size())) +
 		        (entries.size() == 1 ? " contact." : " contacts.") + "</p>";
 	}

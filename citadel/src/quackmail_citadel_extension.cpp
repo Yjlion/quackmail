@@ -735,23 +735,7 @@ std::vector<std::string> WhoLines(Connection &con) {
 	return out;
 }
 
-int64_t ExpressCount(Connection &con, const std::string &user) {
-	if (user.empty()) {
-		return 0;
-	}
-	auto stmt = con.Prepare(
-	    "SELECT count(*) FROM citadel_express WHERE lower(to_user)=lower($1) AND delivered=false");
-	if (stmt->HasError()) {
-		return 0;
-	}
-	duckdb::vector<Value> p = {Value(user)};
-	auto r = stmt->Execute(p, false);
-	if (r->HasError()) {
-		return 0;
-	}
-	auto &mat = r->Cast<MaterializedQueryResult>();
-	return mat.RowCount() ? mat.GetValue(0, 0).GetValue<int64_t>() : 0;
-}
+
 
 void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 	Connection con(db);
@@ -938,13 +922,11 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				} else if (citadel::GetOrAssignUserNum(con, to) <= 0) {
 					stream.WriteLine("550 No such user.");
 				} else {
-					auto num = con.Query("SELECT nextval('citadel_express_seq')");
-					int64_t id = num->HasError() ? 0 : num->GetValue(0, 0).GetValue<int64_t>();
-					ExecParams(con,
-					           "INSERT INTO citadel_express (id, to_user, from_user, text, sent_at) "
-					           "VALUES ($1, $2, $3, $4, $5)",
-					           {Value::BIGINT(id), Value(to), Value(s.username), Value(text),
-					            Value::BIGINT(NowEpoch())});
+					// The store owns the insert, so express semantics live in one
+					// place. The GetOrAssignUserNum guard above duplicates the one
+					// inside SendExpress; it stays because it is what distinguishes
+					// "550 No such user." from a storage failure.
+					citadel::SendExpress(con, to, s.username, text);
 					stream.WriteLine("200 Message sent.");
 				}
 			}
@@ -953,29 +935,25 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 			if (!s.authed) {
 				stream.WriteLine("530 You must log in first.");
 			} else {
-				auto stmt = con.Prepare("SELECT id, from_user, text, sent_at FROM citadel_express "
-				                        "WHERE lower(to_user)=lower($1) AND delivered=false ORDER BY id");
-				duckdb::vector<Value> pr = {Value(s.username)};
-				auto r = stmt->HasError() ? nullptr : stmt->Execute(pr, false);
-				if (!r || r->HasError() || r->Cast<MaterializedQueryResult>().RowCount() == 0) {
+				auto pending = citadel::PendingExpress(con, s.username);
+				if (pending.empty()) {
 					stream.WriteLine("511 No messages waiting.");
 				} else {
-					auto &mat = r->Cast<MaterializedQueryResult>();
-					// Deliver the oldest message; header line then body listing.
-					int64_t id = mat.GetValue(0, 0).GetValue<int64_t>();
-					std::string from = mat.GetValue(1, 0).ToString();
-					std::string text = mat.GetValue(2, 0).ToString();
-					int64_t remaining = (int64_t)mat.RowCount() - 1;
+					// One per call, oldest first — that is what a Citadel client
+					// expects, and the count in the header is what tells it to ask
+					// again.
+					const auto &e = pending.front();
+					int64_t remaining = (int64_t)pending.size() - 1;
 					stream.WriteLine("100 " + std::to_string(remaining) + "|" + std::to_string(NowEpoch()) +
-					                 "|" + from + "|0|");
-					stream.WriteLine(text);
+					                 "|" + e.from_user + "|0|");
+					stream.WriteLine(e.text);
 					stream.WriteLine("000");
-					ExecParams(con, "UPDATE citadel_express SET delivered=true WHERE id=$1", {Value::BIGINT(id)});
+					citadel::MarkExpressDelivered(con, e.id);
 				}
 			}
 		} else if (verb == "CHEK") {
 			// Client status poll: newmail|regis_needed|express_waiting|username
-			int64_t express = ExpressCount(con, s.username);
+			int64_t express = citadel::PendingExpressCount(con, s.username);
 			stream.WriteLine("200 0|0|" + std::to_string(express) + "|" + s.username);
 		} else if (verb == "DELE") {
 			// Delete a message from the current room (distinct from KILL = delete room).

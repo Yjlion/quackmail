@@ -14,6 +14,7 @@
 #include "quackmail/xmlstream.hpp"
 
 #include <cstdio>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,19 @@ ServerController g_xmpps;
 // How long to block waiting for client input before checking for instant
 // messages that have to be pushed out as <message> stanzas.
 constexpr int kPollMs = 500;
+
+// How often to refresh this session's presence row. Not every pass: kPollMs is
+// 500, and 120 UPDATEs a minute per idle client is exactly the write the reaper
+// exists to make unnecessary.
+//
+// Until this existed the row was touched only at login, so a six-hour-dead XMPP
+// session and a live one were indistinguishable — harmless while nothing swept
+// the table, and a bug the moment something did.
+constexpr int64_t kPresenceTouchSeconds = 60;
+
+int64_t NowEpoch() {
+	return (int64_t)std::time(nullptr);
+}
 
 struct Xmpp {
 	bool authed = false;
@@ -188,7 +202,8 @@ void HandleXmpp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 	Xmpp s;
 	s.node = citadel::GetConfig(con, "c_nodename", "quackcit");
 	int64_t session_id = citadel::RegisterSession(con, ctrl.ImplicitTls() ? "XMPPS session" : "XMPP session",
-	                                            stream.PeerIp());
+	                                             stream.PeerIp(), kPresenceTouchSeconds);
+	int64_t last_touch = 0;
 
 	xmlstream::Tokenizer tok;
 	bool running = true;
@@ -197,6 +212,15 @@ void HandleXmpp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 	while (running) {
 		// Push anything waiting for this user before blocking again.
 		PushIncomingMessages(con, stream, s);
+
+		// Presence, on its own timer rather than on every pass. This session
+		// declared a heartbeat interval when it registered, so ReapSessions will
+		// hold it to one.
+		if (s.authed && NowEpoch() - last_touch >= kPresenceTouchSeconds) {
+			citadel::TouchSession(con, session_id, s.username, "", "xmpp",
+			                      citadel::GetAxLevel(con, s.username));
+			last_touch = NowEpoch();
+		}
 
 		if (!stream.WaitReadable(kPollMs)) {
 			continue;

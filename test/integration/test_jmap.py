@@ -51,6 +51,7 @@ OTHER_PASSWORD = "secret2"
 CORE = "urn:ietf:params:jmap:core"
 MAIL = "urn:ietf:params:jmap:mail"
 SUBMIT = "urn:ietf:params:jmap:submission"
+QUOTA = "urn:ietf:params:jmap:quota"
 
 
 def ext(name):
@@ -122,12 +123,18 @@ def main():
         assert CORE in s["capabilities"], f"no core capability: {list(s['capabilities'])}"
         assert MAIL in s["capabilities"]
         assert SUBMIT in s["capabilities"]
+        assert QUOTA in s["capabilities"], f"no quota capability: {list(s['capabilities'])}"
+        # RFC 9425 §2: the value is an empty object.
+        assert s["capabilities"][QUOTA] == {}, s["capabilities"][QUOTA]
+        assert QUOTA in s["accounts"][USER]["accountCapabilities"], \
+            s["accounts"][USER]["accountCapabilities"]
         assert s["username"] == USER
         assert USER in s["accounts"], f"accounts does not name this user: {list(s['accounts'])}"
         # A client may read any of the three, so all three are named.
         assert s["primaryAccounts"][MAIL] == USER
         assert s["primaryAccounts"][CORE] == USER, s["primaryAccounts"]
         assert s["primaryAccounts"][SUBMIT] == USER
+        assert s["primaryAccounts"][QUOTA] == USER, s["primaryAccounts"]
         # Absolute URLs, built from the authority the client actually reached us
         # on. A client calls these verbatim rather than resolving them against
         # the request URI the way it resolves a DAV href, so a path is not a URL
@@ -582,14 +589,69 @@ def main():
             f"JMAP marked it read and IMAP disagrees: {flags_line}"
         im.logout()
 
+        check_quota(con, j)
+
     finally:
         con.execute("CALL qm_http_stop()")
         con.execute("CALL qm_imap_stop()")
         con.close()
 
     print("PASS: JMAP Core + Mail (session, envelope, back-references, Mailbox, Email, "
-          "Thread, Identity, EmailSubmission, upload/attachments, blobs, "
+          "Thread, Identity, EmailSubmission, upload/attachments, blobs, Quota, "
           "authorization, IMAP parity)")
+
+
+def check_quota(con, j):
+    """RFC 9425 Quota/get and Quota/changes."""
+    using = (CORE, MAIL, QUOTA)
+
+    # An account with no ceiling has no Quota objects. hardLimit is a mandatory
+    # UnsignedInt with no "unlimited" spelling, so a sentinel would make every
+    # client's percentage arithmetic wrong; absence is the accurate statement.
+    r = j.one("Quota/get", {"accountId": USER, "ids": None}, using=using)
+    assert r["list"] == [], f"an unlimited account reported a quota: {r['list']}"
+    unlimited_state = r["state"]
+
+    assert con.execute("SELECT ok FROM qm_quota_set(?, 10485760)", [USER]).fetchone()[0]
+
+    r = j.one("Quota/get", {"accountId": USER, "ids": None}, using=using)
+    assert len(r["list"]) == 1, f"expected one Quota object, got {r['list']}"
+    q = r["list"][0]
+    assert q["id"] == "storage", q
+    # Octets here, not the kibibytes IMAP reports. resourceType says which.
+    assert q["resourceType"] == "octets", q
+    assert q["hardLimit"] == 10485760, q
+    assert q["scope"] == "account", q
+    assert q["used"] >= 0 and q["used"] < q["hardLimit"], q
+    limited_state = r["state"]
+    assert limited_state != unlimited_state, "the state did not move when the limit did"
+
+    # ids that are not ours land in notFound rather than being ignored.
+    r = j.one("Quota/get", {"accountId": USER, "ids": ["storage", "nope"]}, using=using)
+    assert [x["id"] for x in r["list"]] == ["storage"], r["list"]
+    assert r["notFound"] == ["nope"], r["notFound"]
+
+    # properties narrows the object, but id always survives (RFC 8620 §5.1).
+    r = j.one("Quota/get", {"accountId": USER, "ids": None, "properties": ["used"]}, using=using)
+    assert set(r["list"][0]) == {"id", "used"}, r["list"][0]
+
+    # No change since the current state means three empty arrays.
+    r = j.one("Quota/changes", {"accountId": USER, "sinceState": limited_state}, using=using)
+    assert r["created"] == [] and r["updated"] == [] and r["destroyed"] == [], r
+    assert r["hasMoreChanges"] is False, r
+
+    # Moving the ceiling is an update even though not one message changed —
+    # which is exactly why the state carries the limit generation as well as the
+    # account state.
+    assert con.execute("SELECT ok FROM qm_quota_set(?, 20971520)", [USER]).fetchone()[0]
+    r = j.one("Quota/changes", {"accountId": USER, "sinceState": limited_state}, using=using)
+    assert r["updated"] == ["storage"], r
+    assert r["newState"] != limited_state, r
+
+    # Lifting the ceiling destroys the object.
+    assert con.execute("SELECT ok FROM qm_quota_set(?, 0)", [USER]).fetchone()[0]
+    r = j.one("Quota/changes", {"accountId": USER, "sinceState": r["newState"]}, using=using)
+    assert r["destroyed"] == ["storage"], r
 
 
 if __name__ == "__main__":

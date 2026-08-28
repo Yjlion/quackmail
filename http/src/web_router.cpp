@@ -58,6 +58,7 @@ const std::vector<Route> &Routes() {
 		RegisterAuthRoutes(r);
 		RegisterMailRoutes(r);
 		RegisterBbsRoutes(r);
+		RegisterChatRoutes(r);
 		// After the BBS routes: these share its /bbs/room/:n prefix.
 		RegisterRoomAdminRoutes(r);
 		RegisterViewRoutes(r);
@@ -360,6 +361,19 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 			ctx.axlevel = sess.axlevel;
 			ctx.session_hash = sess.token_hash;
 			ctx.csrf = sess.csrf;
+			ctx.presence_id = sess.presence_id;
+			// Presence, on the same once-a-minute schedule LookupSession
+			// refreshes the idle window on. The touch is here rather than in core
+			// because `last_cmd` is the request path — an HTTP concept core has no
+			// business knowing.
+			//
+			// `room` is left empty: nothing tracks which room a browser is looking
+			// at, and deriving it from /bbs/room/:n would be a name lookup on the
+			// hot path for a column two pages display.
+			if (sess.presence_id > 0 && sess.presence_stale) {
+				quackmail::citadel::TouchSession(con, sess.presence_id, sess.username, "", req.path,
+				                                 sess.axlevel);
+			}
 		} else {
 			// Stale, revoked or transport-mismatched: clear it so the browser
 			// stops presenting it.
@@ -405,6 +419,21 @@ void Dispatch(Connection &con, const http::Request &req, http::Response &resp) {
 			// citadel_dav_names rows left behind by a delete that did not go
 			// through the DAV DELETE handler (which unbinds its own name).
 			quackmail::citadel::PruneDavNames(con);
+			// Presence rows nothing refreshed: a crashed front-end, a closed tab,
+			// a killed process. None of those run UnregisterSession. This is the
+			// only sweep in the tree, so it also clears rows left by telnet and
+			// Citadel sessions that died — which nothing did before.
+			int64_t grace = (int64_t)std::strtoll(
+			    ConfigStr(con, "qm_session_stale_secs", "86400").c_str(), nullptr, 10);
+			quackmail::citadel::ReapSessions(con, grace);
+			// The instant-message transcript now has an end. Until the chat view
+			// this table was a queue that stopped growing because nobody looked
+			// at it.
+			int64_t xdays = (int64_t)std::strtoll(ConfigStr(con, "qm_express_days", "30").c_str(),
+			                                      nullptr, 10);
+			if (xdays > 0) {
+				quackmail::citadel::PruneExpress(con, xdays * 86400);
+			}
 		}
 	}
 

@@ -43,6 +43,130 @@ been passing over; its JMAP half has no equivalent probe.
 
 ## Decisions worth remembering
 
+### A CSP nonce covers `<style>` elements, never style attributes
+
+This cost a release. `web_notes.cpp` emitted `style="--note:#ffff88"` on note
+cards and colour swatches; `style-src` carries a per-response nonce and no
+`'unsafe-inline'`. CSP Level 3 governs style *attributes* through
+`style-src-attr`, which a nonce cannot satisfy — so every browser dropped the
+declaration in silence, and both the swatches and the Post-it cards fell back to
+the card background. The card styling in `qc.css` had never once rendered.
+
+The fix is `PageOpts::style`: per-page CSS emitted as a nonced `<style>`
+element, which a nonce *does* cover. Anything interpolated into it has to be
+validated first — the notes path takes only `#rrggbb`, because the value came
+out of somebody else's client.
+
+Two follow-ons worth keeping in mind: a selector written against the attribute
+(`[style*="--note"]`) still matched nothing, which is why coloured notes were
+also dark-on-dark in the dark theme; and the test that was supposed to catch
+this asserted the *response string* contained `--note:#ffff88`, which it did.
+Assert the rendered effect, not the bytes.
+
+### Storage quota: where it is enforced is the whole design
+
+The front-end checks give the right protocol code and the better message — SMTP
+`452 4.2.2` at `RCPT`, IMAP `NO [OVERQUOTA]` before the `+`, `507` in webmail,
+`overQuota` in JMAP — but the check that makes the quota *true* is inside
+`citadel::InsertMessage`, gated by `qm_quota_enforce_store`. Webmail's Sent
+Items copy, IMAP `APPEND`, NNTP `POST`, Citadel `ENT0` and every DAV `PUT` write
+straight into rooms with an owner. A ceiling enforced only at named front doors
+leaks through one of them within a release; the DAV `PUT` test in
+`test_groupware.py` is the one that proves it.
+
+Three details that are load-bearing rather than incidental:
+
+- The usage query is a **semi-join on `msgnum`**, not a `JOIN … GROUP BY`.
+  `LocalDeliver` stores one message row and points it into every destination
+  room, so a join charges a user twice for a message in Mail *and* Sent Items.
+  And `citadel_messages` rows are never deleted — unlinking drops the pointer —
+  so summing the message table charges for deleted mail.
+- `RCPT` uses "already over", not "would go over", because **`smtp_in` never
+  parses the ESMTP `SIZE=` parameter**: it advertises `250 SIZE`, and `MAIL`
+  calls `ExtractPath(rest)` and discards the parameters. There is no size at
+  `RCPT` time. The sized test belongs in `LocalDeliver`, where the bytes exist.
+- `Outcome::over_quota` is a **separate vector** from `rejected`, because
+  `smtp_in` maps a non-empty `rejected` to `550 5.7.1` — reusing it would turn
+  an agreed transient deferral into a permanent bounce.
+
+`size_bytes` is the **wire size** (`RenderRfc822`), not the blob length, so
+`GETQUOTA` agrees with the sum of the `RFC822.SIZE`s in the same mailbox.
+
+IMAP reports kibibytes (RFC 9208 §5) and JMAP reports octets (RFC 9425). Neither
+conversion is reused for the other; reporting bytes to IMAP shows 10 MB as
+10 GB.
+
+### Web presence: the browser session is the anchor
+
+HTTP has no connection to hang a `citadel_sessions` row on, so the row belongs
+to the browser session. Three choices in that, each of which had a wrong answer
+that looks right:
+
+- **Register inside `LookupSession`, not at login.** The cookie outlives the
+  process, so after a restart every signed-in browser has a valid session and
+  login never runs again.
+- **Key on the token hash, not on `(client, username)`.** The same person in
+  three browsers is three presences; keying on the pair makes signing out of one
+  evict the others.
+- **Unregister inside `websession.cpp`**, cascaded from `RevokeSession`,
+  `RevokeAllForUser` and `PruneSessions`, so no future revoke path can forget.
+
+This forced the first **session reaper** in the tree. There had never been one:
+the only `DELETE FROM citadel_sessions` was `UnregisterSession`, so a crashed
+front-end leaked a row forever, across restarts. `heartbeat_secs` lives on the
+row — the front-end declares its own interval at registration — rather than the
+reaper holding a list of client strings that goes stale the first time somebody
+uses the `add-listener` skill. A row that declared a heartbeat gets three
+intervals of grace; one that could not (a telnet session blocked in `ReadLine`
+has no timer) gets `qm_session_stale_secs`, a crashed-process sweep rather than
+a liveness test. `ListSessions` applies the same predicate as a filter, from one
+shared fragment, so a read is honest between sweeps.
+
+### The chat transcript, and why the change token ignores delivery
+
+`citadel_express` rows were always `UPDATE`d rather than `DELETE`d, so the
+"queue" was already a log; adding `delivered_at` and a retention sweep is what
+turns it into a transcript. `ExpressChangeToken` is one indexed `max(id)` and is
+deliberately **not** moved by a delivery mark: rendering the log marks messages
+delivered, so a token that moved on delivery would move on every poll, and the
+poll would never go quiet.
+
+`/chat/feed` answers `204` when the token has not moved. htmx 2 treats 204 as
+no-swap by default, so a quiet poll costs one indexed aggregate, an empty body,
+and leaves the caret in the message box alone. The honest cost is stated in
+`docs/web.md`: one thread per connection and a 5-second poll means
+`qm_http_max_connections` (default 256) is also the ceiling on open chat tabs.
+Do not reach for htmx's `[document.visibilityState…]` trigger filter to gate
+background tabs — that needs `htmx.config.allowEval`, which `qc.js` sets false
+and `test_http.py` asserts.
+
+### Bcc is an envelope, not a header
+
+Webmail builds the outgoing message with no `Bcc`, delivers to the blind
+recipients from the envelope, and prepends `Bcc:` to the **sender's own filed
+copy** afterwards. Prepending is safe for the signature because the DKIM `h=`
+list never names Bcc, so the bytes that were signed are the bytes that left. A
+draft keeps its Bcc, because a draft is the author's own copy and losing the
+blind recipients on every save would be worse than storing them where only the
+author can read them.
+
+### Sorting is the server's; order and width are the browser's
+
+The listings that need sorting (`web_mailbox.cpp`, `web_bbs.cpp`,
+`web_search.cpp`) page **before** they load their rows, so a client-side sort
+would reorder one page of a larger set and call it a sort. `?sort=&dir=` is
+therefore server-side, and a handler that holds all its rows (search) sorts
+before slicing. Column order and width are a property of this reader at this
+screen rather than of the account, so they are `localStorage` keyed by table id
+— which also means a browser that has never touched a table gets exactly what
+the server sent.
+
+The shared `Column` descriptor was worth more than the sorting: `data-label`
+drives the phone card layout and appeared at **five sites in a tree with
+thirty-six tables**, so almost every listing rendered as unlabelled cards. A
+descriptor makes the label the heading by construction, so it cannot be
+forgotten again.
+
 ### A bulk action validates every element, not the request
 
 `/mail/move`, `/mail/delete` and `/mail/flag` take a *selection* —
