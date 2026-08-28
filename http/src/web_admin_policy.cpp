@@ -2,6 +2,7 @@
 
 #include "quackmail/dkim.hpp"
 #include "quackmail/mailpolicy.hpp"
+#include "quackmail/quota.hpp"
 
 #include "duckdb/main/materialized_query_result.hpp"
 
@@ -293,7 +294,7 @@ void PostDkimRemove(Ctx &ctx) {
 	RedirectTo(ctx, "/admin/dkim", "deleted");
 }
 
-// ---- send quotas ---------------------------------------------------------
+// ---- send rate limits ----------------------------------------------------
 
 void GetRateLimits(Ctx &ctx) {
 	std::string body = "<div class=\"wrap\"><table><tr>" + Head("User") + "<th class=\"num\">Burst</th>" +
@@ -310,7 +311,7 @@ void GetRateLimits(Ctx &ctx) {
 	}
 	body += "</table></div>";
 
-	body += "<h2>Set a quota</h2>";
+	body += "<h2>Set a rate limit</h2>";
 	body += FormStart(ctx, "/admin/ratelimits/set");
 	body += "<label class=\"field\"><span>User (blank for the default)</span>" +
 	        TextInput("username", "") + "</label>";
@@ -325,7 +326,7 @@ void GetRateLimits(Ctx &ctx) {
 	body += "<p class=\"muted\">One unit is charged per envelope recipient, on the submission port and "
 	        "in webmail alike.</p>";
 
-	AdminPage(ctx, "Send quotas", body);
+	AdminPage(ctx, "Send rate limits", body);
 }
 
 void PostRateLimitSet(Ctx &ctx) {
@@ -339,6 +340,66 @@ void PostRateLimitSet(Ctx &ctx) {
 }
 
 } // namespace
+
+// ---- storage quotas ------------------------------------------------------
+
+void GetQuotas(Ctx &ctx) {
+	std::string body = "<div class=\"wrap\"><table><tr>" + Head("User") +
+	                   "<th class=\"num\">Limit</th><th class=\"num\">Used</th>" +
+	                   Head("Enabled") + "</tr>";
+	for (auto &q : quackmail::quota::ListQuotas(ctx.con)) {
+		// UsageAlways for a named user, because an admin wants the number even
+		// when there is no ceiling on it. The '' row is not a user and has no
+		// usage of its own.
+		bool is_default = q.username.empty();
+		body += "<tr>";
+		body += Cell(is_default ? "(default)" : q.username, "", "User");
+		body += Cell(q.limit_bytes > 0 ? FormatBytes(q.limit_bytes) : "unlimited", "num", "Limit");
+		body += Cell(is_default ? "" : FormatBytes(quackmail::quota::UsageAlways(ctx.con, q.username).used_bytes),
+		             "num", "Used");
+		body += Cell(q.enabled ? "yes" : "no", "", "Enabled");
+		body += "</tr>";
+	}
+	body += "</table></div>";
+
+	body += "<h2>Set a storage quota</h2>";
+	body += FormStart(ctx, "/admin/quotas/set");
+	body += "<label class=\"field\"><span>User (blank for the default)</span>" +
+	        TextInput("username", "") + "</label>";
+	body += "<label class=\"field\"><span>Limit</span>" + TextInput("limit", "0", "number") +
+	        "</label>";
+	body += "<label class=\"field\"><span>Unit</span>" +
+	        Select("unit", {{"MB", "MB"}, {"GB", "GB"}, {"KB", "KB"}, {"B", "bytes"}}, "MB") +
+	        "</label>";
+	body += "<p>" + Button("Save") + "</p>";
+	body += FormEnd();
+	body += "<p class=\"muted\">0 is unlimited, which is the shipped default. A quota counts every "
+	        "byte the server keeps for a user — mail, calendars, contacts, notes and tasks, and the "
+	        "Trash — measured as the message's RFC822 wire size, which is the same number IMAP "
+	        "reports for it. Inbound mail for a full mailbox is deferred with a transient 452 rather "
+	        "than bounced, so a sender holds it and retries.</p>";
+
+	AdminPage(ctx, "Storage quotas", body);
+}
+
+void PostQuotaSet(Ctx &ctx) {
+	int64_t limit = ctx.FormInt("limit", 0);
+	std::string unit = ctx.req.Form("unit");
+	int64_t scale = 1024 * 1024;
+	if (unit == "GB") {
+		scale = 1024LL * 1024 * 1024;
+	} else if (unit == "KB") {
+		scale = 1024;
+	} else if (unit == "B") {
+		scale = 1;
+	}
+	std::string err;
+	if (!quackmail::quota::SetQuota(ctx.con, ctx.req.Form("username"), limit * scale, err)) {
+		BadRequest(ctx, err);
+		return;
+	}
+	RedirectTo(ctx, "/admin/quotas", "saved");
+}
 
 void RegisterAdminPolicyRoutes(std::vector<Route> &out) {
 	out.push_back({"GET", "/admin/domains", Role::Aide, GetDomains});
@@ -358,6 +419,8 @@ void RegisterAdminPolicyRoutes(std::vector<Route> &out) {
 	out.push_back({"POST", "/admin/dkim/remove", Role::Aide, PostDkimRemove});
 	out.push_back({"GET", "/admin/ratelimits", Role::Aide, GetRateLimits});
 	out.push_back({"POST", "/admin/ratelimits/set", Role::Aide, PostRateLimitSet});
+	out.push_back({"GET", "/admin/quotas", Role::Aide, GetQuotas});
+	out.push_back({"POST", "/admin/quotas/set", Role::Aide, PostQuotaSet});
 }
 
 } // namespace qmweb

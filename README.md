@@ -55,6 +55,11 @@ A message that arrives by SMTP lands in the recipient's Mail **room**. The same
 row is what POP3 downloads, what IMAP flags, what the web inbox lists, and what
 the Citadel text client reads. There is one store.
 
+The same is true of the things that are not messages. An instant message
+written in a browser at `/chat` is the row a telnet user reads with `GEXP` and
+an XMPP client receives as a `<message>`; a signed-in browser is a presence row
+beside them in *Who is online*. There is one queue, and it is a table.
+
 [Protocol coverage](docs/protocols.md) has the full table, including what is
 *not* implemented.
 

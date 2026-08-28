@@ -569,6 +569,28 @@ SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
 ----
 vacation days=7 Away / keep	vacation days=7 Away / keep
 
+# RFC 3834 §2 — never answer a robot, identified by its local part. The empty
+# return path rule catches a well-formed bounce and the Auto-Submitted rule
+# catches a well-behaved robot; this is for the ones that are neither.
+query IIII
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: d@x.test\r\nTo: bob@y.test\r\n\r\nbody', 'MAILER-DAEMON@x.test', 'bob@y.test'), chr(10), ' / '),
+       replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: d@x.test\r\nTo: bob@y.test\r\n\r\nbody', 'postmaster@x.test', 'bob@y.test'), chr(10), ' / '),
+       replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: d@x.test\r\nTo: bob@y.test\r\n\r\nbody', 'devs-request@x.test', 'bob@y.test'), chr(10), ' / '),
+       replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: d@x.test\r\nTo: bob@y.test\r\n\r\nbody', 'owner-devs@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+keep	keep	keep	keep
+
+# A person whose name merely contains one of those words is still a person.
+query I
+SELECT replace(qm_sieve_eval(E'require ["vacation"];\nvacation "Away";\n',
+                     E'From: d@x.test\r\nTo: bob@y.test\r\n\r\nbody', 'postmasters-guild@x.test', 'bob@y.test'), chr(10), ' / ');
+----
+vacation days=7 Away / keep
+
 # ---- what the rule editor can and cannot show -------------------------------
 
 # A script requiring `variables` is refused outright rather than shown without
@@ -620,5 +642,14 @@ true
 query I
 SELECT qm_sieve_rules(qm_sieve_recompose(E'require ["vacation"];\nif true {\n  vacation text:\nLine one.\nLine two.\n.\n;\n}\n')) =
        qm_sieve_rules(E'require ["vacation"];\nif true {\n  vacation text:\nLine one.\nLine two.\n.\n;\n}\n');
+----
+true
+
+# **`:mime` survives too**, for the same reason `:create` has to. Decompose has
+# always read it, and Compose did not write it, so touching any *other* rule on
+# the page silently stripped it from a hand-written script and turned the reply
+# body into literal MIME source.
+query I
+SELECT qm_sieve_recompose(E'require ["vacation"];\nif true {\n  vacation :mime :days 3 "Content-Type: text/html\n\n<p>Away</p>";\n}\n') LIKE '%:mime%';
 ----
 true

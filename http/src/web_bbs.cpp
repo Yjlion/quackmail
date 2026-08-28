@@ -205,8 +205,16 @@ void GetBbsRoom(Ctx &ctx) {
 	auto stats = quackmail::citadel::GetRoomStats(ctx.con, ctx.username, room.room_num);
 	auto nums = quackmail::citadel::RoomMessages(ctx.con, room.room_num, filter, 0, stats.last_read);
 	// Newest first on screen, which is what a web reader expects even though
-	// the store hands them back ascending.
-	std::reverse(nums.begin(), nums.end());
+	// the store hands them back ascending. `?sort=date&dir=asc` puts it back:
+	// the number order *is* the date order, so this is the whole of date
+	// sorting for a room of any size. Subject and author are deliberately not
+	// sortable here — the page is sliced out of `nums` before any message is
+	// loaded, so sorting by them would either sort one page of a larger set or
+	// cost a full read of a ten-thousand-message room.
+	bool oldest_first = ctx.req.Param("sort") == "date" && ctx.req.Param("dir") == "asc";
+	if (!oldest_first) {
+		std::reverse(nums.begin(), nums.end());
+	}
 
 	int64_t total_pages = nums.empty() ? 1 : (int64_t)((nums.size() + (size_t)per - 1) / (size_t)per);
 	if (page > total_pages) {
@@ -248,7 +256,10 @@ void GetBbsRoom(Ctx &ctx) {
 		return;
 	}
 
-	body += "<div class=\"wrap\"><table><tr>" + Head("Subject") + Head("From") + Head("Date") + "</tr>";
+	// The date column sorts on the epoch, not on the rendered string: a
+	// formatted date sorted as text puts December before February.
+	Table table(ctx, "bbs-room",
+	            {Column("", "Subject"), Column("", "From"), Column("date", "Date", "", true)});
 	for (size_t i = begin; i < end; i++) {
 		Message msg;
 		if (!quackmail::citadel::LoadMessage(ctx.con, nums[i], msg)) {
@@ -259,13 +270,12 @@ void GetBbsRoom(Ctx &ctx) {
 		if (subject.empty()) {
 			subject = "(no subject)";
 		}
-		body += std::string("<tr") + (unread ? " class=\"unread\"" : "") + ">";
-		body += "<td>" + Link(RoomHref(room, "/msg/" + std::to_string(nums[i])), subject) + "</td>";
-		body += Cell(DecodeHeader(msg.author));
-		body += Cell(FormatTime(ctx, msg.msgtime));
-		body += "</tr>";
+		table.Add(unread ? "unread" : "")
+		    .Html(Link(RoomHref(room, "/msg/" + std::to_string(nums[i])), subject), subject)
+		    .Text(DecodeHeader(msg.author))
+		    .Html(T(FormatTime(ctx, msg.msgtime)), std::to_string(msg.msgtime));
 	}
-	body += "</table></div>";
+	body += table.Render();
 	body += PagerHtml(room, filter, page, per, total_pages);
 
 	Render(ctx, room.display_name, body, RoomPage(room));
@@ -571,14 +581,19 @@ void PostBbsDelete(Ctx &ctx) {
 void GetWho(Ctx &ctx) {
 	auto sessions = quackmail::citadel::ListSessions(ctx.con);
 	std::string body = "<div class=\"wrap\"><table><tr>" + Head("User") + Head("Room") + Head("From") +
-	                   Head("Client") + Head("Doing") + "</tr>";
+	                   Head("Client") + Head("Doing") + Head("") + "</tr>";
 	for (auto &s : sessions) {
 		body += "<tr>";
-		body += Cell(s.username.empty() ? "(signing in)" : s.username);
-		body += Cell(s.room);
-		body += Cell(s.host);
-		body += Cell(s.client);
-		body += Cell(s.last_cmd);
+		body += Cell(s.username.empty() ? "(signing in)" : s.username, "", "User");
+		body += Cell(s.room, "", "Room");
+		body += Cell(s.host, "", "From");
+		body += Cell(s.client, "", "Client");
+		body += Cell(s.last_cmd, "", "Doing");
+		body += "<td>";
+		if (!s.username.empty()) {
+			body += Link("/chat?with=" + http::PercentEncode(s.username), "Chat", "btn sec");
+		}
+		body += "</td>";
 		body += "</tr>";
 	}
 	body += "</table></div>";
@@ -590,7 +605,8 @@ void GetWho(Ctx &ctx) {
 	body += "<p>" + Button("Send") + "</p>";
 	body += FormEnd();
 	body += "<p class=\"muted\">Instant messages reach Citadel, telnet and XMPP clients alike — they all "
-	        "read the same queue.</p>";
+	        "read the same queue. " +
+	        Link("/chat", "Chat") + " shows the conversation rather than a one-way form.</p>";
 
 	PageOpts opts;
 	opts.active = "who";
@@ -707,16 +723,29 @@ static std::string MessageActions(Ctx &ctx, const Room &room, const Message &msg
 		// A personal mail folder: mail actions, which go through the submission
 		// path rather than posting into the room.
 		std::string q = "?room=" + std::to_string(room.room_num) + "&";
-		out += ButtonGroup(
-		    "<a role=\"button\" class=\"secondary\" data-key=\"reply\" href=\"" +
-		    A("/mail/compose" + q + "reply=" + num) + "\">" + Icon("reply") + T(Tr(ctx, "msg.reply")) +
-		    "</a>"
-		    "<a role=\"button\" class=\"secondary\" data-key=\"replyall\" href=\"" +
-		    A("/mail/compose" + q + "reply=" + num + "&all=1") + "\">" + Icon("replyall") +
-		    T(Tr(ctx, "msg.reply_all")) + "</a>"
-		    "<a role=\"button\" class=\"secondary\" data-key=\"forward\" href=\"" +
-		    A("/mail/compose" + q + "forward=" + num) + "\">" + Icon("forward") +
-		    T(Tr(ctx, "msg.forward")) + "</a>");
+		// When this reader is itself a pane swap there is a #reader to dock the
+		// composer into; when the same message is rendered as its own page there
+		// is not, and htmx pointed at a target that does not exist would swallow
+		// the click. So the hx-* half is emitted only in the case where it works,
+		// and the href does the job in both.
+		std::string dock = ctx.req.HasHeader("HX-Request")
+		                       ? " hx-target=\"#reader\" hx-swap=\"innerHTML\" hx-push-url=\"true\" hx-get=\""
+		                       : "";
+		auto action = [&](const std::string &href, const char *key, const char *icon,
+		                  const std::string &label) {
+			std::string a = "<a role=\"button\" class=\"secondary\" data-key=\"" + std::string(key) +
+			                "\" href=\"" + A(href) + "\"";
+			if (!dock.empty()) {
+				a += dock + A(href) + "\"";
+			}
+			return a + ">" + Icon(icon) + T(label) + "</a>";
+		};
+		out += ButtonGroup(action("/mail/compose" + q + "reply=" + num, "reply", "reply",
+		                          Tr(ctx, "msg.reply")) +
+		                   action("/mail/compose" + q + "reply=" + num + "&all=1", "replyall",
+		                          "replyall", Tr(ctx, "msg.reply_all")) +
+		                   action("/mail/compose" + q + "forward=" + num, "forward", "forward",
+		                          Tr(ctx, "msg.forward")));
 
 		// Which way the flag button toggles depends on where the flag is now.
 		bool flagged = false;

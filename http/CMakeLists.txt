@@ -28,6 +28,7 @@ set(EXTENSION_SOURCES
     src/web_assets.cpp
     src/web_auth.cpp
     src/web_bbs.cpp
+    src/web_chat.cpp
     src/web_rooms.cpp
     src/web_views.cpp
     src/web_contacts.cpp
@@ -57,6 +58,7 @@ set(EXTENSION_SOURCES
     src/jmap_session.cpp
     src/jmap_mail.cpp
     src/jmap_submission.cpp
+    src/jmap_quota.cpp
     src/jmap_blob.cpp
 )
 

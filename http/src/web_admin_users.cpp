@@ -1,4 +1,6 @@
 #include "web.hpp"
+
+#include "quackmail/quota.hpp"
 #include "web_i18n.hpp"
 #include "web_views.hpp"
 
@@ -55,13 +57,14 @@ std::string AdminNav() {
 	    {"People",
 	     {{"/admin/users", "Users"}, {"/admin/websessions", "Web sessions"}, {"/admin/who", "Who is online"}}},
 	    {"Rooms", {{"/admin/rooms", "Rooms"}, {"/admin/floors", "Floors"}}},
+	    {"Storage", {{"/admin/quotas", "Storage quotas"}}},
 	    {"Mail policy",
 	     {{"/admin/domains", "Domains"},
 	      {"/admin/aliases", "Aliases"},
 	      {"/admin/acl", "Access rules"},
 	      {"/admin/rbl", "Blocklists"},
 	      {"/admin/dkim", "DKIM"},
-	      {"/admin/ratelimits", "Quotas"}}},
+	      {"/admin/ratelimits", "Send rate limits"}}},
 	    {"Delivery",
 	     {{"/admin/queue", "Mail queue"}, {"/admin/inbound", "Audit log"}, {"/admin/sieve", "Filters"}}},
 	    {"Lists and feeds", {{"/admin/lists", "Mailing lists"}, {"/admin/feeds", "Feeds"}}},
@@ -114,10 +117,17 @@ void GetAdminIndex(Ctx &ctx) {
 	row("Messages", ScalarCount(ctx, "SELECT count(*) FROM citadel_messages"));
 	row("Queued for delivery",
 	    ScalarCount(ctx, "SELECT count(*) FROM quackmail_outbound WHERE status = 'queued'"));
-	row("Protocol sessions online", ScalarCount(ctx, "SELECT count(*) FROM citadel_sessions"));
+	row("Sessions online", ScalarCount(ctx, "SELECT count(*) FROM citadel_sessions"));
+	row("— browsers among them",
+	    ScalarCount(ctx, "SELECT count(*) FROM citadel_sessions WHERE client = 'Web session'"));
 	row("Signed-in browsers",
 	    ScalarCount(ctx, "SELECT count(*) FROM quackmail_web_sessions WHERE NOT revoked"));
 	body += "</table></div>";
+
+	body += "<p class=\"muted\">The last two count different things. A browser appears in "
+	        "&ldquo;sessions online&rdquo; while it is making requests and is swept a few minutes "
+	        "after it stops; &ldquo;signed-in browsers&rdquo; counts cookies that have not expired. "
+	        "A laptop closed an hour ago is in the second and not the first, which is the point.</p>";
 
 	body += "<p class=\"muted\">This console can create accounts, rewrite server configuration and "
 	        "generate signing keys — reaching it is equivalent to root on this host. It is gated by "
@@ -129,25 +139,36 @@ void GetAdminIndex(Ctx &ctx) {
 // ---- users ---------------------------------------------------------------
 
 void GetUsers(Ctx &ctx) {
-	std::string body = "<div class=\"wrap\"><table><tr>" + Head("User") + "<th class=\"num\">Number</th>" +
-	                   Head("Access") + Head("Enabled") + "<th class=\"num\">Calls</th>" +
-	                   Head("Last call") + Head("") + "</tr>";
+	std::string body;
+	Table table(ctx, "admin-users",
+	            {Column("user", "User"), Column::Num("num", "Number"), Column::Num("access", "Access"),
+	             Column("enabled", "Enabled"), Column::Num("calls", "Calls"),
+	             Column("lastcall", "Last call", "", true), Column::Num("storage", "Storage"),
+	             Column("", "")});
 	for (auto &u : quackmail::citadel::ListUsers(ctx.con)) {
-		body += "<tr>";
-		body += Cell(u.username);
-		body += "<td class=\"num\">" + T(std::to_string(u.usernum)) + "</td>";
-		body += "<td>" + FormStart(ctx, "/admin/users/axlevel", "inline") + Hidden("username", u.username) +
-		        TextInput("axlevel", std::to_string(u.axlevel), "number") + Button("Set", "sec") +
-		        FormEnd() + "</td>";
-		body += "<td>" + FormStart(ctx, "/admin/users/enable", "inline") + Hidden("username", u.username) +
-		        Hidden("enabled", u.enabled ? "0" : "1") +
-		        Button(u.enabled ? "Yes — disable" : "No — enable", "sec") + FormEnd() + "</td>";
-		body += "<td class=\"num\">" + T(std::to_string(u.times_called)) + "</td>";
-		body += Cell(FormatTime(ctx, u.last_call));
-		body += "<td>" + Link("/admin/sieve?user=" + http::PercentEncode(u.username), "Filters") + "</td>";
-		body += "</tr>";
+		auto row = table.Add();
+		row.Text(u.username);
+		row.Number(u.usernum);
+		row.Html(FormStart(ctx, "/admin/users/axlevel", "inline") + Hidden("username", u.username) +
+		             TextInput("axlevel", std::to_string(u.axlevel), "number") + Button("Set", "sec") +
+		             FormEnd(),
+		         std::to_string(u.axlevel));
+		row.Html(FormStart(ctx, "/admin/users/enable", "inline") + Hidden("username", u.username) +
+		             Hidden("enabled", u.enabled ? "0" : "1") +
+		             Button(u.enabled ? "Yes — disable" : "No — enable", "sec") + FormEnd(),
+		         u.enabled ? "1" : "0");
+		row.Number(u.times_called);
+		row.Html(T(FormatTime(ctx, u.last_call)), std::to_string(u.last_call));
+		// What this user is keeping, against the ceiling that applies to them.
+		// The editor is /admin/quotas: two places to set one number is how the
+		// two end up disagreeing.
+		auto q = quackmail::quota::UsageAlways(ctx.con, u.username);
+		row.Html(Link("/admin/quotas", FormatBytes(q.used_bytes) +
+		                                   (q.limited ? " / " + FormatBytes(q.limit_bytes) : "")),
+		         std::to_string(q.used_bytes));
+		row.Html(Link("/admin/sieve?user=" + http::PercentEncode(u.username), "Filters"));
 	}
-	body += "</table></div>";
+	body += table.Render();
 
 	body += "<h2>Add a user</h2>";
 	body += FormStart(ctx, "/admin/users/add");
@@ -608,6 +629,10 @@ const ConfigKey kConfigKeys[] = {
     {"qm_dmarc_enforce", "Honour the sender's DMARC policy (1/0)"},
     {"qm_rbl_reject", "Reject listed clients (1/0)"},
     {"qm_quarantine_room", "Quarantine folder"},
+    {"qm_sieve_vacation", "Allow out-of-office auto-replies (1/0)"},
+    {"qm_session_stale_secs", "Sweep presence rows after (seconds)"},
+    {"qm_express_days", "Keep instant messages for (days)"},
+    {"qm_chat_poll_secs", "Chat refresh interval (seconds)"},
     {"qm_web_theme", "Default colour theme"},
     {"qm_default_date_format", "Default date format (iso/us/eu)"},
     {"qm_default_locale", "Default language"},

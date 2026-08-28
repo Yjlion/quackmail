@@ -320,3 +320,71 @@ query II
 SELECT name, value FROM qm_config_get('qm_spf_reject');
 ----
 qm_spf_reject	1
+
+# ---- storage quotas -------------------------------------------------------
+#
+# Configuration only. Whether an over-quota delivery is actually refused is a
+# question for test/integration/: the umbrella's table functions open their own
+# connection, so a quota set here is invisible to a protocol session and a
+# message delivered there is invisible to the next query here.
+#
+# Unlimited out of the box. A quota that appeared on upgrade and started
+# deferring mail would be a data-loss bug wearing a feature's clothes.
+
+query III
+SELECT username, limit_bytes, enabled FROM qm_quotas();
+----
+(default)	0	true
+
+query II
+SELECT ok, note FROM qm_quota_set('alice', 10485760);
+----
+true	quota set
+
+query III
+SELECT username, limit_bytes, enabled FROM qm_quotas();
+----
+(default)	0	true
+alice	10485760	true
+
+# The site default is a row like any other, and setting it leaves the
+# exceptions alone.
+
+query II
+SELECT ok, note FROM qm_quota_set('', 5242880);
+----
+true	quota set
+
+query III
+SELECT username, limit_bytes, enabled FROM qm_quotas();
+----
+(default)	5242880	true
+alice	10485760	true
+
+# A negative ceiling is rejected rather than stored as a number that would make
+# every user instantly over quota.
+
+query II
+SELECT ok, note FROM qm_quota_set('bob', -1);
+----
+false	a quota cannot be negative
+
+# Nothing stored for bob, who therefore still gets the default.
+
+query III
+SELECT username, limit_bytes, enabled FROM qm_quotas();
+----
+(default)	5242880	true
+alice	10485760	true
+
+# 0 is unlimited, so it is also how a ceiling is lifted.
+
+query II
+SELECT ok, note FROM qm_quota_set('alice', 0);
+----
+true	quota set
+
+query III
+SELECT username, limit_bytes, over FROM qm_quota_status('alice');
+----
+alice	0	false

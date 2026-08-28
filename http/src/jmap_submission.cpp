@@ -3,6 +3,7 @@
 #include "quackmail/citadel_msg.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/mime.hpp"
+#include "quackmail/quota.hpp"
 #include "quackmail/submission.hpp"
 #include "quackmail/util.hpp"
 
@@ -228,6 +229,14 @@ js::Value EmailSubmissionSet(JmapCtx &jc, const js::Value &args) {
 		auto quota = quackmail::policy::CheckRate(ctx.con, ctx.username, (int64_t)rcpts.size());
 		if (!quota.allowed) {
 			not_created.Set(m.first, SetError("overQuota", quota.reason));
+			continue;
+		}
+
+		// And the storage quota, because a submission also files a copy. Two
+		// different limits reported through one SetError type: JMAP has only
+		// `overQuota`, and the description is what tells them apart.
+		if (quackmail::quota::WouldExceed(ctx.con, ctx.username, (int64_t)rfc822.size())) {
+			not_created.Set(m.first, SetError("overQuota", "mailbox is over its storage quota"));
 			continue;
 		}
 

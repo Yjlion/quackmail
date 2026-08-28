@@ -48,6 +48,9 @@ struct Ctx {
 	std::string username; // "" when anonymous
 	int64_t axlevel = 0;
 	std::string session_hash; // sha256 of the session token, "" when anonymous
+	// This browser's row in citadel_sessions, so a handler can name it. 0 when
+	// presence is not registered (an anonymous request, or registration failed).
+	int64_t presence_id = 0;
 	std::string csrf;         // raw CSRF token, for rendering into forms
 	std::string nonce;        // per-response CSP nonce
 	bool tls = false;         // request arrived over TLS (or a trusted proxy said so)
@@ -85,6 +88,7 @@ struct Route {
 void RegisterStaticRoutes(std::vector<Route> &out);
 void RegisterAuthRoutes(std::vector<Route> &out);
 void RegisterBbsRoutes(std::vector<Route> &out);
+void RegisterChatRoutes(std::vector<Route> &out);
 // Per-room management and self-serve creation. Ordinary user routes, gated on
 // citadel::CanAdminister rather than on the Aide role — see web_rooms.cpp.
 void RegisterRoomAdminRoutes(std::vector<Route> &out);
@@ -164,6 +168,92 @@ std::string RawHtml(const std::string &html);
 std::string Cell(const std::string &text, const std::string &css_class = "",
                  const std::string &label = "");
 std::string Head(const std::string &text);
+
+// ---- data tables ---------------------------------------------------------
+//
+// One column of a listing: its sort key, its heading, and how its cells are
+// classed. Declaring it once is what stops Head() and Cell() from disagreeing —
+// the data-label a phone reads is the heading by construction, rather than by
+// every call site remembering to pass the same string twice. (It mostly did
+// not: data-label appeared at five sites in a tree with thirty-six tables, so
+// almost every listing rendered as unlabelled cards on a phone.)
+struct Column {
+	std::string key;       // ?sort= value; empty means this column cannot be sorted
+	std::string label;     // the heading, and the data-label on every cell below it
+	std::string css_class; // on the cells, e.g. "num"
+	bool numeric;          // sort as a number rather than as text
+
+	Column(const std::string &key, const std::string &label, const std::string &css_class = "",
+	       bool numeric = false);
+	// A right-aligned, numerically sorted column.
+	static Column Num(const std::string &key, const std::string &label);
+};
+
+// A sortable listing.
+//
+// Sorting is server-side because the pages that need it paginate *before* they
+// load their rows: sorting the rendered page would sort one page of a larger
+// set, which is worse than not sorting at all. Reordering and resizing are
+// client-side (qc.js), persisted per table id, and are the reason every table
+// carries a <colgroup> and a data-table.
+class Table {
+public:
+	class Row {
+	public:
+		Row(Table *table, size_t index) : table_(table), index_(index) {
+		}
+		// A cell of plain text, escaped, sorting as itself.
+		Row &Text(const std::string &value);
+		// A cell of markup this module built. `sort_as` is what it sorts by —
+		// without it a column of links would sort by its HTML.
+		Row &Html(const std::string &html, const std::string &sort_as = "");
+		// A number, right-aligned by the column's own class and sorted as one.
+		Row &Number(int64_t value);
+
+	private:
+		Table *table_;
+		size_t index_;
+	};
+
+	// `id` names the table in localStorage, so it must be stable across
+	// releases and unique within the application.
+	Table(Ctx &ctx, const std::string &id, const std::vector<Column> &columns);
+
+	// Start a row. Cells are added in declared column order.
+	Row Add(const std::string &row_class = "");
+	// True when the request asked for a sort this table understands. Handlers
+	// that page before loading rows use this to decide whether to widen their
+	// window.
+	bool Sorted() const;
+	const std::string &SortKey() const;
+	bool Descending() const;
+	// The whole listing: the wrapper, the colgroup, the head and the rows.
+	std::string Render() const;
+	// A listing with nothing in it yet — the caller supplies the message.
+	bool Empty() const;
+	// An extra class on the <table>, for the ones that were already carrying
+	// one ("longlist" turns on content-visibility for a list of thousands).
+	void ExtraClass(const std::string &css_class);
+
+private:
+	friend class Row;
+	struct CellData {
+		std::string html;
+		std::string sort;
+	};
+	struct RowData {
+		std::string css_class;
+		std::vector<CellData> cells;
+	};
+
+	std::string id_;
+	std::vector<Column> columns_;
+	std::vector<RowData> rows_;
+	std::string extra_class_;
+	std::string base_; // href prefix for the header links, query included
+	int sort_ = -1;    // index into columns_, or -1
+	bool desc_ = false;
+};
 std::string Link(const std::string &href, const std::string &label, const std::string &css_class = "");
 std::string TextInput(const std::string &name, const std::string &value, const std::string &type = "text",
                       const std::string &placeholder = "");
@@ -211,6 +301,16 @@ struct PageOpts {
 	// deferred after the shared one. Pages that need no script leave it empty,
 	// which is most of them.
 	std::string script;
+	// Per-page CSS, emitted as a nonced <style> after the theme block.
+	//
+	// For rules a page can only know at render time — the colour a particular
+	// note was saved with, which is not a fixed palette because X-OUTLOOK-COLOR
+	// can hold whatever hex the client that wrote it chose. A style *attribute*
+	// cannot carry these: style-src has a nonce and no 'unsafe-inline', and a
+	// nonce covers <style> elements only, never attributes, so an inline style=
+	// is dropped in silence. Anything interpolated in here must be validated by
+	// its caller — this is raw CSS, not escaped text.
+	std::string style;
 
 	PageOpts();
 };

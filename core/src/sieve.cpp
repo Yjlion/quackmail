@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -1402,6 +1403,35 @@ const char *VacationRefusal(const Context &ctx, const std::vector<std::string> &
 		}
 	}
 
+	// RFC 3834 §2: never answer a robot, identified by its local part.
+	//
+	// Rule 1 above (an empty return path) catches a well-formed bounce, and the
+	// Auto-Submitted and Precedence rules catch a well-behaved robot. This is for
+	// the ones that are neither: a MAILER-DAEMON with a real return path and no
+	// Auto-Submitted header, or a list's -request address. Answering one of those
+	// is at best noise and at worst a loop between two auto-repliers.
+	{
+		std::string local = sender.substr(0, sender.find('@'));
+		static const char *const kRobots[] = {"mailer-daemon", "postmaster", "listserv", "majordomo"};
+		for (const char *robot : kRobots) {
+			if (local == robot) {
+				return "the sender is an automated address";
+			}
+		}
+		auto ends_with = [&](const char *suffix) {
+			size_t n = std::strlen(suffix);
+			return local.size() > n && local.compare(local.size() - n, n, suffix) == 0;
+		};
+		auto starts_with = [&](const char *prefix) {
+			size_t n = std::strlen(prefix);
+			return local.size() > n && local.compare(0, n, prefix) == 0;
+		};
+		if (ends_with("-request") || ends_with("-bounces") || ends_with("-confirm") ||
+		    starts_with("owner-") || starts_with("bounce-")) {
+			return "the sender is an automated address";
+		}
+	}
+
 	// §4.5: the user must actually be a recipient. Without this, being bcc'd on
 	// a thread auto-replies to it, and so does every message a rule happened to
 	// route here.
@@ -2190,6 +2220,13 @@ std::string Compose(const std::vector<Rule> &rules) {
 				out += "    vacation";
 				if (a.vacation.days > 0 && a.vacation.days != 7) {
 					out += " :days " + std::to_string(a.vacation.days);
+				}
+				// Decompose reads :mime, so Compose has to write it. Without this
+				// pair, editing any *other* rule in the builder silently stripped
+				// :mime from a hand-written script — the round trip is the whole
+				// contract of these two functions.
+				if (a.vacation.mime) {
+					out += " :mime";
 				}
 				if (!a.vacation.subject.empty()) {
 					out += " :subject " + QuoteSieve(a.vacation.subject);

@@ -4,6 +4,9 @@
 
 #include "quackmail/auth.hpp"
 #include "quackmail/sieve.hpp"
+#include "quackmail/quota.hpp"
+
+#include <algorithm>
 
 #include "duckdb/main/materialized_query_result.hpp"
 
@@ -48,6 +51,24 @@ void GetPrefs(Ctx &ctx) {
 	body += "<dt>Calls</dt><dd>" + T(std::to_string(user.times_called)) + "</dd>";
 	body += "<dt>Posts</dt><dd>" + T(std::to_string(user.num_posts)) + "</dd>";
 	body += "<dt>Last call</dt><dd>" + T(FormatTime(ctx, user.last_call)) + "</dd>";
+	// Storage, whether or not there is a ceiling: "how much am I keeping?" is a
+	// question worth answering on an unlimited account too.
+	{
+		auto q = quackmail::quota::UsageAlways(ctx.con, ctx.username);
+		body += "<dt>" + T(Tr(ctx, "prefs.storage")) + "</dt><dd>";
+		if (q.limited) {
+			// Pico styles <progress> already, so this needs no new CSS and no
+			// script. value and max are the real byte counts rather than a
+			// percentage, so a screen reader announces the numbers.
+			body += "<progress value=\"" + A(std::to_string(q.used_bytes)) + "\" max=\"" +
+			        A(std::to_string(q.limit_bytes)) + "\"></progress> " +
+			        T(TrF(ctx, "prefs.storage_of", {FormatBytes(q.used_bytes),
+			                                        FormatBytes(q.limit_bytes)}));
+		} else {
+			body += T(TrF(ctx, "prefs.storage_nolimit", {FormatBytes(q.used_bytes)}));
+		}
+		body += "</dd>";
+	}
 	body += "</dl></div>";
 
 	body += "<h2>Password</h2>";
@@ -115,6 +136,20 @@ void GetPrefs(Ctx &ctx) {
 	body += "<label class=\"field\"><span>Date format</span>" +
 	        Select("date_format", date_formats,
 	               quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_date_format")) +
+	        "</label>";
+
+	// Compose defaults. The rich editor forced itself on regardless of what the
+	// user wanted; it is a preference now, read by the form so the server and
+	// qc-compose.js cannot disagree about the initial state.
+	body += Checkbox("compose_rich",
+	                 quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_compose_rich", "1") != "0",
+	                 "Compose in formatted text by default");
+
+	// Appended to a new message, never to a resumed draft — a draft already has
+	// it in its stored body.
+	body += "<label class=\"field\"><span>Signature</span>" +
+	        TextArea("signature", quackmail::citadel::GetUserPref(ctx.con, ctx.username, "web_signature"),
+	                 4) +
 	        "</label>";
 
 	body += "<p>" + Button("Save settings") + "</p>";
@@ -236,6 +271,16 @@ void PostSettings(Ctx &ctx) {
 	// the field is the "off" value — there is no third state to store.
 	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_mail_threaded",
 	                                ctx.req.Form("threaded") == "1" ? "1" : "");
+
+	// "0" and not "" is the off value here: the default is on, so an empty row
+	// would read as "unset" and turn it straight back on again.
+	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_compose_rich",
+	                                ctx.req.Form("compose_rich") == "1" ? "" : "0");
+
+	// Stored as typed. It becomes body text, never a header and never markup:
+	// compose puts it in the textarea, which is escaped like anything else.
+	quackmail::citadel::SetUserPref(ctx.con, ctx.username, "web_signature",
+	                                ctx.req.Form("signature").substr(0, 2000));
 
 	// Only a locale this build actually ships a catalog for; anything else
 	// clears the row rather than pinning the visitor to a typo.
@@ -703,6 +748,96 @@ std::string SieveHref(const std::string &action_prefix, const std::string &user,
 	return out;
 }
 
+// ---- out of office -------------------------------------------------------
+//
+// Vacation has been implemented since v0.7.0 and reachable only as one option
+// in the generic rule builder, which is the same as not being reachable: nobody
+// looking for "out of office" finds it filed under "add a rule whose action is
+// vacation". This is a named front door onto the same machinery.
+//
+// It owns exactly one rule — unconditional, whose only action is VACATION — in
+// the user's active script. Anything else in that script is left alone, and a
+// script the rule view cannot decompose is refused rather than rewritten.
+
+// The active script, or "" if there is none.
+std::string ActiveScriptName(const std::vector<Script> &scripts) {
+	for (const auto &s : scripts) {
+		if (s.active) {
+			return s.name;
+		}
+	}
+	return std::string();
+}
+
+// Is this the rule an out-of-office owns? Unconditional, one action, vacation.
+bool IsVacationRule(const quackmail::sieve::Rule &r) {
+	return r.tests.empty() && r.actions.size() == 1 &&
+	       r.actions[0].type == quackmail::sieve::Action::VACATION;
+}
+
+const std::pair<const char *, const char *> kVacationDays[] = {
+    {"1", "Every day"},   {"3", "Every 3 days"},   {"7", "Once a week"},
+    {"14", "Every 2 weeks"}, {"30", "Once a month"},
+};
+
+std::string VacationSection(Ctx &ctx, const std::string &user, const std::string &action_prefix) {
+	auto scripts = LoadScripts(ctx, user);
+	std::string active = ActiveScriptName(scripts);
+	std::string text;
+	for (const auto &s : scripts) {
+		if (s.name == active) {
+			text = s.body;
+		}
+	}
+
+	std::string body = "<h2>" + T(Tr(ctx, "vacation.title")) + "</h2>";
+
+	std::vector<quackmail::sieve::Rule> rules;
+	std::string why;
+	if (!text.empty() && !quackmail::sieve::Decompose(text, rules, why)) {
+		// The same honesty the rule view applies: a script this cannot read is a
+		// script this must not rewrite.
+		body += "<div class=\"warnbar\">" + T(why) +
+		        " Set an out-of-office reply as a rule in the active script instead.</div>";
+		return body;
+	}
+
+	const quackmail::sieve::Rule *found = nullptr;
+	for (const auto &r : rules) {
+		if (IsVacationRule(r)) {
+			found = &r;
+		}
+	}
+
+	bool on = found != nullptr;
+	std::string reason = on ? found->actions[0].reason : std::string();
+	std::string subject = on ? found->actions[0].vacation.subject : std::string();
+	std::string days = std::to_string(on ? found->actions[0].vacation.days : 7);
+
+	body += FormStart(ctx, action_prefix + "/vacation");
+	body += Hidden("user", user);
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "vacation.enabled")) + "</span>" +
+	        Checkbox("enabled", on, Tr(ctx, "vacation.enabled_label")) + "</label>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "vacation.subject")) + "</span>" +
+	        TextInput("subject", subject) + "</label>";
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "vacation.message")) + "</span>" +
+	        TextArea("reason", reason, 5) + "</label>";
+	// :days is exposed here and not in the generic rule builder. The builder's
+	// comment refuses it as a foot-gun, which is right for a free-form action
+	// nobody labelled; on a form that says "out of office" it is the one setting
+	// people actually want, so it is offered as a bounded choice rather than a
+	// number box.
+	body += "<label class=\"field\"><span>" + T(Tr(ctx, "vacation.frequency")) + "</span>" +
+	        Select("days", std::vector<std::pair<std::string, std::string>>(
+	                           std::begin(kVacationDays), std::end(kVacationDays)),
+	               days) +
+	        "</label>";
+	body += "<p>" + Button(Tr(ctx, "vacation.save")) + "</p>";
+	body += FormEnd();
+	body += "<p class=\"muted\">" + T(Tr(ctx, "vacation.note")) + "</p>";
+	return body;
+}
+
 std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &action_prefix) {
 	auto scripts = LoadScripts(ctx, user);
 	std::string editing = ctx.req.Param("name");
@@ -713,8 +848,11 @@ std::string SieveBody(Ctx &ctx, const std::string &user, const std::string &acti
 		}
 	}
 
-	std::string body = "<div class=\"wrap\"><table><tr>" + Head("Script") + Head("State") + Head("") +
-	                   "</tr>";
+	std::string body = RawHtml(VacationSection(ctx, user, action_prefix));
+
+	body += "<h2>" + T(Tr(ctx, "vacation.scripts")) + "</h2>";
+	body += "<div class=\"wrap\"><table><tr>" + Head("Script") + Head("State") + Head("") +
+	        "</tr>";
 	for (auto &s : scripts) {
 		body += "<tr>";
 		body += "<td>" + Link(action_prefix + "?name=" + http::PercentEncode(s.name) +
@@ -790,12 +928,27 @@ bool SaveScript(Ctx &ctx, const std::string &user, const std::string &name, cons
 	if (!quackmail::sieve::Check(script, err)) {
 		return false;
 	}
+	// Whether this script is the active one is not something a save decides.
+	// Re-inserting it as inactive meant every edit in the rule builder silently
+	// switched the user's filtering off — the rules looked saved, and nothing
+	// ran them.
+	bool was_active = false;
+	{
+		auto r = Exec(ctx.con,
+		              "SELECT active FROM quackmail_sieve_scripts WHERE username = $1 AND name = $2",
+		              {Value(user), Value(name)});
+		if (r) {
+			auto &mat = r->Cast<MaterializedQueryResult>();
+			was_active = mat.RowCount() > 0 && !mat.GetValue(0, 0).IsNull() &&
+			             mat.GetValue(0, 0).GetValue<bool>();
+		}
+	}
 	Exec(ctx.con, "DELETE FROM quackmail_sieve_scripts WHERE username = $1 AND name = $2",
 	     {Value(user), Value(name)});
 	if (!Exec(ctx.con,
 	          "INSERT INTO quackmail_sieve_scripts (username, name, active, script) "
-	          "VALUES ($1, $2, false, $3)",
-	          {Value(user), Value(name), Value(script)})) {
+	          "VALUES ($1, $2, $4, $3)",
+	          {Value(user), Value(name), Value(script), Value::BOOLEAN(was_active)})) {
 		err = "Could not store the script.";
 		return false;
 	}
@@ -1187,6 +1340,85 @@ void PostSieveSave(Ctx &ctx) {
 	RedirectTo(ctx, "/prefs/sieve", "saved");
 }
 
+// Turn an out-of-office reply on or off by rewriting exactly one rule of the
+// user's active script. Everything else in that script is preserved, because the
+// rules are read out of the text, edited, and composed back — the same round
+// trip the rule builder makes.
+void ApplyVacation(Ctx &ctx, const std::string &user, const std::string &redirect) {
+	auto scripts = LoadScripts(ctx, user);
+	std::string name = ActiveScriptName(scripts);
+	std::string text;
+	for (const auto &s : scripts) {
+		if (s.name == name) {
+			text = s.body;
+		}
+	}
+
+	std::vector<quackmail::sieve::Rule> rules;
+	std::string why;
+	if (!text.empty() && !quackmail::sieve::Decompose(text, rules, why)) {
+		ErrorPage(ctx, 400, "This script cannot be edited as rules",
+		          why + " Set an out-of-office reply as a rule instead.");
+		return;
+	}
+
+	// Whatever was there, there is at most one afterwards.
+	rules.erase(std::remove_if(rules.begin(), rules.end(),
+	                           [](const quackmail::sieve::Rule &r) { return IsVacationRule(r); }),
+	            rules.end());
+
+	bool enabled = !ctx.req.Form("enabled").empty();
+	std::string reason = ctx.req.Form("reason");
+	if (enabled && reason.empty()) {
+		BadRequest(ctx, "An out-of-office reply needs a message.");
+		return;
+	}
+	if (enabled) {
+		quackmail::sieve::Rule r;
+		r.name = "Out of office";
+		quackmail::sieve::Action a(quackmail::sieve::Action::VACATION);
+		a.reason = reason;
+		a.vacation.subject = ctx.req.Form("subject");
+		int64_t days = ctx.FormInt("days", 7);
+		// Bounded rather than trusted: the form offers a fixed set, and a hand
+		// posted number outside it would be a rule the engine clamps anyway.
+		a.vacation.days = (int)(days >= 1 && days <= 365 ? days : 7);
+		r.actions.push_back(a);
+		// Last, so an earlier `fileinto ... stop` still wins. An out-of-office is
+		// an addition to somebody's filtering, not a replacement for it.
+		rules.push_back(r);
+	}
+
+	if (name.empty()) {
+		// No active script at all. Nothing to preserve, so make one and turn it
+		// on — a toggle that silently did nothing because there was no script
+		// would be worse than creating one.
+		if (!enabled) {
+			RedirectTo(ctx, redirect, "saved");
+			return;
+		}
+		name = "vacation";
+		std::string composed = quackmail::sieve::Compose(rules);
+		std::string err;
+		if (!SaveScript(ctx, user, name, composed, err)) {
+			ErrorPage(ctx, 500, "The out-of-office reply could not be saved", err);
+			return;
+		}
+		ActivateScript(ctx, user, name);
+		RedirectTo(ctx, redirect, "saved");
+		return;
+	}
+
+	if (!StoreRules(ctx, user, name, rules)) {
+		return;
+	}
+	RedirectTo(ctx, redirect, "saved");
+}
+
+void PostSieveVacation(Ctx &ctx) {
+	ApplyVacation(ctx, ctx.username, "/prefs/sieve");
+}
+
 void PostSieveActivate(Ctx &ctx) {
 	ActivateScript(ctx, ctx.username, ctx.req.Form("name"));
 	RedirectTo(ctx, "/prefs/sieve", "activated");
@@ -1300,6 +1532,7 @@ void RegisterPrefsRoutes(std::vector<Route> &out) {
 	out.push_back({"POST", "/prefs/profile", Role::User, PostProfile});
 	out.push_back({"GET", "/prefs/sieve", Role::User, GetSieve});
 	out.push_back({"POST", "/prefs/sieve/save", Role::User, PostSieveSave});
+	out.push_back({"POST", "/prefs/sieve/vacation", Role::User, PostSieveVacation});
 	out.push_back({"POST", "/prefs/sieve/activate", Role::User, PostSieveActivate});
 	out.push_back({"POST", "/prefs/sieve/delete", Role::User, PostSieveDelete});
 	out.push_back({"POST", "/prefs/sieve/rule/add", Role::User, PostSieveRuleAdd});

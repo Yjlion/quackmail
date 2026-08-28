@@ -214,7 +214,11 @@ void Index(Ctx &ctx, const Room &room) {
 	std::string toolbar = Toolbar(
 	    "<label class=\"vh\" for=\"pickall\">" + T(Tr(ctx, "mailbox.select_all")) + "</label>"
 	    "<input type=\"checkbox\" id=\"pickall\" class=\"pickall\">" +
-	    Link("/mail/compose", Tr(ctx, "mail.write"), "btn") + filters +
+	    // Docked: compose swaps into the reading pane rather than navigating away
+	    // from the mailbox. The href is what it does without htmx.
+	    "<a role=\"button\" href=\"/mail/compose\" hx-get=\"/mail/compose\" "
+	    "hx-target=\"#reader\" hx-swap=\"innerHTML\" hx-push-url=\"true\">" +
+	    T(Tr(ctx, "mail.write")) + "</a>" + filters +
 	    "<span class=\"spacer\"></span>" +
 	    Link("/search?room=" + std::to_string(room.room_num), Tr(ctx, "mailbox.search_folder"), "btn sec") +
 	    FormStart(ctx, RoomHref(room, "/markread"), "inline") +
@@ -226,6 +230,9 @@ void Index(Ctx &ctx, const Room &room) {
 	opts.view = (int)room.default_view;
 	opts.wide = true;
 	opts.panes = true;
+	// The composer travels with the page, because compose docks into the reader
+	// pane here rather than arriving as its own document.
+	opts.script = "qc-compose.js";
 
 	// ---- the reader half ---------------------------------------------------
 	// `open` is a message number, and LoadMessageIn is what confirms it is

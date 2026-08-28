@@ -4,6 +4,7 @@
 
 #include "quackmail/mime.hpp"
 #include "quackmail/tz.hpp"
+#include "quackmail/util.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -105,6 +106,219 @@ std::string Cell(const std::string &text, const std::string &css_class, const st
 
 std::string Head(const std::string &text) {
 	return "<th>" + T(text) + "</th>";
+}
+
+// ---- data tables ---------------------------------------------------------
+
+Column::Column(const std::string &key_, const std::string &label_, const std::string &css_class_,
+               bool numeric_)
+    : key(key_), label(label_), css_class(css_class_), numeric(numeric_) {
+}
+
+Column Column::Num(const std::string &key, const std::string &label) {
+	return Column(key, label, "num", true);
+}
+
+namespace {
+
+// The href a sorting header points at: this page, this query, a different sort.
+//
+// Rebuilt from the matched path rather than echoed from the request target.
+// The target is bytes a client chose and this ends up in an href; the path is
+// what the router already matched, and every surviving query parameter goes
+// back out exactly as encoded as it arrived.
+std::string SortBase(const Ctx &ctx) {
+	std::string out;
+	const std::string &path = ctx.req.path;
+	size_t pos = 0;
+	while (true) {
+		size_t slash = path.find('/', pos);
+		out += http::PercentEncode(
+		    path.substr(pos, slash == std::string::npos ? std::string::npos : slash - pos));
+		if (slash == std::string::npos) {
+			break;
+		}
+		out += "/";
+		pos = slash + 1;
+	}
+
+	std::string kept;
+	const std::string &query = ctx.req.query;
+	size_t i = 0;
+	while (i < query.size()) {
+		size_t amp = query.find('&', i);
+		std::string one = query.substr(i, amp == std::string::npos ? std::string::npos : amp - i);
+		std::string name = one.substr(0, one.find('='));
+		if (!one.empty() && name != "sort" && name != "dir") {
+			kept += (kept.empty() ? "" : "&") + one;
+		}
+		if (amp == std::string::npos) {
+			break;
+		}
+		i = amp + 1;
+	}
+	return out + "?" + (kept.empty() ? "" : kept + "&");
+}
+
+} // namespace
+
+Table::Table(Ctx &ctx, const std::string &id, const std::vector<Column> &columns)
+    : id_(id), columns_(columns), base_(SortBase(ctx)) {
+	std::string want = ctx.req.Param("sort");
+	for (size_t i = 0; i < columns_.size(); i++) {
+		if (!columns_[i].key.empty() && columns_[i].key == want) {
+			sort_ = (int)i;
+		}
+	}
+	desc_ = ctx.req.Param("dir") == "desc";
+}
+
+Table::Row Table::Add(const std::string &row_class) {
+	RowData row;
+	row.css_class = row_class;
+	rows_.push_back(row);
+	return Row(this, rows_.size() - 1);
+}
+
+bool Table::Sorted() const {
+	return sort_ >= 0;
+}
+
+const std::string &Table::SortKey() const {
+	static const std::string kNone;
+	return sort_ >= 0 ? columns_[(size_t)sort_].key : kNone;
+}
+
+bool Table::Descending() const {
+	return desc_;
+}
+
+bool Table::Empty() const {
+	return rows_.empty();
+}
+
+void Table::ExtraClass(const std::string &css_class) {
+	extra_class_ = css_class;
+}
+
+Table::Row &Table::Row::Text(const std::string &value) {
+	Table::CellData cell;
+	cell.html = T(value);
+	cell.sort = value;
+	table_->rows_[index_].cells.push_back(cell);
+	return *this;
+}
+
+Table::Row &Table::Row::Html(const std::string &html, const std::string &sort_as) {
+	Table::CellData cell;
+	cell.html = html;
+	cell.sort = sort_as;
+	table_->rows_[index_].cells.push_back(cell);
+	return *this;
+}
+
+Table::Row &Table::Row::Number(int64_t value) {
+	Table::CellData cell;
+	cell.html = T(std::to_string(value));
+	cell.sort = std::to_string(value);
+	table_->rows_[index_].cells.push_back(cell);
+	return *this;
+}
+
+std::string Table::Render() const {
+	std::vector<size_t> order;
+	order.reserve(rows_.size());
+	for (size_t i = 0; i < rows_.size(); i++) {
+		order.push_back(i);
+	}
+	if (sort_ >= 0) {
+		size_t c = (size_t)sort_;
+		bool numeric = columns_[c].numeric;
+		bool desc = desc_;
+		const std::vector<RowData> *rows = &rows_;
+		auto value = [rows, c](size_t r) {
+			return c < (*rows)[r].cells.size() ? (*rows)[r].cells[c].sort : std::string();
+		};
+		auto less = [&](size_t a, size_t b) {
+			std::string x = value(a), y = value(b);
+			if (numeric) {
+				return std::strtod(x.c_str(), nullptr) < std::strtod(y.c_str(), nullptr);
+			}
+			return quackmail::util::Lower(x) < quackmail::util::Lower(y);
+		};
+		// stable_sort, so rows the active column cannot tell apart stay in the
+		// order the handler put them in.
+		std::stable_sort(order.begin(), order.end(),
+		                 [&](size_t a, size_t b) { return desc ? less(b, a) : less(a, b); });
+	}
+
+	std::string out = "<div class=\"wrap\"><table class=\"datatable" +
+	                  (extra_class_.empty() ? std::string() : " " + A(extra_class_)) +
+	                  "\" data-table=\"" + A(id_) + "\">";
+	// A <col> per column: the client-side resize writes widths here rather than
+	// on every cell, and the reorder moves these in step with the headers.
+	// Every column needs a *unique* handle, because the client-side reorder
+	// addresses columns by it. A table can hold two columns with no sort key and
+	// no heading (an action column at each end), so an unkeyed column falls back
+	// to its position rather than to its label.
+	auto handle = [&](size_t i) {
+		return columns_[i].key.empty() ? "c" + std::to_string(i) : columns_[i].key;
+	};
+	out += "<colgroup>";
+	for (size_t i = 0; i < columns_.size(); i++) {
+		out += "<col data-col=\"" + A(handle(i)) + "\">";
+	}
+	out += "</colgroup><thead><tr>";
+	for (size_t ci = 0; ci < columns_.size(); ci++) {
+		const Column &col = columns_[ci];
+		std::string classes = col.css_class;
+		out += "<th scope=\"col\"";
+		if (!classes.empty()) {
+			out += " class=\"" + A(classes) + "\"";
+		}
+		out += " data-col=\"" + A(handle(ci)) + "\"";
+		bool active = sort_ >= 0 && columns_[(size_t)sort_].key == col.key && !col.key.empty();
+		if (!col.key.empty()) {
+			out += " aria-sort=\"" + std::string(active ? (desc_ ? "descending" : "ascending") : "none") +
+			       "\"";
+		}
+		out += ">";
+		if (col.key.empty()) {
+			out += T(col.label);
+		} else {
+			// Clicking the column already sorted on flips it.
+			std::string dir = active && !desc_ ? "desc" : "asc";
+			out += "<a class=\"sortlink\" href=\"" + A(base_ + "sort=" + http::PercentEncode(col.key) +
+			                                            "&dir=" + dir) +
+			       "\">" + T(col.label) + (active ? (desc_ ? " ▾" : " ▴") : "") + "</a>";
+		}
+		// The grip qc.js turns into a resize handle. Inert markup otherwise.
+		out += "<span class=\"colgrip\" aria-hidden=\"true\"></span>";
+		out += "</th>";
+	}
+	out += "</tr></thead><tbody>";
+	for (size_t r : order) {
+		const RowData &row = rows_[r];
+		out += "<tr";
+		if (!row.css_class.empty()) {
+			out += " class=\"" + A(row.css_class) + "\"";
+		}
+		out += ">";
+		for (size_t c = 0; c < columns_.size(); c++) {
+			out += "<td";
+			if (!columns_[c].css_class.empty()) {
+				out += " class=\"" + A(columns_[c].css_class) + "\"";
+			}
+			// Never optional here: it is the column's own label, so a phone gets
+			// a labelled card without the caller doing anything.
+			out += " data-label=\"" + A(columns_[c].label) + "\">";
+			out += c < row.cells.size() ? row.cells[c].html : std::string();
+			out += "</td>";
+		}
+		out += "</tr>";
+	}
+	out += "</tbody></table></div>";
+	return out;
 }
 
 // Pico styles a link as a button from role="button", not from a class, so the
@@ -429,10 +643,17 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 
 	// `label_key` is a Tr() catalog key, not literal text — every static nav
 	// label in this sidebar goes through the message catalog.
-	auto item = [&](const char *href, const char *label_key, const char *key, const char *icon) {
+	auto item = [&](const char *href, const char *label_key, const char *key, const char *icon,
+	                int64_t count = 0) {
 		std::string extra = (active == key) ? " aria-current=\"page\"" : "";
 		out += "<a href=\"" + A(href) + "\"" + extra + ">" + Icon(icon) + "<span>" +
-		       T(Tr(ctx, label_key)) + "</span></a>";
+		       T(Tr(ctx, label_key)) + "</span>";
+		// The same bubble an unread room gets, so a page waiting reads the same
+		// as a room with something new in it.
+		if (count > 0) {
+			out += "<span class=\"count\">" + std::to_string(count) + "</span>";
+		}
+		out += "</a>";
 	};
 	auto group = [&](const char *label_key) {
 		out += "<div class=\"group\"><span class=\"label\">" + T(Tr(ctx, label_key)) + "</span>";
@@ -582,6 +803,10 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 		item("/bbs/new", "nav.create_room", "newroom", "plus");
 	}
 	item("/bbs/who", "nav.who_online", "who", "user");
+	// One indexed count(*) per authed render, beside the room-unread query that
+	// already runs here.
+	item("/chat", "chat.title", "chat", "user",
+	     quackmail::citadel::PendingExpressCount(ctx.con, ctx.username));
 	endgroup();
 
 	group("nav.you");
@@ -778,6 +1003,11 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	page += "<link rel=\"stylesheet\" href=\"" + A(AssetUrl("qc.css")) + "\">";
 	if (theme.css[0] != '\0') {
 		page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(theme.css) + "</style>";
+	}
+	// Last, so a page's own rules win over the theme's. This is where a handler
+	// puts CSS it can only know at render time; see PageOpts::style.
+	if (!opts.style.empty()) {
+		page += "<style nonce=\"" + A(ctx.nonce) + "\">" + RawHtml(opts.style) + "</style>";
 	}
 	page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl("htmx.min.js")) +
 	        "\" defer></script>";

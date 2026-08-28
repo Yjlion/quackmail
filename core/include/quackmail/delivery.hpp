@@ -48,6 +48,12 @@ struct Outcome {
 	// Recipients whose filter discarded the message (delivered nowhere, but not
 	// an error — the user asked for exactly this).
 	std::vector<std::string> discarded;
+	// Recipients refused because their mailbox is over its storage quota. Kept
+	// apart from `rejected` on purpose: a Sieve reject is the user's own
+	// permanent decision and earns a 5.x.x, while a full mailbox is a condition
+	// that clears and earns a 4.x.x. Folding the two would turn a deferral the
+	// sender would have retried into a bounce they cannot.
+	std::vector<std::string> over_quota;
 
 	Outcome() = default;
 };

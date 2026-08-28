@@ -355,7 +355,18 @@ def main():
         _, page = c.get(notes)
         assert "Remember" in page, "the note is not listed"
         assert "notegrid" in page, "notes did not render as a grid"
-        assert "--note:#ffff88" in page, "the note colour was not applied"
+        # The colour arrives as a class plus a rule in the nonced <style> block,
+        # never as a style= attribute: style-src carries a nonce and no
+        # 'unsafe-inline', and a nonce covers <style> elements only, so an
+        # inline attribute is dropped by the browser in silence. Asserting the
+        # rule alone is what let this ship broken for a release.
+        assert re.search(r'<div class="note tinted note-c\d+">', page), (
+            "the note card did not get a tint class"
+        )
+        assert re.search(r"\.note-c\d+\{--note:#ffff88\}", page), (
+            "the note colour was not declared in the page stylesheet"
+        )
+        assert "style=" not in page, "a note reintroduced an inline style attribute"
 
         nnums = item_numbers(page, notes)
         assert nnums, "the note does not link to a detail page"
@@ -371,6 +382,10 @@ def main():
         assert status == 303, f"saving a note with a bad colour returned {status}"
         _, page = c.get(notes)
         assert "url(x)" not in page, "an unvalidated colour reached the page"
+        # And clearing a colour clears it: the stored note's property list is
+        # preserved across an edit so another client's geometry survives, which
+        # is exactly why a rejected colour used to leave the old one in place.
+        assert "tinted" not in page, "a rejected colour still tinted the card"
 
         # ---- a note in Markdown, rendered rather than escaped ----------------
         existing_nums = item_numbers(page, notes)

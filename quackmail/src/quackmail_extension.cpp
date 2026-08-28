@@ -35,6 +35,7 @@
 #include "quackmail/mime.hpp"
 #include "quackmail/psl.hpp"
 #include "quackmail/rbl.hpp"
+#include "quackmail/quota.hpp"
 #include "quackmail/sieve.hpp"
 #include "quackmail/spf.hpp"
 #include "quackmail/tz.hpp"
@@ -90,6 +91,10 @@ enum class UmbrellaKind {
 	RATELIMIT_SET,
 	RATELIMIT_LIST,
 	RATE_STATUS,
+	QUOTA_SET,
+	QUOTA_LIST,
+	QUOTA_STATUS,
+	SESSION_REAP,
 	SPF_CHECK,
 	DMARC_CHECK,
 	SIEVE_CHECK,
@@ -505,6 +510,38 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 		                        Value::BIGINT(v.limit.burst_max), Value::BIGINT(v.daily_used),
 		                        Value::BIGINT(v.limit.daily_max), Value::BOOLEAN(v.allowed),
 		                        Value(v.reason)});
+		break;
+	}
+
+	// ---- storage quotas -------------------------------------------------
+	case UmbrellaKind::QUOTA_SET: {
+		std::string err;
+		bool ok = quackmail::quota::SetQuota(con, bind.args[0], std::atoll(bind.args[1].c_str()), err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "quota set" : err)});
+		break;
+	}
+	case UmbrellaKind::QUOTA_LIST: {
+		for (auto &q : quackmail::quota::ListQuotas(con)) {
+			gstate->rows.push_back({Value(q.username.empty() ? "(default)" : q.username),
+			                        Value::BIGINT(q.limit_bytes), Value::BOOLEAN(q.enabled)});
+		}
+		break;
+	}
+	case UmbrellaKind::QUOTA_STATUS: {
+		// UsageAlways, not Usage: an admin asking how much a user is keeping
+		// wants the number whether or not there is a ceiling on it.
+		auto info = quackmail::quota::UsageAlways(con, bind.args[0]);
+		gstate->rows.push_back({Value(info.username), Value::BIGINT(info.used_bytes),
+		                        Value::BIGINT(info.limit_bytes), Value::BOOLEAN(info.over)});
+		break;
+	}
+
+	case UmbrellaKind::SESSION_REAP: {
+		// Exposed so a test does not have to wait for the router's 1-in-16
+		// housekeeping roll to fire.
+		int64_t removed =
+		    quackmail::citadel::ReapSessions(con, std::atoll(bind.args[0].c_str()));
+		gstate->rows.push_back({Value::BIGINT(removed)});
 		break;
 	}
 
@@ -2558,6 +2595,19 @@ void LoadInternal(ExtensionLoader &loader) {
 	                 {"username", "burst_used", "burst_max", "daily_used", "daily_max", "allowed",
 	                  "note"},
 	                 {V, I, I, I, I, B, V});
+
+	// Per-user storage quotas, in bytes. 0 is unlimited; the '' user is the
+	// site default. BIGINT rather than VARCHAR for the same reason the rate
+	// limiter uses it — a VARCHAR signature makes every caller quote the number.
+	RegisterPolicyFn(loader, "qm_quota_set", UmbrellaKind::QUOTA_SET, {V, I}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_quotas", UmbrellaKind::QUOTA_LIST, {},
+	                 {"username", "limit_bytes", "enabled"}, {V, I, B});
+	RegisterPolicyFn(loader, "qm_quota_status", UmbrellaKind::QUOTA_STATUS, {V},
+	                 {"username", "used_bytes", "limit_bytes", "over"}, {V, I, I, B});
+
+	// Presence rows nothing refreshed. Normally swept by the web router's
+	// housekeeping; this is the handle for a test and for an operator.
+	RegisterPolicyFn(loader, "cit_session_reap", UmbrellaKind::SESSION_REAP, {I}, {"removed"}, {I});
 
 	// Diagnostics an admin runs against live DNS.
 	RegisterPolicyFn(loader, "qm_spf_check", UmbrellaKind::SPF_CHECK, {V, V, V},

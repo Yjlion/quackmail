@@ -27,6 +27,64 @@ WHERE table_name = 'citadel_users' AND column_name IN ('screenwidth', 'screenhei
 ----
 2
 
+# Columns added after their tables shipped, for the same reason: a database file
+# that predates them has to keep working.
+#
+# size_bytes is the RFC822 wire size a storage quota counts in; delivered_at is
+# what turns the express queue into a transcript; heartbeat_secs is how a
+# front-end tells the reaper how often it promises to check in.
+query I
+SELECT count(*) FROM duckdb_columns()
+WHERE table_name = 'citadel_messages' AND column_name = 'size_bytes';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_columns()
+WHERE table_name = 'citadel_express' AND column_name = 'delivered_at';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_columns()
+WHERE table_name = 'citadel_sessions' AND column_name = 'heartbeat_secs';
+----
+1
+
+# The reaper reads the promise off the row rather than holding a list of client
+# strings, so a listener nobody has written yet gets the safe behaviour by
+# default rather than being evicted by a predicate that never heard of it.
+#
+# All three rows are stamped at the epoch, and the grace is what separates them.
+# Written without now() on purpose: the sqllogictest harness has no icu, so any
+# arithmetic on a TIMESTAMP WITH TIME ZONE fails to autoload and the test would
+# be about the harness rather than about the reaper.
+statement ok
+INSERT INTO citadel_sessions (session_id, username, client, since, last_seen, heartbeat_secs)
+VALUES (90001, 'ghost',  'Web session',    1, 1, 60),
+       (90002, 'reader', 'Telnet session', 1, 1, 0),
+       (90003, 'live',   'Web session',    1, 1, 999999999);
+
+# 'ghost' promised to check in every 60s and last did so in 1970: three
+# intervals past due, so it goes. 'reader' promised nothing, and the enormous
+# grace means it has not yet reached the crashed-process cutoff. 'live' is
+# inside its (absurd) heartbeat window and stays for that reason instead.
+query I
+SELECT removed FROM cit_session_reap(9999999999);
+----
+1
+
+query I
+SELECT string_agg(username, ',' ORDER BY username) FROM citadel_sessions;
+----
+live,reader
+
+# ListSessions applies the same predicate as a filter, so a read is honest
+# between sweeps; the reaper is garbage collection rather than the source of
+# truth. Both rows above survive it, so a plain count is the check.
+statement ok
+DELETE FROM citadel_sessions WHERE session_id IN (90002, 90003);
+
 # citadel_room_state.flags is where RS_ZAPPED lives. It shipped in the original
 # schema unused; confirm it is still there and still defaults to 0.
 query I

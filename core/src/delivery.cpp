@@ -5,6 +5,7 @@
 #include "quackmail/mail_store.hpp"
 #include "quackmail/mailpolicy.hpp"
 #include "quackmail/mime.hpp"
+#include "quackmail/quota.hpp"
 #include "quackmail/sieve.hpp"
 #include "quackmail/submission.hpp"
 #include "quackmail/util.hpp"
@@ -150,12 +151,39 @@ void SendVacation(Connection &con, const std::string &user, const std::string &r
 	headers.push_back({"Auto-Submitted", "auto-replied"});
 	headers.push_back({"Precedence", "bulk"});
 
-	std::vector<mime::BuildPart> parts;
-	mime::BuildPart text;
-	text.content_type = "text/plain";
-	text.content = a.reason;
-	parts.push_back(text);
-	std::string body = mime::BuildMessage(headers, parts);
+	std::string body;
+	if (a.vacation.mime) {
+		// RFC 5230 §4.4: with :mime the reason *is* a MIME entity — its own header
+		// block, a blank line, then content — and those headers belong to the
+		// reply rather than to a part nested inside it. So it is appended to the
+		// headers built above rather than handed to BuildMessage, which would wrap
+		// it in a text/plain part and send the MIME source out as literal text for
+		// the recipient to read.
+		for (const auto &h : headers) {
+			body += h.first + ": " + h.second + "\r\n";
+		}
+		// MIME-Version is the reply's, not the entity's: the entity supplies
+		// Content-Type and below.
+		body += "MIME-Version: 1.0\r\n";
+		std::string entity = a.reason;
+		// A reason written in a Sieve script has bare newlines; the wire wants
+		// CRLF, and an entity whose header block never terminates is not one.
+		std::string normalized;
+		for (size_t i = 0; i < entity.size(); i++) {
+			if (entity[i] == '\n' && (i == 0 || entity[i - 1] != '\r')) {
+				normalized += '\r';
+			}
+			normalized += entity[i];
+		}
+		body += normalized;
+	} else {
+		std::vector<mime::BuildPart> parts;
+		mime::BuildPart text;
+		text.content_type = "text/plain";
+		text.content = a.reason;
+		parts.push_back(text);
+		body = mime::BuildMessage(headers, parts);
+	}
 
 	// §4.5: the envelope sender is empty. A bounce of an auto-reply must not
 	// come back to the person on holiday, and an empty return-path is the only
@@ -216,6 +244,16 @@ bool LocalDeliver(Connection &con, const std::string &mail_from, const std::vect
 
 	for (const std::string &rcpt : rcpts) {
 		std::string user = util::LocalPart(rcpt);
+
+		// Storage quota, per recipient, so one full mailbox does not refuse the
+		// message for everybody else it was addressed to.
+		//
+		// Before the Sieve load on purpose: an over-quota user's filter must not
+		// get the chance to redirect or vacation its way around the ceiling.
+		if (quota::WouldExceed(con, user, (int64_t)body.size())) {
+			out.over_quota.push_back(rcpt);
+			continue;
+		}
 
 		// The subaddress detail, if this recipient was addressed as user+detail@.
 		std::string detail;

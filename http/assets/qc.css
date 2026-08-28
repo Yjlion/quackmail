@@ -267,6 +267,29 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tbody tr:hover td { background: var(--pico-card-sectioning-background-color); }
 .wrap { overflow-x: auto; }
 
+/* Sortable / movable / resizable columns. Everything here is inert until
+   qc.js runs: the header is a heading and a link, and the grip is an empty
+   span. */
+.datatable th { position: relative; }
+.datatable th .sortlink { color: inherit; text-decoration: none; display: inline-block; }
+.datatable th .sortlink:hover { color: var(--pico-primary); }
+.datatable th[aria-sort="ascending"] .sortlink,
+.datatable th[aria-sort="descending"] .sortlink { color: var(--pico-color); }
+.datatable th .colgrip {
+  position: absolute; top: 0; right: -2px; width: 6px; height: 100%;
+  cursor: col-resize; user-select: none;
+}
+.datatable th .colgrip:hover { background: var(--pico-primary-focus); }
+.datatable.dragging th { cursor: grabbing; }
+.datatable th.dropzone { box-shadow: inset 2px 0 0 var(--pico-primary); }
+/* While a column is being dragged out to width, nothing else should select. */
+body.colresizing { user-select: none; cursor: col-resize; }
+
+@media (max-width: 52rem) {
+  /* Cards: there is nothing to grip and nothing to reorder. */
+  .datatable th .colgrip { display: none; }
+}
+
 /* Long message lists: let the browser skip laying out what is offscreen. */
 .longlist { content-visibility: auto; contain-intrinsic-size: auto 800px; }
 
@@ -652,8 +675,11 @@ tr.taskdone td a { color: var(--pico-muted-color); text-decoration: line-through
   padding: var(--pico-spacing); min-height: 8rem;
 }
 /* A coloured note needs dark text whatever the theme: the colours come from
-   Outlook and are all pale. */
-.note[style*="--note"], .note[style*="--note"] h3 a { color: #1c1b19; }
+   Outlook and are all pale. Keyed off the class the server sets alongside
+   --note, not off the presence of a style attribute — the attribute form was
+   dropped by CSP, so this used to force dark text onto an *untinted* card and
+   made the dark theme illegible. */
+.note.tinted, .note.tinted h3 a { color: #1c1b19; }
 .note h3 { margin: 0 0 .5rem; font-size: .95rem; }
 .note h3 a { text-decoration: none; }
 .note pre {
@@ -681,6 +707,41 @@ tr.taskdone td a { color: var(--pico-muted-color); text-decoration: line-through
 }
 .swatch input:focus-visible + span {
   outline: 2px solid var(--pico-primary); outline-offset: 2px;
+}
+
+/* ---- chat (instant messages) -------------------------------------------- */
+
+.chat { display: grid; grid-template-columns: 12rem 1fr; gap: var(--pico-spacing); }
+.chatpeople h2 { font-size: .95rem; margin: 0 0 .4rem; }
+.chatpeople ul { list-style: none; margin: 0; padding: 0; }
+.chatpeople li { margin: 0 0 .2rem; }
+.chatpeople a { text-decoration: none; display: block; padding: .2rem .4rem; border-radius: var(--pico-border-radius); }
+.chatpeople a.current { background: var(--pico-primary-focus); font-weight: 600; }
+
+/* The log scrolls on its own so the send box stays put while a poll swaps the
+   lines above it. column-reverse keeps the newest line in view without any
+   script measuring scrollHeight. */
+.chatlog {
+  display: flex; flex-direction: column-reverse;
+  max-height: 60vh; overflow-y: auto;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: var(--pico-spacing); margin-bottom: var(--pico-spacing);
+}
+.chatline { margin: 0 0 .6rem; max-width: 42rem; }
+.chatline.mine { align-self: flex-end; text-align: right; }
+.chatline .who { font-weight: 600; font-size: .85em; }
+.chatline .when { color: var(--pico-muted-color); font-size: .8em; margin-left: .5rem; }
+.chatline p {
+  margin: .15rem 0 0; padding: .4rem .6rem; white-space: pre-wrap; word-wrap: break-word;
+  border-radius: var(--pico-border-radius); background: var(--pico-card-sectioning-background-color);
+}
+.chatline.mine p { background: var(--pico-primary-focus); }
+.chatsend .field { margin-bottom: .4rem; }
+
+@media (max-width: 52rem) {
+  .chat { grid-template-columns: 1fr; }
+  .chatpeople ul { display: flex; flex-wrap: wrap; gap: .3rem; }
 }
 
 /* ---- blog and journal entries ------------------------------------------- */
@@ -737,6 +798,51 @@ tr.taskdone td a { color: var(--pico-muted-color); text-decoration: line-through
   color: inherit; border-radius: 0;
 }
 .addressbook-panel button:hover { background: var(--pico-secondary-hover-background); }
+.addressbook-panel input[type="search"] { margin: .35rem; width: calc(100% - .7rem); }
+
+/* Recipient chips. The <input> stays inside the box and is what you type into;
+   the chips before it are the addresses already committed. */
+.chips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .3rem;
+  padding: .25rem .35rem;
+  border: 1px solid var(--pico-form-element-border-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-form-element-background-color);
+}
+.chips input {
+  flex: 1 1 8rem; min-width: 8rem; margin: 0; padding: .2rem;
+  border: 0; background: none; box-shadow: none;
+}
+.chips input:focus { box-shadow: none; }
+.chip {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .1rem .2rem .1rem .5rem; font-size: .9em;
+  border-radius: 1rem;
+  background: var(--pico-secondary-background);
+  color: var(--pico-secondary-inverse);
+}
+/* An address that cannot be delivered anywhere is marked, not refused: a local
+   BBS user name is a legal recipient and the browser cannot know the roster. */
+.chip.bad {
+  background: var(--pico-del-color); color: var(--pico-contrast-inverse);
+}
+.chip .chipx {
+  margin: 0; padding: 0 .35rem; border: 0; background: none; color: inherit;
+  font-size: 1rem; line-height: 1; border-radius: 1rem; width: auto;
+}
+
+/* The chosen attachments, each with its own way out. */
+.attachlist { list-style: none; margin: .3rem 0 .5rem; padding: 0; }
+.attachlist li {
+  display: flex; align-items: center; gap: .6rem;
+  padding: .3rem .5rem; border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.attachlist li:last-child { border-bottom: 0; }
+.attachlist li span { flex: 1; }
+.attachlist button { margin: 0; padding: .15rem .5rem; font-size: .85rem; width: auto; }
+
+.fromline { display: block; padding: .35rem 0; color: var(--pico-muted-color); }
+.small { font-size: .85em; }
 
 /* ---- the keyboard help overlay ------------------------------------------ */
 

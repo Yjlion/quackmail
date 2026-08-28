@@ -14,6 +14,7 @@ namespace {
 const char *const kCoreCapability = "urn:ietf:params:jmap:core";
 const char *const kMailCapability = "urn:ietf:params:jmap:mail";
 const char *const kSubmissionCapability = "urn:ietf:params:jmap:submission";
+const char *const kQuotaCapability = "urn:ietf:params:jmap:quota";
 
 // How much of one request we will do. RFC 8620 requires these to be advertised
 // in the Session object rather than discovered by hitting them.
@@ -33,6 +34,7 @@ const std::vector<JmapEntry> &Methods() {
 		RegisterCoreMethods(t);
 		RegisterMailMethods(t);
 		RegisterSubmissionMethods(t);
+		RegisterQuotaMethods(t);
 		return t;
 	}();
 	return table;
@@ -101,14 +103,20 @@ void GetSession(Ctx &ctx) {
 	submission.Set("maxDelayedSend", (int64_t)0); // sent when asked, never held
 	submission.Set("submissionExtensions", js::Value::MakeObject());
 
+	// RFC 9425 §2: the quota capability object is empty. There is nothing to
+	// negotiate — the resource types are discovered from the Quota objects.
+	js::Value quota = js::Value::MakeObject();
+
 	js::Value capabilities = js::Value::MakeObject();
 	capabilities.Set(kCoreCapability, core);
 	capabilities.Set(kMailCapability, mail);
 	capabilities.Set(kSubmissionCapability, submission);
+	capabilities.Set(kQuotaCapability, quota);
 
 	js::Value account_caps = js::Value::MakeObject();
 	account_caps.Set(kMailCapability, mail);
 	account_caps.Set(kSubmissionCapability, submission);
+	account_caps.Set(kQuotaCapability, quota);
 
 	js::Value acct = js::Value::MakeObject();
 	acct.Set("name", account);
@@ -126,6 +134,7 @@ void GetSession(Ctx &ctx) {
 	primary.Set(kCoreCapability, account);
 	primary.Set(kMailCapability, account);
 	primary.Set(kSubmissionCapability, account);
+	primary.Set(kQuotaCapability, account);
 
 	// Absolute, because a client uses these verbatim rather than resolving them
 	// against the request URI the way it resolves a DAV href. A path here is not

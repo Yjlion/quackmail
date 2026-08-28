@@ -302,12 +302,30 @@ struct SessionInfo {
 // Register a connection and return its session id (0 on failure). `host` is the
 // peer address (net::ClientStream::PeerIp()); loopback is stored as "localhost",
 // matching what a real Citadel server shows in RWHO.
-int64_t RegisterSession(duckdb::Connection &con, const std::string &client, const std::string &host = "");
+// `heartbeat_secs` is how often this front-end promises to touch the row. 0 —
+// the default, and what the socket listeners use — means it does not heartbeat:
+// a session blocked in a read has no timer, and is unregistered on close
+// instead. A front-end that *does* declare one is held to it by ReapSessions,
+// which is what lets a browser (with no connection to hang presence off) appear
+// in RWHO and disappear again when the tab closes.
+int64_t RegisterSession(duckdb::Connection &con, const std::string &client, const std::string &host = "",
+                        int64_t heartbeat_secs = 0);
 // Refresh the row after each command (also what makes the session visible in RWHO).
 void TouchSession(duckdb::Connection &con, int64_t session_id, const std::string &username,
                   const std::string &room, const std::string &last_cmd, int64_t axlevel);
 void UnregisterSession(duckdb::Connection &con, int64_t session_id);
+// Live sessions. A row nothing has refreshed within its grace is filtered out
+// here as well as swept by ReapSessions, so a read is honest between sweeps.
 std::vector<SessionInfo> ListSessions(duckdb::Connection &con);
+
+// Drop presence rows nothing has refreshed. A crashed front-end, a closed
+// browser tab, a killed process — none of those run UnregisterSession, and a
+// stale last_seen is the only evidence they left behind.
+//
+// A row that declared a heartbeat is given three intervals of grace; one that
+// did not is given `grace_seconds`, which is a crashed-process sweep rather than
+// a liveness test. Returns the number of rows removed.
+int64_t ReapSessions(duckdb::Connection &con, int64_t grace_seconds);
 
 // ---- express (instant) messages -----------------------------------------
 struct Express {
@@ -323,6 +341,56 @@ bool SendExpress(duckdb::Connection &con, const std::string &to, const std::stri
 // Undelivered messages for a user, oldest first.
 std::vector<Express> PendingExpress(duckdb::Connection &con, const std::string &user);
 void MarkExpressDelivered(duckdb::Connection &con, int64_t id);
+
+// One line of a two-way conversation. `Express` above is the queue's view (what
+// is owed to me); this is the transcript's (what passed between us).
+struct ExpressLine {
+	int64_t id = 0;
+	std::string from_user;
+	std::string to_user;
+	std::string text;
+	int64_t sent_at = 0;
+	bool delivered = false;
+	int64_t delivered_at = 0;
+};
+
+// The conversation `user` took part in over the last `window_seconds`, oldest
+// first, capped at the `limit` most recent. `with_user` narrows it to one
+// correspondent; "" interleaves every conversation.
+//
+// One end is always `user`, which is what makes this safe to hand to a web
+// handler: no filter a caller supplies can widen it to somebody else's traffic.
+std::vector<ExpressLine> ExpressHistory(duckdb::Connection &con, const std::string &user,
+                                        const std::string &with_user, int64_t window_seconds,
+                                        int64_t limit);
+
+// The people `user` exchanged messages with inside the window, most recent
+// first. The chat page's correspondent list.
+std::vector<std::string> ExpressCorrespondents(duckdb::Connection &con, const std::string &user,
+                                               int64_t window_seconds);
+
+// How many messages are waiting, without consuming any. PendingExpress is the
+// draining read; this is the one a badge asks on every page render.
+int64_t PendingExpressCount(duckdb::Connection &con, const std::string &user);
+
+// Mark every undelivered message for `user` delivered up to and including
+// `max_id`. A page that rendered a message has delivered it as surely as GEXP
+// did, and a range is what a page has — it drew a screenful, not one row.
+void MarkExpressDeliveredThrough(duckdb::Connection &con, const std::string &user, int64_t max_id);
+
+// The cheap change token for one user's chat: the largest id at either end. The
+// same idea as RoomChangeToken, and what lets a poll answer "nothing new" with
+// one indexed aggregate instead of a page of HTML.
+//
+// It does *not* move when a message is marked delivered. That is deliberate: the
+// poll is about new traffic, and a read receipt that re-rendered the transcript
+// on every viewer's screen would be a loop.
+int64_t ExpressChangeToken(duckdb::Connection &con, const std::string &user);
+
+// Drop delivered instant messages older than `older_than_seconds`. New with the
+// chat view: until it, this table was a queue that stopped growing because
+// nobody looked at it. A transcript needs an end.
+void PruneExpress(duckdb::Connection &con, int64_t older_than_seconds);
 
 // ---- per-user room read state ------------------------------------------
 RoomStats GetRoomStats(duckdb::Connection &con, const std::string &username, int64_t room_num);

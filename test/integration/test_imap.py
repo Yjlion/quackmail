@@ -33,6 +33,10 @@ def ext(name):
 # imaplib knows GETACL/SETACL/DELETEACL/MYRIGHTS but not LISTRIGHTS, and refuses
 # to send a verb missing from this table.
 imaplib.Commands.setdefault("LISTRIGHTS", ("AUTH", "SELECTED"))
+# Likewise for RFC 9208 — imaplib knows none of the quota verbs.
+imaplib.Commands.setdefault("GETQUOTAROOT", ("AUTH", "SELECTED"))
+imaplib.Commands.setdefault("GETQUOTA", ("AUTH", "SELECTED"))
+imaplib.Commands.setdefault("SETQUOTA", ("AUTH", "SELECTED"))
 
 
 # The default groupware mailboxes every Citadel user gets, in IMAP naming.
@@ -318,6 +322,8 @@ def main():
         S.login("imapuser", "secret")
         assert S.select("INBOX")[0] == "OK"
         S.logout()
+        check_quota(con)
+
     finally:
         con.execute("CALL qm_imap_stop()").fetchall()
         con.execute("CALL qm_imaps_stop()").fetchall()
@@ -331,7 +337,90 @@ def main():
 
     print("PASS: IMAP STARTTLS/AUTH, IMAPS implicit TLS, default folder set, "
           "STATUS, APPEND, SEARCH (incl. native-message rendering), COPY, "
-          "RFC 4314 ACLs, IDLE (new mail and expunges from another session)")
+          "RFC 4314 ACLs, QUOTA, IDLE (new mail and expunges from another session)")
+
+
+def check_quota(con):
+    """RFC 9208 QUOTA, including the unit every implementation gets wrong."""
+    M = imaplib.IMAP4(HOST, PORT)
+    M.starttls()
+    M.login("imapuser", "secret")
+    try:
+        _check_quota(con, M)
+    finally:
+        M.logout()
+
+
+def _check_quota(con, M):
+    assert "QUOTA" in M.capabilities, M.capabilities
+    assert "QUOTA=RES-STORAGE" in M.capabilities, M.capabilities
+
+    # No ceiling: the mailbox is in no quota root, so GETQUOTAROOT names none
+    # and there is no QUOTA line to follow. hardLimit has no "unlimited"
+    # spelling, and absence is the accurate statement.
+    typ, data = M._simple_command("GETQUOTAROOT", '"INBOX"')
+    assert typ == "OK", data
+    roots = M._untagged_response(typ, [None], "QUOTAROOT")[1]
+    assert roots and roots[0].strip() == b'"INBOX"', f"unlimited user got a root: {roots}"
+
+    # 10 MiB exactly, so the kibibyte conversion has an unambiguous answer.
+    assert con.execute("SELECT ok FROM qm_quota_set('imapuser', 10485760)").fetchone()[0]
+
+    typ, data = M._simple_command("GETQUOTAROOT", '"INBOX"')
+    assert typ == "OK", data
+    roots = M._untagged_response(typ, [None], "QUOTAROOT")[1]
+    assert roots and roots[0].strip() == b'"INBOX" ""', f"wrong quota root: {roots}"
+    quota = M._untagged_response(typ, [None], "QUOTA")[1]
+    assert quota, "no QUOTA line followed the root"
+    # STORAGE is in units of 1024 octets (RFC 9208 §5.1). 10485760 bytes is
+    # 10240 KiB — reporting 10485760 here would tell every client the quota is
+    # a thousand times larger than it is.
+    assert b"(STORAGE " in quota[0], quota
+    limit = int(quota[0].split(b"(STORAGE ")[1].split(b")")[0].split()[1])
+    assert limit == 10240, f"STORAGE limit reported as {limit}, wanted 10240 KiB"
+
+    # A public room belongs to nobody, so it is in no root whatever the user's
+    # own ceiling is.
+    typ, data = M._simple_command("GETQUOTAROOT", '"Announcements"')
+    assert typ == "OK", data
+    roots = M._untagged_response(typ, [None], "QUOTAROOT")[1]
+    assert roots and roots[0].strip() == b'"Announcements"', f"public room got a root: {roots}"
+
+    # GETQUOTA on the one root we have, and NO on anything else.
+    typ, data = M._simple_command("GETQUOTA", '""')
+    assert typ == "OK", data
+    assert M._untagged_response(typ, [None], "QUOTA")[1], "GETQUOTA returned no line"
+    typ, data = M._simple_command("GETQUOTA", '"nosuchroot"')
+    assert typ == "NO", f"an unknown quota root returned {typ}"
+
+    # SETQUOTA is an administrator's command; imapuser is an aide.
+    typ, data = M._simple_command("SETQUOTA", '"" (STORAGE 20480)')
+    assert typ == "OK", data
+    stored = con.execute(
+        "SELECT limit_bytes FROM qm_quotas() WHERE username = 'imapuser'").fetchone()[0]
+    assert stored == 20971520, f"SETQUOTA stored {stored}, wanted 20480 KiB in bytes"
+
+    N = imaplib.IMAP4(HOST, PORT)
+    N.starttls()
+    N.login("otheruser", "secret")
+    try:
+        typ, data = N._simple_command("SETQUOTA", '"" (STORAGE 1)')
+        assert typ == "NO", f"an ordinary user set a quota: {typ}"
+        assert b"NOPERM" in data[0], f"wrong response code: {data}"
+    finally:
+        N.logout()
+
+    # An APPEND that would cross the ceiling is refused *before* the
+    # continuation, so the literal never leaves the client and the connection
+    # stays in sync for the next command.
+    assert con.execute("SELECT ok FROM qm_quota_set('imapuser', 1)").fetchone()[0]
+    typ, data = M.append("INBOX", "", None, b"From: a@b\r\nSubject: too big\r\n\r\nx\r\n")
+    assert typ == "NO", f"an over-quota APPEND returned {typ}"
+    assert b"OVERQUOTA" in data[0], f"wrong response code: {data}"
+    # The session is still usable — a desync here would strand the client.
+    assert M.noop()[0] == "OK", "the connection desynced after a refused APPEND"
+
+    assert con.execute("SELECT ok FROM qm_quota_set('imapuser', 0)").fetchone()[0]
 
 
 if __name__ == "__main__":

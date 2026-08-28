@@ -56,9 +56,27 @@ Mail authentication depth still open: DMARC aggregate (`rua`) reports, ARC
 ## IMAP
 
 **Implemented** — IMAP4rev1 (3501), `NAMESPACE` (2342), `UIDPLUS` (4315),
-`MOVE` (6851), `ACL` (4314), `IDLE` (2177), `LIST-EXTENDED`, `SASL-IR`.
+`MOVE` (6851), `ACL` (4314), `IDLE` (2177), `QUOTA` (9208), `LIST-EXTENDED`,
+`SASL-IR`.
 
 **Not** — `CONDSTORE`/`QRESYNC`, server-side `SORT`/`THREAD`, `BODYSTRUCTURE`.
+
+`QUOTA` advertises `QUOTA=RES-STORAGE` and serves `GETQUOTAROOT`, `GETQUOTA`
+and `SETQUOTA`. Three things about it are worth stating because they are the
+ones clients trip over:
+
+- **There is one quota root per user, named `""`**, shared by every mailbox.
+  That is Dovecot's default and therefore the best-tested value in the wild.
+- **`STORAGE` is in kibibytes, not bytes** (RFC 9208 §5). Usage rounds up and
+  the limit rounds down. Reporting bytes here is the classic bug: it shows
+  10 MB as 10 GB.
+- A public room, or a user with no ceiling, gets a `* QUOTAROOT` line naming no
+  root and **no `* QUOTA` line at all** — the correct answer for "not in any
+  root", rather than an invented infinity.
+
+`SETQUOTA` from a non-aide is `NO [NOPERM]`. An `APPEND` that would go over is
+refused with `NO [OVERQUOTA]` **before** the `+` continuation, so the client is
+never left pushing a literal at a server that has stopped listening for one.
 
 ## POP3
 
@@ -97,13 +115,23 @@ Three surfaces on one listener pair. See [The web interface](web.md).
 | Webmail, BBS, groupware, admin | — | server-rendered, works with JavaScript off |
 | CalDAV | 4791, 5545, 6638 (partial) | collections, objects, `calendar-query`, free/busy, iTIP/iMIP |
 | CardDAV | 6352 | collections, objects |
-| JMAP | 8620, 8621 | Session, `Email/*`, `Mailbox/*`, `Thread/*`, blob up/download, submission |
+| JMAP | 8620, 8621, 9425 | Session, `Email/*`, `Mailbox/*`, `Thread/*`, blob up/download, submission, `Quota/get` |
 
 **Not** — RFC 6638 auto-scheduling (the `schedule-inbox-URL`/`schedule-outbox-URL`
 collections and outbox `POST`), DAV `LOCK`/`UNLOCK` (ETags and `If-Match` are
 the consistency story instead), `MKCALENDAR`/`MKCOL`, `calendar-query` filters
 past comp-name and time-range, `expand` on a recurring event. JMAP:
-`Email/import`, `SearchSnippet/get`, push over EventSource.
+`Email/import`, `SearchSnippet/get`, push over EventSource, `Quota/query`.
+
+JMAP's quota (RFC 9425, `urn:ietf:params:jmap:quota`) reports the same ceiling
+IMAP does but in **octets**, not kibibytes — the two units are not
+interchangeable and neither conversion is reused for the other. An account with
+no ceiling answers `Quota/get` with an empty list, because `hardLimit` is a
+mandatory `UnsignedInt` with no encoding for "unlimited" and inventing one
+breaks every client's percentage arithmetic. The state string is the account
+state joined to the quota generation: the first moves when usage moves, the
+second when an operator edits the ceiling, and neither alone can answer
+`Quota/changes`.
 
 ## Telnet
 

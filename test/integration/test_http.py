@@ -935,6 +935,192 @@ def main():
                 f"{muted} still has no description on /admin/prefs"
             )
 
+        # ---- sortable columns ------------------------------------------------
+        #
+        # Sorting is server-side because the listings that need it paginate
+        # before loading their rows: a client-side sort would reorder one page
+        # of a larger set and call it a sort.
+        import re as _re
+
+        def user_column(page_html):
+            """The User column of /admin/users, in rendered order."""
+            body = page_html.split("<tbody>", 1)[1].split("</tbody>", 1)[0]
+            return [_re.sub("<[^>]+>", "", row.split("</td>")[0])
+                    for row in body.split("<td ")[1:]][::8]
+
+        status, _, spage = request(admin_op, BASE + "/admin/users?sort=user&dir=asc")
+        assert status == 200, f"/admin/users?sort= returned {status}"
+        assert 'aria-sort="ascending"' in spage, "the sorted column is not announced"
+        up = user_column(spage)
+        assert up == sorted(up, key=str.lower), f"ascending did not sort: {up}"
+
+        _, _, spage = request(admin_op, BASE + "/admin/users?sort=user&dir=desc")
+        assert 'aria-sort="descending"' in spage, "the reversed column is not announced"
+        down = user_column(spage)
+        assert down == sorted(down, key=str.lower, reverse=True), f"descending did not sort: {down}"
+        assert down == up[::-1], "the two directions disagree about the same rows"
+
+        # The header link carries the rest of the query, so sorting a filtered
+        # or paged listing does not silently drop the filter.
+        _, _, spage = request(admin_op, BASE + "/admin/users?p=1&sort=num&dir=asc")
+        import html as _html
+        hrefs = [_html.unescape(h) for h in _re.findall(r'sortlink" href="([^"]+)"', spage)]
+        assert hrefs, "the sortable headers are not links"
+        assert all(h.startswith("/admin/users?p=1&sort=") for h in hrefs), \
+            f"a sort link threw away the rest of the query: {hrefs[:3]}"
+
+        # Every cell carries the column's own heading, which is what a phone
+        # renders as a card label. This used to be a per-call-site argument
+        # nobody passed.
+        assert spage.count('data-label="User"') >= 2, "the cells are not labelled from the column"
+        assert 'data-table="admin-users"' in spage, "the table has no id to persist a layout under"
+        assert "<colgroup>" in spage, "there is nothing for a resize to write a width on"
+
+        # An unknown sort key is ignored rather than being an error.
+        status, _, spage = request(admin_op, BASE + "/admin/users?sort=nonsense&dir=asc")
+        assert status == 200, f"an unknown sort key returned {status}"
+        assert 'aria-sort="ascending"' not in spage, "an unknown key was accepted as a sort"
+
+        # ---- storage quotas ------------------------------------------------
+        status, _, qpage = request(admin_op, BASE + "/admin/quotas")
+        assert status == 200, f"/admin/quotas returned {status}"
+        assert "unlimited" in qpage, "an unset quota does not read as unlimited"
+        status, _, _ = request(
+            admin_op, BASE + "/admin/quotas/set",
+            {"_csrf": csrf_of(qpage), "username": "webuser", "limit": "5", "unit": "MB"},
+        )
+        assert status == 303, f"setting a storage quota returned {status}"
+        _, _, qpage = request(admin_op, BASE + "/admin/quotas")
+        assert "5.0 MB" in qpage or "5 MB" in qpage, "the quota is not shown back on the admin page"
+
+        # The user sees it as a progress bar carrying the real byte counts, so a
+        # screen reader announces numbers rather than a percentage.
+        status, _, upage = request(op, BASE + "/prefs")
+        assert status == 200
+        assert "<progress" in upage, "no storage bar on /prefs"
+        assert 'max="5242880"' in upage, "the bar's max is not the quota in bytes"
+
+        # Lifting it puts the account back to a bare number with no bar. The
+        # token has to come from the admin's own page: it is bound to the
+        # session, so webuser's would be refused.
+        status, _, _ = request(
+            admin_op, BASE + "/admin/quotas/set",
+            {"_csrf": csrf_of(qpage), "username": "webuser", "limit": "0", "unit": "MB"},
+        )
+        assert status == 303, f"clearing a storage quota returned {status}"
+        _, _, upage = request(op, BASE + "/prefs")
+        assert "<progress" not in upage, "an unlimited account still shows a quota bar"
+        assert "no limit" in upage, "an unlimited account does not say so"
+
+        # ---- presence and chat ----------------------------------------------
+        #
+        # A browser now occupies a citadel_sessions row, so the web shows up in
+        # RWHO beside telnet and XMPP. It could page people before this and
+        # never be paged: nothing on the web side ever called PendingExpress.
+        n = con.execute(
+            "SELECT count(*) FROM citadel_sessions WHERE client = 'Web session' "
+            "AND username = 'webuser'").fetchone()[0]
+        assert n == 1, f"a signed-in browser is not in citadel_sessions ({n})"
+
+        status, _, cpage = request(op, BASE + "/chat")
+        assert status == 200, f"/chat returned {status}"
+        assert 'id="chatlog"' in cpage, "the chat log has no polling target"
+        assert 'hx-trigger="every ' in cpage, "the chat log does not poll"
+
+        # Somebody else pages this user. admin is a second signed-in browser, so
+        # this also exercises two presence rows at once.
+        _, _, apage = request(admin_op, BASE + "/chat")
+        status, _, _ = request(
+            admin_op, BASE + "/chat/send",
+            {"_csrf": csrf_of(apage), "to": "webuser", "text": "ping from the admin"},
+        )
+        assert status == 303, f"/chat/send returned {status}"
+        waiting = con.execute(
+            "SELECT count(*) FROM citadel_express WHERE lower(to_user) = 'webuser' "
+            "AND NOT delivered").fetchone()[0]
+        assert waiting == 1, f"the page was not queued ({waiting})"
+
+        # A quiet poll is a 204 with an empty body: one indexed max() and
+        # nothing else. htmx treats it as no-swap, so the caret in the message
+        # box does not move.
+        token = con.execute("SELECT max(id) FROM citadel_express").fetchone()[0]
+        status, _, body = request(
+            op, BASE + f"/chat/feed?since={token}", headers={"HX-Request": "true"})
+        assert status == 204, f"an unchanged poll returned {status}"
+        assert body == "", f"a 204 poll returned a body: {body[:100]!r}"
+
+        # Reading the log delivers it, exactly as GEXP does for a Citadel client.
+        status, _, body = request(
+            op, BASE + "/chat/feed?since=0", headers={"HX-Request": "true"})
+        assert status == 200, f"a changed poll returned {status}"
+        assert "ping from the admin" in body, "the message is not in the log"
+        left = con.execute(
+            "SELECT count(*) FROM citadel_express WHERE lower(to_user) = 'webuser' "
+            "AND NOT delivered").fetchone()[0]
+        assert left == 0, "rendering the log did not deliver it"
+        stamped = con.execute(
+            "SELECT delivered_at > 0 FROM citadel_express").fetchone()[0]
+        assert stamped, "delivered_at was not stamped, so there is no transcript"
+
+        # A send without the token is refused. Role::User GETs are exempt from
+        # the CSRF gate and POSTs are not, and that asymmetry is easy to get
+        # wrong in a new route.
+        status, _, _ = request(op, BASE + "/chat/send", {"to": "admin", "text": "no token"})
+        assert status == 403, f"a chat send without a CSRF token returned {status}"
+
+        # ---- out of office ------------------------------------------------
+        #
+        # The vacation extension has shipped in the engine for a while; what it
+        # never had was a front door. This is that door: one canonical rule the
+        # form owns, written into the active script beside whatever else is in
+        # it.
+        status, _, spage = request(op, BASE + "/prefs/sieve")
+        assert status == 200, f"/prefs/sieve returned {status}"
+        assert 'name="reason"' in spage, "there is no out-of-office message field"
+        assert 'name="days"' in spage, "the reply frequency is not exposed"
+
+        status, _, _ = request(
+            op, BASE + "/prefs/sieve/vacation",
+            {
+                "_csrf": csrf_of(spage),
+                "user": "webuser",
+                "enabled": "on",
+                "subject": "Away until Monday",
+                "reason": "I am out of the office and will reply when I return.",
+                "days": "3",
+            },
+        )
+        assert status == 303, f"the out-of-office toggle returned {status}"
+
+        script = con.execute(
+            "SELECT script FROM quackmail_sieve_scripts WHERE username = 'webuser' "
+            "AND active").fetchone()
+        assert script is not None, "turning the reply on left no active script"
+        body = script[0]
+        assert "vacation" in body, f"the composed script has no vacation action:\n{body}"
+        assert ":days 3" in body, f"the chosen frequency was not written:\n{body}"
+        assert 'require ["vacation"]' in body, f"the require line is missing:\n{body}"
+        ok = con.execute("SELECT qm_sieve_valid(?)", [body]).fetchone()[0]
+        assert ok, f"the composed script does not parse:\n{body}"
+
+        # And it reads back: the form is the state, so an on reply must come
+        # back checked with its own text in it.
+        _, _, spage = request(op, BASE + "/prefs/sieve")
+        assert "Away until Monday" in spage, "the subject did not survive a round trip"
+        assert "I am out of the office" in spage, "the message did not survive a round trip"
+
+        # Off deletes the rule rather than leaving a disabled one behind, and
+        # leaves the script itself in place.
+        status, _, _ = request(
+            op, BASE + "/prefs/sieve/vacation",
+            {"_csrf": csrf_of(spage), "user": "webuser", "subject": "", "reason": ""},
+        )
+        assert status == 303, f"turning the reply off returned {status}"
+        body = con.execute(
+            "SELECT script FROM quackmail_sieve_scripts WHERE username = 'webuser' "
+            "AND active").fetchone()[0]
+        assert "vacation" not in body, f"the vacation rule survived being turned off:\n{body}"
+
         # Re-authentication guards the sharpest actions.
         status, _, _ = request(
             admin_op,

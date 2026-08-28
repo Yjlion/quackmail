@@ -66,29 +66,33 @@ void GetInbound(Ctx &ctx) {
 // ---- outbound queue ------------------------------------------------------
 
 void GetQueue(Ctx &ctx) {
-	std::string body = "<div class=\"wrap\"><table><tr>" + Head("ID") + Head("From") + Head("To") +
-	                   Head("Status") + "<th class=\"num\">Attempts</th>" + Head("Next attempt") +
-	                   Head("Last error") + Head("") + "</tr>";
+	std::string body;
+	Table table(ctx, "admin-queue",
+	            {Column::Num("id", "ID"), Column("from", "From"), Column("to", "To"),
+	             Column("status", "Status"), Column::Num("attempts", "Attempts"),
+	             Column("next", "Next attempt"), Column("error", "Last error"), Column("", "")});
 	auto r = ctx.con.Query("SELECT id, from_addr, rcpt, status, attempts, next_attempt_at, last_error "
 	                       "FROM quackmail_outbound ORDER BY id DESC LIMIT 500");
 	if (!r->HasError()) {
 		auto &mat = r->Cast<MaterializedQueryResult>();
 		for (idx_t i = 0; i < mat.RowCount(); i++) {
 			std::string id = mat.GetValue(0, i).ToString();
-			body += "<tr>";
-			body += Cell(id);
-			body += Cell(mat.GetValue(1, i).ToString());
-			body += Cell(mat.GetValue(2, i).ToString());
-			body += Cell(mat.GetValue(3, i).ToString());
-			body += "<td class=\"num\">" + T(mat.GetValue(4, i).ToString()) + "</td>";
-			body += Cell(mat.GetValue(5, i).IsNull() ? "" : mat.GetValue(5, i).ToString());
-			body += Cell(mat.GetValue(6, i).IsNull() ? "" : mat.GetValue(6, i).ToString());
-			body += "<td>" + FormStart(ctx, "/admin/queue/retry", "inline") + Hidden("id", id) +
-			        Button("Retry now", "sec") + FormEnd() + "</td>";
-			body += "</tr>";
+			auto text = [&](idx_t col) {
+				return mat.GetValue(col, i).IsNull() ? std::string() : mat.GetValue(col, i).ToString();
+			};
+			table.Add()
+			    .Text(id)
+			    .Text(text(1))
+			    .Text(text(2))
+			    .Text(text(3))
+			    .Number((int64_t)std::strtoll(text(4).c_str(), nullptr, 10))
+			    .Text(text(5))
+			    .Text(text(6))
+			    .Html(FormStart(ctx, "/admin/queue/retry", "inline") + Hidden("id", id) +
+			          Button("Retry now", "sec") + FormEnd());
 		}
 	}
-	body += "</table></div>";
+	body += table.Render();
 
 	body += FormStart(ctx, "/admin/queue/flush");
 	body += "<p>" + Button("Retry everything now", "sec") + "</p>";
@@ -190,24 +194,28 @@ void PostAdminRuleStop(Ctx &ctx) {
 // ---- presence and browser sessions ---------------------------------------
 
 void GetAdminWho(Ctx &ctx) {
-	std::string body = "<div class=\"wrap\"><table><tr>" + Head("Session") + Head("User") + Head("Room") +
-	                   Head("From") + Head("Client") + Head("Doing") + Head("Access") + Head("Since") +
-	                   "</tr>";
+	std::string body;
+	Table table(ctx, "admin-sessions",
+	            {Column::Num("session", "Session"), Column("user", "User"), Column("room", "Room"),
+	             Column("from", "From"), Column("client", "Client"), Column("doing", "Doing"),
+	             Column::Num("access", "Access"), Column("since", "Since", "", true)});
 	for (auto &s : quackmail::citadel::ListSessions(ctx.con)) {
-		body += "<tr>";
-		body += Cell(std::to_string(s.session_id));
-		body += Cell(s.username.empty() ? "(signing in)" : s.username);
-		body += Cell(s.room);
-		body += Cell(s.host);
-		body += Cell(s.client);
-		body += Cell(s.last_cmd);
-		body += Cell(std::to_string(s.axlevel));
-		body += Cell(FormatTime(ctx, s.since));
-		body += "</tr>";
+		table.Add()
+		    .Number(s.session_id)
+		    .Text(s.username.empty() ? "(signing in)" : s.username)
+		    .Text(s.room)
+		    .Text(s.host)
+		    .Text(s.client)
+		    .Text(s.last_cmd)
+		    .Number(s.axlevel)
+		    .Html(T(FormatTime(ctx, s.since)), std::to_string(s.since));
 	}
-	body += "</table></div>";
-	body += "<p class=\"muted\">These are live protocol connections. A front-end that crashed can leave "
-	        "a row behind until the process restarts.</p>";
+	body += table.Render();
+	body += "<p class=\"muted\">These are live front-end sessions, browsers included. A front-end that "
+	        "declares a heartbeat — a browser, an XMPP client — is held to it and its row is swept "
+	        "within a few minutes of going quiet. One that cannot (a Citadel or telnet session sits "
+	        "blocked in a read, with no timer to hang a heartbeat off) unregisters itself on a clean "
+	        "disconnect, and is otherwise swept after <code>qm_session_stale_secs</code>.</p>";
 	AdminPage(ctx, "Sessions online", body);
 }
 
