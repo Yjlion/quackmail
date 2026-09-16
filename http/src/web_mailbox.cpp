@@ -232,7 +232,9 @@ void Index(Ctx &ctx, const Room &room) {
 	opts.panes = true;
 	// The composer travels with the page, because compose docks into the reader
 	// pane here rather than arriving as its own document.
-	opts.script = "qc-compose.js";
+	// squire.js first: qc-compose.js constructs a Squire instance at boot, and
+	// deferred scripts run in document order.
+	opts.scripts = {"squire.js", "qc-compose.js"};
 
 	// ---- the reader half ---------------------------------------------------
 	// `open` is a message number, and LoadMessageIn is what confirms it is

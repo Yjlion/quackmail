@@ -1012,8 +1012,10 @@ void Render(Ctx &ctx, const std::string &title, const std::string &body, const P
 	page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl("htmx.min.js")) +
 	        "\" defer></script>";
 	page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl("qc.js")) + "\" defer></script>";
-	if (!opts.script.empty()) {
-		page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl(opts.script.c_str())) +
+	// In the order the page listed them: deferred scripts run in document order,
+	// which is what lets a page put a library ahead of the code that uses it.
+	for (const auto &script : opts.scripts) {
+		page += "<script nonce=\"" + A(ctx.nonce) + "\" src=\"" + A(AssetUrl(script.c_str())) +
 		        "\" defer></script>";
 	}
 	page += "</head>";

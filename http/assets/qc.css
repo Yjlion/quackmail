@@ -774,6 +774,17 @@ tr.taskdone td a { color: var(--pico-muted-color); text-decoration: line-through
   margin: .3rem 0 .5rem;
 }
 .richbody:focus-visible { outline-offset: -2px; }
+/* Squire keeps a run of spaces as typed rather than collapsing them, and
+   relies on the editing surface rendering them that way. Without pre-wrap,
+   double spaces and leading indentation disappear as you type them. */
+.richbody { white-space: pre-wrap; }
+/* Squire's toolbar buttons report their state through aria-pressed, which the
+   previous execCommand editor could not do reliably enough to show. */
+.richtools button[aria-pressed="true"] {
+  background: var(--pico-primary-background);
+  border-color: var(--pico-primary-border);
+  color: var(--pico-primary-inverse);
+}
 .richbody img { max-width: 100%; height: auto; }
 .richbody blockquote {
   margin: .5rem 0; padding-left: var(--pico-spacing);

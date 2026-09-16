@@ -691,8 +691,17 @@ std::string ComposeForm(Ctx &ctx, const ComposeState &st) {
 
 	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.subject")) + "</span>" +
 	        TextInput("subject", st.subject) + "</label>";
-	body += "<label class=\"field\"><span>" + T(Tr(ctx, "compose.message")) + "</span>" +
-	        TextArea("body", st.text, 18) + "</label>";
+	// Deliberately an explicit <label for=...> rather than the implicit wrapping
+	// <label> every other field uses. The editor mounts beside this textarea, and
+	// anything inside a <label> forwards a click to that label's own control —
+	// which, with the textarea hidden under the editor, meant clicking into the
+	// message body moved focus to the first toolbar button and typing went
+	// nowhere. Same association for a browser with no script, no label to
+	// swallow the click for one that has it.
+	body += "<div class=\"field\"><label for=\"compose-body\" id=\"compose-body-label\"><span>" +
+	        T(Tr(ctx, "compose.message")) + "</span></label>" +
+	        "<textarea name=\"body\" id=\"compose-body\" rows=\"18\">" + T(st.text) +
+	        "</textarea></div>";
 	// Hidden until the editor loads and marks it available: offering "formatted
 	// text" to someone who will only ever get a textarea would be a lie. Whether
 	// it starts on is the user's preference, read here so the server and the
@@ -823,7 +832,9 @@ void GetCompose(Ctx &ctx) {
 
 	PageOpts opts;
 	opts.active = "compose";
-	opts.script = "qc-compose.js";
+	// squire.js first: qc-compose.js constructs a Squire instance at boot, and
+	// deferred scripts run in document order.
+	opts.scripts = {"squire.js", "qc-compose.js"};
 	Render(ctx, Tr(ctx, "compose.title"), "<div class=\"compose\">" + form + "</div>", opts);
 }
 

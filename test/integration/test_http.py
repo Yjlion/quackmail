@@ -1516,6 +1516,31 @@ def main():
         assert status == 200, f"{m.group(1)} returned {status}"
         assert headers["Content-Type"].startswith("application/javascript"), headers["Content-Type"]
 
+        # Squire is the third vendored dependency, and unlike the other two it is
+        # deliberately *not* on every page: it loads only where a composer can be
+        # opened, so the login page must not carry it and the compose page must.
+        assert "squire." not in login_page, "Squire is being loaded on pages with no composer"
+        sq_op, _ = sign_in(BASE, "webuser", "secret")
+        _, _, compose_page = request(sq_op, BASE + "/mail/compose")
+        m = re.search(r'src="(/static/squire\.[0-9a-f]+\.js)"', compose_page)
+        assert m, "the compose page did not link Squire"
+        status, headers, squire = request(sq_op, BASE + m.group(1))
+        assert status == 200, f"{m.group(1)} returned {status}"
+        assert headers["Content-Type"].startswith("application/javascript"), headers["Content-Type"]
+        assert "immutable" in headers["Cache-Control"], headers["Cache-Control"]
+        assert headers["ETag"], "Squire was served with no ETag"
+        assert "window.Squire" in squire, "the file we serve as Squire is not Squire"
+        # The CSP has no 'unsafe-eval' and this is the one vendored file big
+        # enough to hide a use of it. If a future bump introduces one, the editor
+        # breaks in the browser and nowhere else -- so assert it here instead.
+        assert "eval(" not in squire, "the vendored Squire calls eval(); the CSP refuses it"
+        assert "new Function" not in squire, "the vendored Squire uses new Function(); the CSP refuses it"
+        # img-src allows 'self' and data:, not blob:. Squire inserts images as
+        # data: URIs today; an object URL would be dropped silently by the CSP.
+        assert "createObjectURL" not in squire, "Squire would emit blob: URLs, which img-src refuses"
+        status, _, _ = request(sq_op, BASE + "/static/squire.deadbeef.js")
+        assert status == 404, "a wrong-hash Squire URL was served"
+
         # htmx.config.allowEval is set to false in qc.js, which is the whole
         # reason the policy below can keep refusing 'unsafe-eval'.
         _, headers, _ = request(opener(), BASE + "/login")

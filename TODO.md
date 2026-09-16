@@ -33,8 +33,53 @@ fixes, webmail search and folder views, and Sieve past its core — `imap4flags`
 
 ## Shipped
 
-Nothing since v1.0.1. Released work lives in
-[TODO-archive.md](TODO-archive.md), newest first.
+Unreleased, on top of v1.0.1.
+
+- [x] **The composer's editor is Squire.** The hand-rolled `contenteditable`
+      editor was built on `document.execCommand`, which is deprecated in every
+      browser that implements it, cannot report caret state well enough to light
+      a toolbar button, and had nothing to sanitize markup with — so every paste
+      from a web page was flattened to bare text on the way in. Squire is
+      Fastmail's editor, MIT, 60 KB minified, and its `dist/` is committed
+      upstream, so vendoring it is a download and a `tools/gen_assets.py` run.
+      The file's own header used to argue against exactly this ("TinyMCE or
+      Quill: 200 KB to 1 MB … needing a build step this repo does not have");
+      that comment is rewritten rather than left contradicting the code, because
+      Squire is the case it did not consider. It loads only on the two pages
+      that can open a composer, so no other page's cold load changed.
+  - [x] **Squire's default sanitizer calls a global `DOMPurify`**, which this
+        tree does not vendor — `setHTML` and every paste would have thrown.
+        Supplying `sanitizeToDOMFragment` is therefore mandatory, and since it
+        had to exist it implements the *server's* allow-list from
+        `SanitizeForCompose`. The two must change together: a mismatch is not a
+        hole, because the server sanitizes regardless, but it is formatting the
+        editor shows and the message silently drops — which is the same shape as
+        the `style=` bug that cost a release.
+  - [x] **Clicking the message body focused a toolbar button.** The editor
+        mounted inside the `<label>` wrapping the textarea, and a click anywhere
+        in a label is forwarded to that label's own control — with the textarea
+        hidden under the editor, that was the first button in the toolbar, so
+        the caret never landed and typing went nowhere. Present in the
+        execCommand editor too and never noticed: nothing outside a browser can
+        see it, and the editor had no browser test. The body field is now an
+        explicit `<label for>` beside a `<div>`, which keeps the association for
+        a browser with no script and stops swallowing the click for one with it.
+  - [x] `qcSyncBody` strips U+200B out of the plain-text half. Squire parks a
+        zero-width space in an inline node with no text yet — click Bold on an
+        empty line and it sits there until you type. `getHTML()` strips them;
+        `innerText` does not, so every message's text half carried an invisible
+        character its HTML half did not.
+  - [x] `PageOpts::script` became `PageOpts::scripts`, an ordered list. A page
+        that needs a library before its own code has to say so, and `defer` runs
+        scripts in document order; a single slot left only the option of
+        concatenating a vendored file into one of ours.
+  - [x] **`test_web_ui.py` covers the editor**, which nothing did before —
+        `test_richmail.py` posts `html_body` over urllib and proves the server's
+        half without ever running the editor. It now types, formats, pastes
+        hostile markup, and asserts what reaches the two form fields. Both bugs
+        above were found by writing it.
+
+Released work lives in [TODO-archive.md](TODO-archive.md), newest first.
 
 ## Backlog
 
