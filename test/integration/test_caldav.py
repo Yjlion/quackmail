@@ -68,6 +68,25 @@ EVENT = (
     "END:VCALENDAR\r\n"
 )
 
+RECUR_UID = "standup-2026@example.com"
+# Weekly, so an expand over three weeks has to produce three instances rather
+# than one master event with a rule on it.
+RECUR_EVENT = (
+    "BEGIN:VCALENDAR\r\n"
+    "VERSION:2.0\r\n"
+    "PRODID:-//Test//EN\r\n"
+    "BEGIN:VEVENT\r\n"
+    f"UID:{RECUR_UID}\r\n"
+    "DTSTAMP:20260301T120000Z\r\n"
+    "DTSTART:20260316T090000Z\r\n"
+    "DTEND:20260316T093000Z\r\n"
+    "RRULE:FREQ=WEEKLY;COUNT=5\r\n"
+    "SUMMARY:Weekly standup\r\n"
+    "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\n"
+    "END:VEVENT\r\n"
+    "END:VCALENDAR\r\n"
+)
+
 FAR_UID = "distant-2027@example.com"
 FAR_EVENT = (
     "BEGIN:VCALENDAR\r\n"
@@ -211,6 +230,14 @@ def main():
         assert not re.search(r"\b2\b", dav_header), \
             f"DAV header claims level 2 without locking: {dav_header}"
         assert "PROPFIND" in headers.get("Allow", "")
+        # RFC 5689: MKCOL now takes a body naming the resourcetype it wants,
+        # which is the only way a CardDAV client can make an address book --
+        # there is no MKADDRESSBOOK.
+        assert "extended-mkcol" in dav_header, \
+            f"OPTIONS does not advertise extended-mkcol: {dav_header}"
+        for verb in ("MKCOL", "MKCALENDAR"):
+            assert verb in headers.get("Allow", ""), \
+                f"OPTIONS does not allow {verb}: {headers.get('Allow')}"
 
         # ---- authentication ----------------------------------------------
         # A browser gets bounced to /login; a client must get 401 with a
@@ -396,6 +423,100 @@ def main():
         assert status == 207, f"calendar-query returned {status}"
         assert EVENT_UID in xml, "the in-range event is missing from the query result"
         assert FAR_UID not in xml, "the out-of-range event was returned anyway"
+
+        # ---- the filter tree past comp-name and time-range --------------------
+        # Combinatorics live in test/sql/dav.test, which can assert a hundred
+        # filters without a socket. What belongs here is that the wiring reaches
+        # the evaluator at all: a prop-filter, a param-filter and an anyof, over
+        # a real collection.
+        d.go("PUT", calendar + dav_name(RECUR_UID) + ".ics", RECUR_EVENT.encode(),
+             {"Content-Type": "text/calendar"})
+
+        def cal_query(inner):
+            return ('<?xml version="1.0"?><C:calendar-query '
+                    'xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+                    "<D:prop><D:getetag/><C:calendar-data/></D:prop>"
+                    '<C:filter><C:comp-filter name="VCALENDAR">'
+                    '<C:comp-filter name="VEVENT">' + inner +
+                    "</C:comp-filter></C:comp-filter></C:filter></C:calendar-query>")
+
+        status, _, xml = d.report(calendar,
+                                  cal_query('<C:prop-filter name="SUMMARY">'
+                                            "<C:text-match>rooftop</C:text-match>"
+                                            "</C:prop-filter>"))
+        assert status == 207, f"a prop-filter query returned {status}"
+        assert EVENT_UID in xml, "prop-filter did not match the event it names"
+        assert FAR_UID not in xml, "prop-filter matched an event it does not name"
+        assert RECUR_UID not in xml, "prop-filter matched a third event as well"
+
+        # A param-filter: the invitation nobody has answered. Parameters survive
+        # parsing, which is the whole reason this is expressible.
+        status, _, xml = d.report(calendar,
+                                  cal_query('<C:prop-filter name="ATTENDEE">'
+                                            '<C:param-filter name="PARTSTAT">'
+                                            '<C:text-match match-type="equals">NEEDS-ACTION'
+                                            "</C:text-match></C:param-filter>"
+                                            "</C:prop-filter>"))
+        assert status == 207, f"a param-filter query returned {status}"
+        assert RECUR_UID in xml, "param-filter did not match the attendee status it names"
+        assert EVENT_UID not in xml, "param-filter matched an event with no attendees"
+
+        # anyof really is or: either summary, one filter.
+        status, _, xml = d.report(calendar,
+                                  '<?xml version="1.0"?><C:calendar-query '
+                                  'xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+                                  "<D:prop><D:getetag/><C:calendar-data/></D:prop>"
+                                  '<C:filter><C:comp-filter name="VCALENDAR">'
+                                  '<C:comp-filter name="VEVENT" test="anyof">'
+                                  '<C:prop-filter name="SUMMARY">'
+                                  "<C:text-match>rooftop</C:text-match></C:prop-filter>"
+                                  '<C:prop-filter name="SUMMARY">'
+                                  "<C:text-match>standup</C:text-match></C:prop-filter>"
+                                  "</C:comp-filter></C:comp-filter></C:filter></C:calendar-query>")
+        assert status == 207, f"an anyof query returned {status}"
+        assert EVENT_UID in xml and RECUR_UID in xml, "anyof behaved like allof"
+
+        # is-not-defined is the negation of one property, not of the filter.
+        status, _, xml = d.report(calendar,
+                                  cal_query('<C:prop-filter name="ATTENDEE">'
+                                            "<C:is-not-defined/></C:prop-filter>"))
+        assert status == 207, f"an is-not-defined query returned {status}"
+        assert EVENT_UID in xml, "is-not-defined excluded the event with no attendee"
+        assert RECUR_UID not in xml, "is-not-defined returned the event that has one"
+
+        # An unsatisfiable filter returns an empty multistatus, not everything.
+        status, _, xml = d.report(calendar,
+                                  cal_query('<C:prop-filter name="SUMMARY">'
+                                            "<C:text-match>no such summary anywhere</C:text-match>"
+                                            "</C:prop-filter>"))
+        assert status == 207, f"an unmatched query returned {status}"
+        assert EVENT_UID not in xml and FAR_UID not in xml, \
+            "a filter that matches nothing returned objects"
+
+        # ---- expand ----------------------------------------------------------
+        # The recurring event has to come back as one VEVENT per occurrence,
+        # each with its own RECURRENCE-ID and no RRULE -- a client must not be
+        # able to expand the expansion.
+        expand = ('<?xml version="1.0"?><C:calendar-query '
+                  'xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+                  "<D:prop><D:getetag/>"
+                  '<C:calendar-data><C:expand start="20260315T000000Z" '
+                  'end="20260405T000000Z"/></C:calendar-data></D:prop>'
+                  '<C:filter><C:comp-filter name="VCALENDAR">'
+                  '<C:comp-filter name="VEVENT">'
+                  '<C:time-range start="20260315T000000Z" end="20260405T000000Z"/>'
+                  "</C:comp-filter></C:comp-filter></C:filter></C:calendar-query>")
+        status, _, xml = d.report(calendar, expand)
+        assert status == 207, f"an expand query returned {status}"
+        assert "RECURRENCE-ID" in xml, "an expanded occurrence carries no RECURRENCE-ID"
+        assert xml.count("RECURRENCE-ID") > 1, \
+            f"expand returned {xml.count('RECURRENCE-ID')} occurrences, not a series"
+        assert "RRULE" not in xml, "an expanded instance still carries the rule it came from"
+        # Without expand, the same event comes back once, rule intact.
+        status, _, plain = d.report(calendar, cal_query(
+            '<C:time-range start="20260315T000000Z" end="20260405T000000Z"/>'))
+        assert "RRULE" in plain, "the unexpanded form lost its rule"
+        assert "RECURRENCE-ID" not in plain, "the unexpanded form was expanded anyway"
 
         # ---- free-busy-query -------------------------------------------------
         #
@@ -593,13 +714,109 @@ def main():
             {"Content-Type": "text/calendar; charset=utf-8"})
         assert status in (200, 201, 204), f"the PUT still failed after lifting the quota: {status}"
 
+        # ---- MKCALENDAR and MKCOL -------------------------------------------
+        # A collection is a room, so this is the DAV spelling of "create a
+        # room" -- and the part that matters is not the INSERT but the rights
+        # grant after it, without which the creator cannot write to what they
+        # just made.
+        made = f"/dav/calendars/{USER}/work-trips/"
+        mkcal = ('<?xml version="1.0"?><C:mkcalendar '
+                 'xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+                 "<D:set><D:prop><D:displayname>Work trips</D:displayname>"
+                 "<C:calendar-description>Where I am this month</C:calendar-description>"
+                 "</D:prop></D:set></C:mkcalendar>")
+        # Refused first, and that is the point: creating a collection creates a
+        # room, so it goes through the same gate the web UI's "new room" button
+        # does -- the site axlevel bar, or a `k` grant on the floor. An ordinary
+        # user clears neither by default.
+        status, _, _ = d.go("MKCALENDAR", made, mkcal.encode(),
+                            {"Content-Type": "application/xml"})
+        assert status == 403, f"MKCALENDAR was allowed without the right: {status}"
+
+        # Lower the site bar to "any user" and it goes through, which is what
+        # proves the 403 above was the gate rather than something else.
+        con.execute("CALL qm_config_set('qm_room_create_axlevel', '1')")
+        status, _, _ = d.go("MKCALENDAR", made, mkcal.encode(),
+                            {"Content-Type": "application/xml"})
+        assert status == 201, f"MKCALENDAR returned {status}"
+
+        # The collection is served at the URL the client chose, not at the room
+        # number the server happened to allocate. A 201 that puts the resource
+        # somewhere else has broken the client that asked for it.
+        status, _, xml = d.propfind(made, prop(["D:displayname", "D:resourcetype", "C:calendar-description"]), depth="0")
+        assert status == 207, f"PROPFIND on the new calendar returned {status}"
+        assert "Work trips" in xml, f"the displayname from the body was not applied: {xml[:400]}"
+        assert "calendar" in xml, "the new collection is not a calendar"
+        assert "Where I am this month" in xml, \
+            f"calendar-description from the MKCALENDAR body was not applied: {xml[:500]}"
+
+        # And the creator can write to it immediately -- the rights grant.
+        trip = EVENT.replace(EVENT_UID, "trip-uid@example.com")
+        status, _, _ = d.go("PUT", made + "trip.ics", trip.encode(),
+                            {"Content-Type": "text/calendar"})
+        assert status in (201, 204), f"PUT into a just-created calendar returned {status}"
+
+        # It shows up in the home set once, under the name it was given -- not
+        # also under its number, or a client would sync it twice.
+        status, _, home = d.propfind(f"/dav/calendars/{USER}/", prop(["D:displayname"]), depth="1")
+        assert home.count("work-trips") >= 1, "the new calendar is missing from the home set"
+        assert "Work trips" in home, "the new calendar has no name in the home set"
+
+        # MKCOL on something that already exists is 405, not 409: a client
+        # retrying a request whose response it lost depends on telling the two
+        # apart.
+        status, _, _ = d.go("MKCALENDAR", made, mkcal.encode(),
+                            {"Content-Type": "application/xml"})
+        assert status == 405, f"MKCALENDAR over an existing collection returned {status}"
+
+        # Extended MKCOL is how an address book gets made; the resourcetype in
+        # the body is the only thing that says so.
+        book = f"/dav/addressbooks/{USER}/work-people/"
+        mkcol = ('<?xml version="1.0"?><D:mkcol xmlns:D="DAV:" '
+                 'xmlns:CARD="urn:ietf:params:xml:ns:carddav">'
+                 "<D:set><D:prop><D:resourcetype><D:collection/>"
+                 "<CARD:addressbook/></D:resourcetype>"
+                 "<D:displayname>Work people</D:displayname>"
+                 "</D:prop></D:set></D:mkcol>")
+        status, _, _ = d.go("MKCOL", book, mkcol.encode(), {"Content-Type": "application/xml"})
+        assert status == 201, f"extended MKCOL returned {status}"
+        status, _, xml = d.propfind(book, prop(["D:resourcetype"]), depth="0")
+        assert "addressbook" in xml, f"the new collection is not an address book: {xml[:400]}"
+
+        # A numeric segment names the room-number space, which the server
+        # allocates. Letting a client take one would shadow a real room.
+        status, _, _ = d.go("MKCALENDAR", f"/dav/calendars/{USER}/4242/",
+                            mkcal.encode(), {"Content-Type": "application/xml"})
+        assert status == 403, f"MKCALENDAR on a numeric segment returned {status}"
+
+        # A calendar under the addressbook home is a contradiction the verb and
+        # the path have to agree about.
+        status, _, _ = d.go("MKCALENDAR", f"/dav/addressbooks/{USER}/wrong-home/",
+                            mkcal.encode(), {"Content-Type": "application/xml"})
+        assert status == 403, f"MKCALENDAR under the addressbook home returned {status}"
+
+        # A client that can create a collection must be able to remove it, or it
+        # leaves litter it has no way to clean up.
+        status, _, _ = d.go("DELETE", book)
+        assert status == 204, f"DELETE on a collection returned {status}"
+        status, _, _ = d.propfind(book, prop(["D:displayname"]), depth="0")
+        assert status == 404, f"the deleted collection still resolves: {status}"
+
+        # And the binding went with it, rather than pointing the old URL at
+        # whatever room is allocated next.
+        rows = con.execute(
+            "SELECT count(*) FROM citadel_dav_collections WHERE segment = 'work-people'"
+        ).fetchall()
+        assert rows[0][0] == 0, "the collection binding outlived the room"
+
     finally:
         con.execute("CALL qm_http_stop()")
         con.execute("CALL qm_imap_stop()")
         con.close()
 
     print("PASS: CalDAV and CardDAV (discovery, Basic auth, PROPFIND, REPORT, "
-          "conditional writes, sync-collection, permissions, storage quota, "
+          "conditional writes, filters, expand, MKCOL/MKCALENDAR, "
+          "sync-collection, permissions, storage quota, "
           "IMAP parity)")
 
 

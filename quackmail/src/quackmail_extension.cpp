@@ -16,6 +16,7 @@
 #include "quackmail/acme.hpp"
 #include "quackmail/auth.hpp"
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/caldav_filter.hpp"
 #include "quackmail/davxml.hpp"
 #include "quackmail/diff.hpp"
 #include "quackmail/dkim.hpp"
@@ -1466,6 +1467,39 @@ void DavEuidScalar(DataChunk &args, ExpressionState &, Vector &result) {
 	});
 }
 
+// RFC 4791 §9.7 filter evaluation, against one calendar object.
+//
+// A filter is a *tree* — comp-filters inside comp-filters, prop-filters with
+// param-filters, text-match and is-not-defined at several levels, each carrying
+// its own allof/anyof. Every combination of those is a separate case, and the
+// only alternative to asserting them here is a socket-driven Python test that
+// has to stand up a server and a room to check one boolean.
+//
+// The XML is the <C:filter> element, exactly as a client sends it, namespace
+// declarations and all; the second argument is the iCalendar object.
+void CaldavFilterScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, bool>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t xml, string_t body) {
+		    quackmail::dav::Node root;
+		    if (!quackmail::dav::ParseDoc(xml.GetString(), root)) {
+			    return false;
+		    }
+		    return quackmail::caldav::MatchCalendar(root, body.GetString());
+	    });
+}
+
+// The CardDAV twin, over <CARD:filter> and a vCard.
+void CarddavFilterScalar(DataChunk &args, ExpressionState &, Vector &result) {
+	BinaryExecutor::Execute<string_t, string_t, bool>(
+	    args.data[0], args.data[1], result, args.size(), [&](string_t xml, string_t body) {
+		    quackmail::dav::Node root;
+		    if (!quackmail::dav::ParseDoc(xml.GetString(), root)) {
+			    return false;
+		    }
+		    return quackmail::caldav::MatchAddressBook(root, body.GetString());
+	    });
+}
+
 // The JSON codec JMAP is built on. A request body is attacker-supplied, so what
 // the parser *refuses* is as much of a contract as what it accepts — and all of
 // it is assertable from sqllogictest with no socket in the loop.
@@ -2522,6 +2556,8 @@ void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(ScalarFunction("qm_http_keepalive", {V, V}, B, HttpKeepAliveScalar));
 	loader.RegisterFunction(ScalarFunction("qm_dav_name", {V}, V, DavNameScalar));
 	loader.RegisterFunction(ScalarFunction("qm_dav_euid", {V}, V, DavEuidScalar));
+	loader.RegisterFunction(ScalarFunction("qm_caldav_filter", {V, V}, B, CaldavFilterScalar));
+	loader.RegisterFunction(ScalarFunction("qm_carddav_filter", {V, V}, B, CarddavFilterScalar));
 
 	// JSON (pure), the codec JMAP is built on.
 	loader.RegisterFunction(ScalarFunction("qm_json_valid", {V}, B, JsonValidScalar));

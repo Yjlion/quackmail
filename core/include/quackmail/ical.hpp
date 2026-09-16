@@ -118,6 +118,18 @@ bool Parse(const std::string &text, Component &out);
 // tree and are not items.
 bool ParseItems(const std::string &text, std::vector<Item> &out);
 
+// Flatten one already-parsed component into an Item. False when the component
+// is not one of the three item kinds (a VTIMEZONE or VFREEBUSY, say).
+//
+// `root` is the enclosing VCALENDAR and is used only to resolve TZIDs against
+// its inline VTIMEZONEs, so it must be the tree `c` actually came out of.
+//
+// This exists so a caller that already holds the tree — the CalDAV filter
+// evaluator, which needs the components for prop-filter and the items for
+// time-range — can get both from one parse instead of parsing the same body
+// twice.
+bool ItemFromComponent(const Component &c, const Component &root, Item &out);
+
 // Serialize a tree, folding at 75 octets on a UTF-8 boundary.
 std::string Emit(const Component &root);
 

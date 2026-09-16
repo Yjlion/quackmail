@@ -79,6 +79,54 @@ Unreleased, on top of v1.0.1.
         hostile markup, and asserts what reaches the two form fields. Both bugs
         above were found by writing it.
 
+- [x] **DAV depth: `MKCOL`/`MKCALENDAR`, the whole `calendar-query` filter tree,
+      and `expand`.** All three were one backlog bullet; they turned out to
+      share a prerequisite, which is that the filter evaluator had to become a
+      *tree* before anything else was worth doing.
+  - [x] **The filter evaluator is recursive and lives in `core/`.** What it
+        replaced was two flat extractors that looked exactly two `comp-filter`
+        levels deep — `FilterComponent` and `FilterTimeRange` — evaluated by two
+        `if`s, and which re-parsed each object's iCalendar twice to do it. Now:
+        nested `comp-filter`, `prop-filter`, `param-filter`, `text-match` with
+        all four match types, `is-not-defined`, and `test="allof"|"anyof"` at
+        every level. `addressbook-query` had the same gaps and closes with it.
+        It is in `core/` because it is pure — a filter and a body in, a boolean
+        out — which is what lets `qm_caldav_filter`/`qm_carddav_filter` expose
+        it to `test/sql/dav.test`. Filter combinatorics are what sqllogictest is
+        good at and what a socket-driven Python test is bad at.
+  - [x] `ical::ItemFromComponent` was extracted out of `ParseItems`, so a caller
+        that needs the component tree *and* the flattened items — which is what
+        a filter with both a `prop-filter` and a `time-range` needs — gets both
+        from one parse rather than parsing the same body twice.
+  - [x] **`expand` reuses `ical::Expand`**, the engine already behind the web
+        calendar grid, free/busy and the time-range filter, cap included. What
+        it adds is turning each instant back into a real VEVENT — and
+        `RECURRENCE-ID` was modelled nowhere in the tree before this.
+  - [x] **A collection a client creates keeps the client's URL.** A collection
+        segment is a room *number* (a Citadel room name may contain `/`), so a
+        `MKCALENDAR /dav/calendars/ann/work-trips/` had nowhere to go. A
+        client-chosen segment is now bound in `citadel_dav_collections`,
+        resolved after the numeric form fails — every URL that worked before
+        still works, and a 201 no longer promises a URL the server then serves
+        something else at. The binding is dropped with the room, or a reused
+        room number would point an old URL at a new room.
+  - [x] Creating a collection goes through the *same* gate as creating a room
+        from the web (`MayCreateRoomOnFloor`, now shared rather than copied) and
+        the same rights grant afterwards — without which the creator holds
+        derived rights only and cannot write to what they just made.
+  - [x] **`DELETE` on a collection**, gated on the `a` right. It was a flat 405
+        on the reasoning that the consequences exceeded what a DELETE could
+        express; that held until a client could *create* one, and a client that
+        can make a calendar and not remove it leaves litter it cannot clean up.
+  - [x] `calendar-description` is writable. PROPFIND had always read it from
+        `room.info` and PROPPATCH could never set it — `MKCALENDAR` carries one,
+        so the write path had to exist, and it belongs on both verbs.
+        `ApplyCollectionProp` is now shared, so creating a calendar with a
+        colour and PROPPATCHing one on afterwards cannot disagree.
+  - [x] `extended-mkcol` joins the `DAV:` header, and the two verbs join
+        `Allow`. Neither is advertised until it works: a class we claim and do
+        not honour is one a client keeps trying to use.
+
 Released work lives in [TODO-archive.md](TODO-archive.md), newest first.
 
 ## Backlog
@@ -98,10 +146,11 @@ The first came out of building 0.6.0 and is the one most likely to bite.
   this one; this is the half that is a convenience for clients already talking
   to us.
 
-- DAV depth beyond scheduling: `LOCK`/`UNLOCK` (deliberately absent — ETags and
-  `If-Match` are the consistency story), `MKCALENDAR`/`MKCOL`, the
-  `calendar-query` filters past comp-name and time-range, and `expand` on a
-  recurring event. Notes rooms stay out: vNote is not a DAV resource type.
+- DAV depth beyond scheduling, what is left of it: `COPY`/`MOVE`, and
+  `LOCK`/`UNLOCK` — the latter deliberately absent, because ETags and
+  `If-Match` are the consistency story. `MKCALENDAR`/`MKCOL`, the full
+  `calendar-query` filter tree and `expand` have shipped; see above. Notes rooms
+  stay out either way: vNote is not a DAV resource type.
 - Telnet BBS, still to fill in from `citadel.rc`: file transfer (the
   `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR` room flags and the `.Read file` /
   `.Admin File` family), `C`hat, and help files.

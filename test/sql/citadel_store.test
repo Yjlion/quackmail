@@ -149,9 +149,9 @@ SELECT count(*) FROM duckdb_tables() WHERE table_name IN (
     'citadel_messages', 'citadel_room_msgs', 'citadel_room_tombstones',
     'citadel_room_state', 'citadel_msg_flags', 'citadel_config',
     'citadel_sessions', 'citadel_user_prefs', 'citadel_room_acl',
-    'citadel_express', 'citadel_dav_names');
+    'citadel_express', 'citadel_dav_names', 'citadel_dav_collections');
 ----
-15
+16
 
 # What a DAV client calls each object.
 #
@@ -167,6 +167,25 @@ room_num,name,euid
 
 query I
 SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_dav_names_euid';
+----
+1
+
+# And what a DAV client calls each *collection*.
+#
+# The same problem one level up. A collection's URL segment is its room number,
+# because a Citadel room name may contain '/' and the router has to split a path
+# without a database. But a client doing MKCALENDAR names its own URL, and a
+# server that answers 201 and serves the collection elsewhere has broken it —
+# so a client-chosen segment is recorded here and resolved after the numeric
+# form fails. Keyed by user because a segment is only unique within one home.
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index)
+FROM duckdb_columns() WHERE table_name = 'citadel_dav_collections';
+----
+username,segment,room_num
+
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_dav_colls_room';
 ----
 1
 

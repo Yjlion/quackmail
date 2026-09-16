@@ -31,6 +31,12 @@ namespace qmweb {
 //   /dav/addressbooks/<user>/                    addressbook home
 //   /dav/addressbooks/<user>/<room>/             one addressbook
 //   /dav/addressbooks/<user>/<room>/<name>.vcf   one contact
+//
+// <room> is the room number, because a Citadel room name may contain '/' and
+// ParseDavPath has to split a path without a database. A collection a client
+// created with MKCOL/MKCALENDAR is served under the segment *it* chose instead,
+// resolved through citadel_dav_collections — a 201 that then serves the
+// collection at a different URL has broken the client that asked for it.
 
 namespace davx = quackmail::dav;
 
@@ -41,10 +47,20 @@ enum class DavKind {
 	AddressBook, // VIEW_ADDRESSBOOK
 };
 
+// Room creation gates, defined in web_rooms.cpp. DAV asks rather than deriving
+// its own answer, for the same reason every front-end that accepts a message
+// asks CanPost: two copies of a permission rule is one rule and one bug.
+bool AxLevelMayCreateRooms(const Ctx &ctx);
+bool MayCreateRoomOnFloor(const Ctx &ctx, int64_t floor);
+
 // A room, seen as a DAV collection.
 struct DavCollection {
 	quackmail::citadel::Room room;
 	DavKind kind = DavKind::None;
+	// The URL segment this collection is served under: the room number, or the
+	// name a client gave it through MKCOL. Resolved once, where the Connection
+	// is, so the href builders stay pure.
+	std::string segment;
 	// The component set is VTODO rather than VEVENT. Still a calendar
 	// collection — CalDAV has no separate task collection — but a client that
 	// asks for VEVENTs should not be offered this one.
@@ -66,6 +82,12 @@ struct DavPath {
 	DavKind kind = DavKind::None; // which home the path sits under
 	std::string user;
 	int64_t room_num = -1;
+	// The collection segment exactly as it arrived. Normally the decimal room
+	// number, in which case room_num is set and this is redundant; for a
+	// collection a client named itself through MKCOL/MKCALENDAR, room_num stays
+	// -1 and this is the only handle on it until the binding is resolved
+	// against the database. Parsing stays pure either way.
+	std::string segment;
 	std::string name; // the encoded resource name, extension included
 	std::string euid; // the name decoded, extension stripped
 };
@@ -82,11 +104,16 @@ DavPath ParseDavPath(const std::string &tail);
 
 std::string PrincipalHref(const std::string &user);
 std::string HomeHref(DavKind kind, const std::string &user);
+std::string CollectionHref(DavKind kind, const std::string &user, const std::string &segment);
+// Convenience for the numeric form, which is what every collection this server
+// created before MKCOL existed is still served under.
 std::string CollectionHref(DavKind kind, const std::string &user, int64_t room_num);
 // The href for a resource *name* — the last path segment, extension included.
 // Not for an euid: the two are not the same thing (see the naming section
 // below), and a caller that has only an euid asks ResourceNameFor first.
 std::string ObjectHref(DavKind kind, const std::string &user, int64_t room_num, const std::string &name);
+std::string ObjectHref(DavKind kind, const std::string &user, const std::string &segment,
+                       const std::string &name);
 
 // ".ics" / ".vcf", and "text/calendar" / "text/vcard".
 const char *ObjectExt(DavKind kind);
@@ -222,6 +249,14 @@ void WriteGoneResponse(davx::Writer &w, const std::string &href);
 // Each is defined in the file named after it and dispatched by dav_router.cpp.
 
 void DavPropfind(Ctx &ctx, const DavPath &p);
+// MKCOL (RFC 4918 §9.3, extended by RFC 5689) and MKCALENDAR (RFC 4791 §5.3.1).
+// Both create a room; which verb it was decides only how the client said so.
+void DavMkcol(Ctx &ctx, const DavPath &p);
+// What a 405 lists, and what OPTIONS advertises.
+extern const char *const kAllowHeader;
+// One writable collection property, shared by PROPPATCH and by MKCOL's creation
+// body. Returns the per-property status to report.
+int ApplyCollectionProp(Ctx &ctx, DavCollection &c, const davx::Node &item, bool removing);
 void DavProppatch(Ctx &ctx, const DavPath &p);
 void DavReport(Ctx &ctx, const DavPath &p);
 void DavGet(Ctx &ctx, const DavPath &p, bool head_only);

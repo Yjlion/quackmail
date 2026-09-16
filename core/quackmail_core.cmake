@@ -87,6 +87,9 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/contentline.cpp
         ${QUACKMAIL_CORE_DIR}/src/vcard.cpp
         ${QUACKMAIL_CORE_DIR}/src/ical.cpp
+        # RFC 4791 filter evaluation. In core/ because it is pure, which is what
+        # lets qm_caldav_filter expose it to test/sql/dav.test.
+        ${QUACKMAIL_CORE_DIR}/src/caldav_filter.cpp
         ${QUACKMAIL_CORE_DIR}/src/itip.cpp
         ${QUACKMAIL_CORE_DIR}/src/vnote.cpp
         ${QUACKMAIL_CORE_DIR}/src/mime_build.cpp

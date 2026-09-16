@@ -1,5 +1,6 @@
 #include "dav.hpp"
 
+#include "quackmail/caldav_filter.hpp"
 #include "quackmail/ical.hpp"
 #include "quackmail/util.hpp"
 #include "quackmail/vcard.hpp"
@@ -44,143 +45,139 @@ bool ParseIcalUtc(const std::string &v, int64_t &out) {
 	return true;
 }
 
-// The component name a filter selects, e.g. VCALENDAR > VEVENT.
-std::string FilterComponent(const davx::Node &filter) {
-	for (const auto *outer : filter.Children(davx::kNsCalDav, "comp-filter")) {
-		if (quackmail::util::Upper(outer->Attr("name")) != "VCALENDAR") {
+// ---- expand --------------------------------------------------------------
+
+// An instant, as the iCalendar text an expanded instance carries. All-day
+// occurrences keep the DATE form: rewriting one as a UTC datetime would move a
+// birthday by whatever the reader's offset happens to be.
+std::string IcalUtc(int64_t epoch, bool all_day) {
+	ical::DateTime dt;
+	dt.epoch = epoch;
+	dt.all_day = all_day;
+	dt.utc = !all_day;
+	dt.valid = true;
+	return ical::FormatDateTime(dt);
+}
+
+// Drop TZID (and VALUE, for a DATE that is now a datetime or the reverse) off a
+// property whose value has just been rewritten as an absolute instant. Leaving
+// the parameter would have it say something the value contradicts.
+void StripTzid(ical::Component &c, const char *name, bool all_day) {
+	for (auto &p : c.props) {
+		if (p.name != name) {
 			continue;
 		}
-		for (const auto *inner : outer->Children(davx::kNsCalDav, "comp-filter")) {
-			return quackmail::util::Upper(inner->Attr("name"));
-		}
-	}
-	return std::string();
-}
-
-// The time-range a filter carries, if any.
-bool FilterTimeRange(const davx::Node &filter, int64_t &from, int64_t &to) {
-	for (const auto *outer : filter.Children(davx::kNsCalDav, "comp-filter")) {
-		for (const auto *inner : outer->Children(davx::kNsCalDav, "comp-filter")) {
-			const davx::Node *tr = inner->Child(davx::kNsCalDav, "time-range");
-			if (!tr) {
+		std::vector<std::pair<std::string, std::string>> keep;
+		for (auto &kv : p.params) {
+			std::string up = quackmail::util::Upper(kv.first);
+			if (up == "TZID" || up == "VALUE") {
 				continue;
 			}
-			// An absent bound is open-ended, which is what the spec says and what
-			// a client asking only for "everything after today" sends.
-			from = 0;
-			to = 0;
-			bool any = false;
-			int64_t v = 0;
-			if (ParseIcalUtc(tr->Attr("start"), v)) {
-				from = v;
-				any = true;
-			}
-			if (ParseIcalUtc(tr->Attr("end"), v)) {
-				to = v;
-				any = true;
-			}
-			if (any) {
-				if (to == 0) {
-					to = from + 3650LL * 86400; // ten years is "open ended" enough
-				}
-				return true;
-			}
+			keep.push_back(kv);
 		}
+		if (all_day) {
+			keep.emplace_back("VALUE", "DATE");
+		}
+		p.params = keep;
 	}
-	return false;
 }
 
-// Does this object fall inside [from, to)?
+
+// The <C:expand start= end=/> a client put inside the <C:calendar-data> it
+// asked for. Read off the request root rather than off PropRequest, which keeps
+// only (namespace, name) pairs and has thrown the children away by this point.
+bool ExpandRange(const davx::Node &root, int64_t &from, int64_t &to) {
+	const davx::Node *prop = root.Child(davx::kNsDav, "prop");
+	if (!prop) {
+		return false;
+	}
+	const davx::Node *data = prop->Child(davx::kNsCalDav, "calendar-data");
+	if (!data) {
+		return false;
+	}
+	const davx::Node *exp = data->Child(davx::kNsCalDav, "expand");
+	if (!exp) {
+		return false;
+	}
+	// Unlike a time-range filter, both bounds are required here (RFC 4791
+	// §9.6.5) — an unbounded expansion of an infinite rule has no answer.
+	// A malformed one is treated as absent rather than as an error, which
+	// returns the master event: more than asked for, but nothing lost.
+	return ParseIcalUtc(exp->Attr("start"), from) && ParseIcalUtc(exp->Attr("end"), to) && from < to;
+}
+
+// Rewrite one calendar object as one component per occurrence in [from, to).
 //
-// Expansion goes through ical::Expand, which resolves a recurrence in the
-// event's own zone — so a weekly 09:00 meeting still matches after a DST change
-// rather than sliding an hour out of the window.
-bool InTimeRange(const std::string &body, int64_t from, int64_t to) {
-	std::vector<ical::Item> items;
-	if (!ical::ParseItems(body, items)) {
-		return false;
+// Recurrence expansion is ical::Expand — the same engine behind the web
+// calendar grid, free/busy and the time-range filter, with its own
+// kMaxOccurrences cap. What this adds is turning each instant back into a real
+// VEVENT: RECURRENCE-ID naming the instance, DTSTART/DTEND moved onto it, and
+// the rule properties stripped so a client cannot expand the expansion.
+//
+// Returns "" when nothing falls in the window, which the caller treats as "this
+// object is not in the result set" rather than emitting an empty VCALENDAR.
+std::string ExpandObject(const std::string &body, int64_t from, int64_t to) {
+	ical::Component root;
+	if (!ical::Parse(body, root)) {
+		return std::string();
 	}
-	for (const auto &item : items) {
+
+	ical::Component out;
+	out.name = root.name;
+	out.props = root.props;
+	// VTIMEZONEs are carried over: an expanded DTSTART may still name a TZID,
+	// and dropping the definition would leave the client unable to place it.
+	// Everything else is rebuilt from the occurrences.
+	for (const auto &child : root.children) {
+		if (child.name == "VTIMEZONE") {
+			out.children.push_back(child);
+		}
+	}
+
+	bool any = false;
+	for (const auto &child : root.children) {
+		ical::Item item;
+		if (!ical::ItemFromComponent(child, root, item)) {
+			continue;
+		}
 		for (const auto &occ : ical::Expand(item, from, to)) {
-			if (occ.start < to && (occ.end > from || occ.end == occ.start)) {
-				return true;
+			if (!(occ.start < to && (occ.end > from || occ.end == occ.start))) {
+				continue;
 			}
+			ical::Component inst = child;
+			// A recurring instance is identified by the *original* start of that
+			// occurrence, which for an unmodified instance is the start itself.
+			inst.Set("RECURRENCE-ID", IcalUtc(occ.start, occ.all_day));
+			inst.Set("DTSTART", IcalUtc(occ.start, occ.all_day));
+			if (child.Find("DTEND") || child.Find("DURATION")) {
+				inst.Set("DTEND", IcalUtc(occ.end, occ.all_day));
+			}
+			// The instance carries no rule of its own: it *is* one expansion of
+			// the rule, and leaving these would have the client expand it again.
+			inst.Remove("RRULE");
+			inst.Remove("EXRULE");
+			inst.Remove("EXDATE");
+			inst.Remove("RDATE");
+			// DTSTART/DTEND are now plain UTC instants, so a TZID parameter left
+			// on them would say something contradictory.
+			StripTzid(inst, "DTSTART", occ.all_day);
+			StripTzid(inst, "DTEND", occ.all_day);
+			StripTzid(inst, "RECURRENCE-ID", occ.all_day);
+			out.children.push_back(std::move(inst));
+			any = true;
 		}
 	}
-	return false;
-}
-
-// Whether a calendar object is of the component kind a filter asked for.
-bool MatchesComponent(const std::string &body, const std::string &comp) {
-	if (comp.empty() || comp == "VCALENDAR") {
-		return true;
+	if (!any) {
+		return std::string();
 	}
-	std::vector<ical::Item> items;
-	if (!ical::ParseItems(body, items) || items.empty()) {
-		return false;
-	}
-	for (const auto &item : items) {
-		const char *kind = item.kind == ical::Item::Todo    ? "VTODO"
-		                   : item.kind == ical::Item::Journal ? "VJOURNAL"
-		                                                      : "VEVENT";
-		if (comp == kind) {
-			return true;
-		}
-	}
-	return false;
-}
-
-// A CardDAV prop-filter: a property whose value contains (or equals) some text.
-// Only the two match types clients send are implemented; anything else is
-// treated as "matches", because returning too much is recoverable and returning
-// too little looks to the user like data loss.
-bool MatchesCardFilter(const std::string &body, const davx::Node &filter) {
-	auto props = filter.Children(davx::kNsCardDav, "prop-filter");
-	if (props.empty()) {
-		return true;
-	}
-	bool require_all = quackmail::util::Lower(filter.Attr("test")) != "anyof";
-	vcard::Card card;
-	if (!vcard::ParseOne(body, card)) {
-		return false;
-	}
-
-	bool any_matched = false;
-	for (const auto *pf : props) {
-		std::string name = quackmail::util::Upper(pf->Attr("name"));
-		const davx::Node *text = pf->Child(davx::kNsCardDav, "text-match");
-		bool matched = false;
-		for (const auto *prop : card.FindAll(name)) {
-			if (!text) {
-				matched = true; // is-present
-				break;
-			}
-			std::string hay = quackmail::util::Lower(prop->Value());
-			std::string needle = quackmail::util::Lower(text->text);
-			std::string type = quackmail::util::Lower(text->Attr("match-type"));
-			bool hit = type == "equals" ? hay == needle : hay.find(needle) != std::string::npos;
-			if (quackmail::util::Lower(text->Attr("negate-condition")) == "yes") {
-				hit = !hit;
-			}
-			if (hit) {
-				matched = true;
-				break;
-			}
-		}
-		if (matched) {
-			any_matched = true;
-		} else if (require_all) {
-			return false;
-		}
-	}
-	return require_all ? true : any_matched;
+	return ical::Emit(out);
 }
 
 // Assemble a response for one object.
 void EmitObject(Ctx &ctx, davx::Writer &w, const DavCollection &c, const DavObject &o,
                 const PropRequest &pr) {
 	PropSource src;
-	src.href = ObjectHref(c.kind, ctx.username, c.room.room_num, o.name);
+	src.href = ObjectHref(c.kind, ctx.username, c.segment, o.name);
 	src.type = DavRes::Object;
 	src.kind = c.kind;
 	src.user = ctx.username;
@@ -200,7 +197,7 @@ void EmitObject(Ctx &ctx, davx::Writer &w, const DavCollection &c, const DavObje
 // whatever the resource is bound to rather than the object's UID.
 std::vector<std::string> MultigetNames(Ctx &ctx, const DavCollection &c, const davx::Node &root) {
 	std::vector<std::string> out;
-	std::string prefix = CollectionHref(c.kind, ctx.username, c.room.room_num);
+	std::string prefix = CollectionHref(c.kind, ctx.username, c.segment);
 	for (const auto *href : root.Children(davx::kNsDav, "href")) {
 		std::string path = href->text;
 		// Clients sometimes send an absolute URL. Take everything from the
@@ -297,7 +294,7 @@ void DavReport(Ctx &ctx, const DavPath &p) {
 				if (LoadObject(ctx, c, ch.euid, o)) {
 					EmitObject(ctx, w, c, o, pr);
 				} else {
-					WriteGoneResponse(w, ObjectHref(c.kind, ctx.username, c.room.room_num,
+					WriteGoneResponse(w, ObjectHref(c.kind, ctx.username, c.segment,
 				                                ResourceNameFor(ctx, c, ch.euid)));
 				}
 			}
@@ -374,7 +371,7 @@ void DavReport(Ctx &ctx, const DavPath &p) {
 				// Named but gone. Reporting it as 404 inside the multistatus is
 				// how a client learns to drop it, rather than retrying forever —
 				// and at the href it asked about, not at some other spelling.
-				WriteGoneResponse(w, ObjectHref(c.kind, ctx.username, c.room.room_num, name));
+				WriteGoneResponse(w, ObjectHref(c.kind, ctx.username, c.segment, name));
 			}
 		}
 		w.Close();
@@ -393,26 +390,38 @@ void DavReport(Ctx &ctx, const DavPath &p) {
 		const davx::Node *filter =
 		    root.Child(cal_query ? davx::kNsCalDav : davx::kNsCardDav, "filter");
 
-		std::string comp;
-		int64_t from = 0;
-		int64_t to = 0;
-		bool ranged = false;
-		if (cal_query && filter) {
-			comp = FilterComponent(*filter);
-			ranged = FilterTimeRange(*filter, from, to);
-		}
+		// An <expand> inside the requested <calendar-data>, if the client asked
+		// for one. Read once, outside the loop: it is a property of the request,
+		// not of any object.
+		int64_t exp_from = 0;
+		int64_t exp_to = 0;
+		const bool expanding = cal_query && ExpandRange(root, exp_from, exp_to);
 
 		davx::Writer w;
 		w.StartDoc(davx::kNsDav, "multistatus");
 		for (const auto &o : ListObjects(ctx, c)) {
-			if (cal_query) {
-				if (!MatchesComponent(o.body, comp)) {
+			// One evaluator for both, and one parse of the body inside it. The
+			// two flat extractors this replaced looked exactly two comp-filter
+			// levels deep and parsed each object twice to do it.
+			if (filter) {
+				const bool hit = cal_query ? quackmail::caldav::MatchCalendar(*filter, o.body)
+				                           : quackmail::caldav::MatchAddressBook(*filter, o.body);
+				if (!hit) {
 					continue;
 				}
-				if (ranged && !InTimeRange(o.body, from, to)) {
+			}
+			if (expanding) {
+				// RFC 4791 §9.6.5: the client gets one component per occurrence,
+				// each with its own RECURRENCE-ID, instead of a master plus a
+				// rule it has to expand itself. An object with nothing in the
+				// window drops out rather than being returned empty.
+				std::string expanded = ExpandObject(o.body, exp_from, exp_to);
+				if (expanded.empty()) {
 					continue;
 				}
-			} else if (filter && !MatchesCardFilter(o.body, *filter)) {
+				DavObject copy = o;
+				copy.body = expanded;
+				EmitObject(ctx, w, c, copy, pr);
 				continue;
 			}
 			EmitObject(ctx, w, c, o, pr);

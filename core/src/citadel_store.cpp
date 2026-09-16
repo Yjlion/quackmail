@@ -268,6 +268,28 @@ void EnsureCitadelSchema(Connection &con) {
 	)");
 	con.Query("CREATE INDEX IF NOT EXISTS idx_dav_names_euid ON citadel_dav_names(room_num, euid)");
 
+	// The same problem one level up. A collection's URL segment is its room
+	// *number*, because a Citadel room name may contain '/' and the router has
+	// to be able to split a path without consulting the database. That is fine
+	// for a collection the server made — but a client doing
+	// MKCALENDAR /dav/calendars/ann/work/ has named its own URL, and a server
+	// that answers 201 and then serves the collection somewhere else has broken
+	// it.
+	//
+	// So a client-chosen segment is recorded here and resolved after the
+	// numeric form fails. Every URL that worked before still works; a collection
+	// the client created lives exactly where it put it. `user` is part of the
+	// key because the segment is only ever unique within one principal's home.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_dav_collections (
+			username VARCHAR,
+			segment  VARCHAR,
+			room_num BIGINT,
+			PRIMARY KEY (username, segment)
+		)
+	)");
+	con.Query("CREATE INDEX IF NOT EXISTS idx_dav_colls_room ON citadel_dav_collections(room_num)");
+
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_state (
 			username  VARCHAR,
@@ -993,6 +1015,9 @@ bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
 	// against, and the room number is reusable.
 	ExecP(con, "DELETE FROM citadel_room_tombstones WHERE room_num = $1", {Value::BIGINT(room_num)});
 	ExecP(con, "DELETE FROM citadel_dav_names WHERE room_num = $1", {Value::BIGINT(room_num)});
+	// Room numbers are reusable, so a stale binding would point a client's old
+	// URL at whatever room is allocated next.
+	ExecP(con, "DELETE FROM citadel_dav_collections WHERE room_num = $1", {Value::BIGINT(room_num)});
 	auto r = ExecP(con, "DELETE FROM citadel_rooms WHERE room_num = $1", {Value::BIGINT(room_num)});
 	if (!r) {
 		err = "delete failed";

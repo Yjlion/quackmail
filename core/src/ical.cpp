@@ -431,15 +431,10 @@ bool Parse(const std::string &text, Component &out) {
 	return have_root;
 }
 
-bool ParseItems(const std::string &text, std::vector<Item> &out) {
-	out.clear();
-	Component root;
-	if (!Parse(text, root)) {
-		return false;
-	}
-
-	for (auto &c : root.children) {
-		Item it;
+bool ItemFromComponent(const Component &c, const Component &root, Item &out) {
+	{
+		Item &it = out;
+		it = Item();
 		if (c.name == "VEVENT") {
 			it.kind = Item::Event;
 		} else if (c.name == "VTODO") {
@@ -447,7 +442,7 @@ bool ParseItems(const std::string &text, std::vector<Item> &out) {
 		} else if (c.name == "VJOURNAL") {
 			it.kind = Item::Journal;
 		} else {
-			continue; // VTIMEZONE, VFREEBUSY: not items
+			return false; // VTIMEZONE, VFREEBUSY: not items
 		}
 
 		it.uid = c.Get("UID");
@@ -548,8 +543,21 @@ bool ParseItems(const std::string &text, std::vector<Item> &out) {
 				it.end.epoch = it.start.epoch + sign * total;
 			}
 		}
+	}
+	return true;
+}
 
-		out.push_back(it);
+bool ParseItems(const std::string &text, std::vector<Item> &out) {
+	out.clear();
+	Component root;
+	if (!Parse(text, root)) {
+		return false;
+	}
+	for (auto &c : root.children) {
+		Item it;
+		if (ItemFromComponent(c, root, it)) {
+			out.push_back(std::move(it));
+		}
 	}
 	return true;
 }
