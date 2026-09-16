@@ -54,6 +54,7 @@ set(EXTENSION_SOURCES
     src/dav_propfind.cpp
     src/dav_report.cpp
     src/dav_objects.cpp
+    src/dav_mkcol.cpp
     # JMAP, over the same rooms and messages IMAP serves.
     src/jmap_session.cpp
     src/jmap_mail.cpp

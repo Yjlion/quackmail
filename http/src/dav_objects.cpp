@@ -243,14 +243,44 @@ void DavPut(Ctx &ctx, const DavPath &p) {
 	DavStatus(ctx, existing >= 0 ? 204 : 201);
 	ctx.resp.SetHeader("ETag", ETagFor(msgnum));
 	if (existing < 0) {
-		ctx.resp.SetHeader("Location", ObjectHref(c.kind, ctx.username, c.room.room_num, p.name));
+		ctx.resp.SetHeader("Location", ObjectHref(c.kind, ctx.username, c.segment, p.name));
 	}
 }
 
 void DavDelete(Ctx &ctx, const DavPath &p) {
+	if (p.type == DavRes::Collection) {
+		// Deleting a collection deletes the room. This used to be a flat 405 on
+		// the reasoning that the consequences were more than a DELETE could
+		// express — but a client can now create a collection with MKCOL, and one
+		// that can make a calendar and not remove it leaves litter it has no way
+		// to clean up.
+		//
+		// Gated on CanAdminister rather than on CanPost: this is the "may change
+		// this room's existence" right, the same one the room-admin UI requires
+		// to kill a room, not the "may write in it" one.
+		DavCollection c;
+		if (!ResolveCollection(ctx, p, c)) {
+			DavStatus(ctx, 404);
+			return;
+		}
+		if (!quackmail::citadel::CanAdminister(ctx.con, ctx.username, c.room)) {
+			DavStatus(ctx, 403);
+			return;
+		}
+		std::string err;
+		if (!quackmail::citadel::KillRoom(ctx.con, c.room.room_num, err)) {
+			DavStatus(ctx, 409);
+			return;
+		}
+		AideLog(ctx, "Room deleted: " + c.room.display_name,
+		        "A collection was deleted over DAV.\n\nRoom: " + c.room.display_name +
+		            "\nBy: " + ctx.username);
+		DavStatus(ctx, 204);
+		return;
+	}
 	if (p.type != DavRes::Object) {
-		// Deleting a collection means deleting a room, which takes rights and
-		// consequences a DELETE cannot express. The room-admin UI owns it.
+		// The root, a principal or a home. None of those is a resource a client
+		// owns, so none of them is deletable.
 		DavStatus(ctx, 405);
 		return;
 	}

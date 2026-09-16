@@ -113,15 +113,27 @@ Three surfaces on one listener pair. See [The web interface](web.md).
 | Surface | Standard | State |
 |---|---|---|
 | Webmail, BBS, groupware, admin | — | server-rendered, works with JavaScript off |
-| CalDAV | 4791, 5545, 6638 (partial) | collections, objects, `calendar-query`, free/busy, iTIP/iMIP |
-| CardDAV | 6352 | collections, objects |
+| CalDAV | 4791, 5545, 5689, 6638 (partial) | collections, objects, the full `calendar-query` filter tree, `expand`, `MKCALENDAR`, free/busy, iTIP/iMIP |
+| CardDAV | 6352, 5689 | collections, objects, `addressbook-query`, extended `MKCOL` |
 | JMAP | 8620, 8621, 9425 | Session, `Email/*`, `Mailbox/*`, `Thread/*`, blob up/download, submission, `Quota/get` |
 
 **Not** — RFC 6638 auto-scheduling (the `schedule-inbox-URL`/`schedule-outbox-URL`
 collections and outbox `POST`), DAV `LOCK`/`UNLOCK` (ETags and `If-Match` are
-the consistency story instead), `MKCALENDAR`/`MKCOL`, `calendar-query` filters
-past comp-name and time-range, `expand` on a recurring event. JMAP:
-`Email/import`, `SearchSnippet/get`, push over EventSource, `Quota/query`.
+the consistency story instead), `COPY`/`MOVE`. JMAP: `Email/import`,
+`SearchSnippet/get`, push over EventSource, `Quota/query`.
+
+A DAV collection is a **room**, so creating one takes the same permission
+creating a room through the web interface takes: the site-wide
+`qm_room_create_axlevel` bar, or a `k` grant on the floor. Deleting one deletes
+the room, and takes the `a` right.
+
+A collection's URL segment is normally its room *number* — a Citadel room name
+may contain `/`, so the router cannot split a path on names. A collection a
+client creates keeps **the name the client chose**: `MKCALENDAR
+/dav/calendars/ann/work-trips/` is served at that URL rather than being moved to
+the number the server allocated, because a 201 that puts the resource somewhere
+else has broken the client that asked for it. Both forms resolve; each room is
+advertised under exactly one of them.
 
 JMAP's quota (RFC 9425, `urn:ietf:params:jmap:quota`) reports the same ceiling
 IMAP does but in **octets**, not kibibytes — the two units are not

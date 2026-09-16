@@ -1,0 +1,251 @@
+# name: test/sql/dav.test
+# description: CalDAV/CardDAV filter evaluation and the resource-name encoding
+# group: [quackmail]
+#
+# An RFC 4791 filter is a tree — comp-filters inside comp-filters, prop-filters
+# carrying param-filters, text-match and is-not-defined at several levels, each
+# level with its own allof/anyof. The combinations are what break, and the only
+# other place to assert them is test/integration/test_caldav.py, which has to
+# stand up a server, a user and a room to check one boolean.
+#
+# What this file exists to pin, beyond "the happy path works":
+#
+#   * a filter matches *nesting*, not just the first two levels. The evaluator
+#     this replaced looked exactly two comp-filters deep and could not see a
+#     VALARM inside a VEVENT at all.
+#   * is-not-defined is not the negation of the whole filter, only of the one
+#     property it sits on.
+#   * a repeated property (ATTENDEE, CATEGORIES) matches if *any* instance does.
+#   * anyof really is or. It defaults to allof when the attribute is absent,
+#     which is the common case and the easy one to get backwards.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+# ---- comp-filter -----------------------------------------------------------
+
+# The plain case a client sends to list a calendar: everything of one kind.
+
+query II
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"/></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VTODO"/></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false
+
+# An empty filter is every object: no conditions stated, nothing excluded.
+
+query I
+SELECT qm_caldav_filter('<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"/>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true
+
+# Three levels deep: VCALENDAR > VEVENT > VALARM. This is the case the previous
+# two-level extractor could not express at all.
+
+query II
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:comp-filter name="VALARM"/></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:comp-filter name="VALARM"/></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false
+
+# is-not-defined on a component: "events with no alarm set".
+
+query II
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:comp-filter name="VALARM"><C:is-not-defined/></C:comp-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:comp-filter name="VALARM"><C:is-not-defined/></C:comp-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false
+
+# ---- prop-filter -----------------------------------------------------------
+
+# is-present, and its negation. Note is-not-defined negates only this property:
+# the surrounding VEVENT comp-filter still has to match.
+
+query II
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="LOCATION"/></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nLOCATION:Room 3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="LOCATION"><C:is-not-defined/></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nLOCATION:Room 3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false
+
+# text-match, and the four match-types. "contains" is the default and the one an
+# unrecognised value falls back to.
+
+query IIIII
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="SUMMARY"><C:text-match>stand</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="SUMMARY"><C:text-match match-type="equals">daily standup</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="SUMMARY"><C:text-match match-type="starts-with">Daily</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="SUMMARY"><C:text-match match-type="ends-with">Daily</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="SUMMARY"><C:text-match negate-condition="yes">stand</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	true	true	false	false
+
+# A repeated property matches if *any* instance does. ATTENDEE is the case that
+# matters: "events Bob is invited to" must not depend on Bob being listed first.
+
+query II
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="ATTENDEE"><C:text-match>bob@x</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nATTENDEE:mailto:ann@x\r\nATTENDEE:mailto:bob@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="ATTENDEE"><C:text-match>zoe@x</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nATTENDEE:mailto:ann@x\r\nATTENDEE:mailto:bob@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false
+
+# ---- param-filter ----------------------------------------------------------
+#
+# Parameters survive parsing, which is what makes this expressible at all:
+# "the invitations I have not answered" is PARTSTAT=NEEDS-ACTION on an ATTENDEE.
+
+query III
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="ATTENDEE"><C:param-filter name="PARTSTAT"><C:text-match match-type="equals">NEEDS-ACTION</C:text-match></C:param-filter></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="ATTENDEE"><C:param-filter name="PARTSTAT"><C:text-match match-type="equals">NEEDS-ACTION</C:text-match></C:param-filter></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:bob@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="ATTENDEE"><C:param-filter name="PARTSTAT"><C:is-not-defined/></C:param-filter></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nATTENDEE:mailto:bob@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false	true
+
+# The param-filter has to hold on the *same* property instance as the
+# text-match, not on any two separately. Ann is accepted and Bob is not, so
+# "an attendee named bob who has not answered" matches and
+# "an attendee named ann who has not answered" does not.
+
+query II
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="ATTENDEE"><C:text-match>bob@x</C:text-match><C:param-filter name="PARTSTAT"><C:text-match match-type="equals">NEEDS-ACTION</C:text-match></C:param-filter></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:ann@x\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="ATTENDEE"><C:text-match>ann@x</C:text-match><C:param-filter name="PARTSTAT"><C:text-match match-type="equals">NEEDS-ACTION</C:text-match></C:param-filter></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:ann@x\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false
+
+# ---- allof / anyof ---------------------------------------------------------
+#
+# Absent means allof. Getting this backwards returns a whole collection where
+# the client asked for one event, which looks like the filter being ignored.
+
+query III
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:prop-filter name="SUMMARY"><C:text-match>standup</C:text-match></C:prop-filter><C:prop-filter name="LOCATION"><C:text-match>nowhere</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Daily standup\r\nLOCATION:Room 3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT" test="anyof"><C:prop-filter name="SUMMARY"><C:text-match>standup</C:text-match></C:prop-filter><C:prop-filter name="LOCATION"><C:text-match>nowhere</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Daily standup\r\nLOCATION:Room 3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT" test="anyof"><C:prop-filter name="SUMMARY"><C:text-match>nothing</C:text-match></C:prop-filter><C:prop-filter name="LOCATION"><C:text-match>nowhere</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:Daily standup\r\nLOCATION:Room 3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+false	true	false
+
+# ---- time-range ------------------------------------------------------------
+#
+# The window is half-open: an event that ends exactly when the window opens is
+# out, one that starts exactly when it opens is in.
+
+query III
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260315T000000Z" end="20260316T000000Z"/></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nDTEND:20260315T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260320T000000Z" end="20260321T000000Z"/></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nDTEND:20260315T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260320T000000Z" end="20260321T000000Z"/></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nDTEND:20260315T100000Z\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false	true
+
+# A time-range and a prop-filter under one comp-filter are combined by the same
+# allof rule as two prop-filters. Nothing special about the range.
+
+query II
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260315T000000Z" end="20260316T000000Z"/><C:prop-filter name="SUMMARY"><C:text-match>standup</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nDTEND:20260315T100000Z\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'),
+       qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260315T000000Z" end="20260316T000000Z"/><C:prop-filter name="SUMMARY"><C:text-match>retro</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter>',
+         E'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a@x\r\nDTSTART:20260315T090000Z\r\nDTEND:20260315T100000Z\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+----
+true	false
+
+# ---- malformed input -------------------------------------------------------
+#
+# A body that does not parse cannot be said to match: returning it would put an
+# object in a result set the client then cannot read either. Unparseable XML is
+# not a filter at all.
+
+query II
+SELECT qm_caldav_filter(
+         '<C:filter xmlns:C="urn:ietf:params:xml:ns:caldav"><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"/></C:comp-filter></C:filter>',
+         'this is not a calendar'),
+       qm_caldav_filter('<not xml at all', E'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n');
+----
+false	false
+
+# ---- CardDAV ---------------------------------------------------------------
+#
+# Same rules, one level shallower: a vCard has no component nesting, so
+# prop-filters hang off the filter directly.
+
+query IIII
+SELECT qm_carddav_filter(
+         '<CARD:filter xmlns:CARD="urn:ietf:params:xml:ns:carddav"><CARD:prop-filter name="FN"><CARD:text-match>smith</CARD:text-match></CARD:prop-filter></CARD:filter>',
+         E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Smith\r\nEMAIL;TYPE=WORK:j@x\r\nEND:VCARD\r\n'),
+       qm_carddav_filter(
+         '<CARD:filter xmlns:CARD="urn:ietf:params:xml:ns:carddav"><CARD:prop-filter name="NICKNAME"><CARD:is-not-defined/></CARD:prop-filter></CARD:filter>',
+         E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Smith\r\nEND:VCARD\r\n'),
+       qm_carddav_filter(
+         '<CARD:filter xmlns:CARD="urn:ietf:params:xml:ns:carddav"><CARD:prop-filter name="EMAIL"><CARD:param-filter name="TYPE"><CARD:text-match match-type="equals">WORK</CARD:text-match></CARD:param-filter></CARD:prop-filter></CARD:filter>',
+         E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Smith\r\nEMAIL;TYPE=WORK:j@x\r\nEND:VCARD\r\n'),
+       qm_carddav_filter(
+         '<CARD:filter xmlns:CARD="urn:ietf:params:xml:ns:carddav" test="anyof"><CARD:prop-filter name="FN"><CARD:text-match>nobody</CARD:text-match></CARD:prop-filter><CARD:prop-filter name="FN"><CARD:text-match>smith</CARD:text-match></CARD:prop-filter></CARD:filter>',
+         E'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Smith\r\nEND:VCARD\r\n');
+----
+true	true	true	true
+
+# ---- resource names --------------------------------------------------------
+#
+# The encoding a collection URL depends on. Covered in depth by
+# test/sql/http.test; repeated here because a MKCOL-created collection is named
+# through the same function and a round-trip bug makes it unreachable.
+
+query II
+SELECT qm_dav_euid(qm_dav_name('has/slash and space')) = 'has/slash and space',
+       qm_dav_name('..') NOT IN ('.', '..', '');
+----
+true	true

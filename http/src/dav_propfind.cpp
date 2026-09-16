@@ -529,7 +529,7 @@ void DavPropfind(Ctx &ctx, const DavPath &p) {
 			// been granted rights to rather than only its own.
 			for (const auto &c : ListCollections(ctx, p.kind)) {
 				PropSource cs;
-				cs.href = CollectionHref(p.kind, ctx.username, c.room.room_num);
+				cs.href = CollectionHref(p.kind, ctx.username, c.segment);
 				cs.type = DavRes::Collection;
 				cs.kind = p.kind;
 				cs.user = ctx.username;
@@ -546,7 +546,7 @@ void DavPropfind(Ctx &ctx, const DavPath &p) {
 			return;
 		}
 		PropSource src;
-		src.href = CollectionHref(p.kind, ctx.username, c.room.room_num);
+		src.href = CollectionHref(p.kind, ctx.username, c.segment);
 		src.type = DavRes::Collection;
 		src.kind = p.kind;
 		src.user = ctx.username;
@@ -555,7 +555,7 @@ void DavPropfind(Ctx &ctx, const DavPath &p) {
 		if (depth >= 1) {
 			for (const auto &o : ListObjects(ctx, c)) {
 				PropSource os;
-				os.href = ObjectHref(p.kind, ctx.username, c.room.room_num, o.name);
+				os.href = ObjectHref(p.kind, ctx.username, c.segment, o.name);
 				os.type = DavRes::Object;
 				os.kind = p.kind;
 				os.user = ctx.username;
@@ -577,7 +577,7 @@ void DavPropfind(Ctx &ctx, const DavPath &p) {
 			return;
 		}
 		PropSource src;
-		src.href = ObjectHref(p.kind, ctx.username, c.room.room_num, o.name);
+		src.href = ObjectHref(p.kind, ctx.username, c.segment, o.name);
 		src.type = DavRes::Object;
 		src.kind = p.kind;
 		src.user = ctx.username;
@@ -596,6 +596,59 @@ void DavPropfind(Ctx &ctx, const DavPath &p) {
 }
 
 // ---- PROPPATCH -----------------------------------------------------------
+
+// Set one writable property on a collection, returning the status the client
+// should be told for it.
+//
+// Shared by PROPPATCH and by MKCOL/MKCALENDAR's creation body, because a client
+// that creates a calendar with a colour and one that creates it and PROPPATCHes
+// the colour on afterwards have to end up with the same room. Two copies of
+// this would be two answers to that.
+int ApplyCollectionProp(Ctx &ctx, DavCollection &c, const davx::Node &item, bool removing) {
+	if (item.ns == davx::kNsDav && item.name == "displayname") {
+		// Renaming a collection renames the room, so it takes the same right
+		// renaming it through the web UI takes.
+		if (!quackmail::citadel::CanAdminister(ctx.con, ctx.username, c.room)) {
+			return 403;
+		}
+		quackmail::citadel::Room updated = c.room;
+		updated.display_name = removing ? c.room.display_name : item.text;
+		std::string err;
+		if (!quackmail::citadel::UpdateRoom(ctx.con, updated, err)) {
+			return 409;
+		}
+		c.room = updated;
+		return 200;
+	}
+	if (item.ns == davx::kNsCalDav && item.name == "calendar-description") {
+		// The room's info text, which PROPFIND has always *read* as this
+		// property and had no way to write. MKCALENDAR carries one, so the
+		// write side had to exist; it belongs on both verbs, not just the new
+		// one.
+		if (!quackmail::citadel::CanAdminister(ctx.con, ctx.username, c.room)) {
+			return 403;
+		}
+		quackmail::citadel::Room updated = c.room;
+		updated.info = removing ? std::string() : item.text;
+		std::string err;
+		if (!quackmail::citadel::UpdateRoom(ctx.con, updated, err)) {
+			return 409;
+		}
+		c.room = updated;
+		return 200;
+	}
+	if (item.ns == davx::kNsApple && (item.name == "calendar-color" || item.name == "calendar-order")) {
+		// Viewer chrome, stored per user: two people sharing a calendar are each
+		// entitled to their own colour for it.
+		quackmail::citadel::SetUserPref(ctx.con, ctx.username,
+		                                DecorKey(item.name.c_str(), c.room.room_num),
+		                                removing ? std::string() : item.text);
+		return 200;
+	}
+	// Including <D:resourcetype>, which MKCOL states and which is a consequence
+	// of the room's view rather than something separately settable.
+	return 403;
+}
 
 void DavProppatch(Ctx &ctx, const DavPath &p) {
 	if (p.type != DavRes::Collection) {
@@ -624,26 +677,7 @@ void DavProppatch(Ctx &ctx, const DavPath &p) {
 
 	auto apply = [&](const davx::Node &prop, bool removing) {
 		for (const auto &item : prop.children) {
-			int status = 403;
-			if (item.ns == davx::kNsDav && item.name == "displayname") {
-				// Renaming a collection renames the room, so it takes the same
-				// right renaming it through the web UI takes.
-				if (quackmail::citadel::CanAdminister(ctx.con, ctx.username, c.room)) {
-					quackmail::citadel::Room updated = c.room;
-					updated.display_name = removing ? c.room.display_name : item.text;
-					std::string err;
-					status = quackmail::citadel::UpdateRoom(ctx.con, updated, err) ? 200 : 409;
-				}
-			} else if (item.ns == davx::kNsApple &&
-			           (item.name == "calendar-color" || item.name == "calendar-order")) {
-				// Viewer chrome, stored per user: two people sharing a calendar
-				// are each entitled to their own colour for it.
-				quackmail::citadel::SetUserPref(ctx.con, ctx.username,
-				                                DecorKey(item.name.c_str(), c.room.room_num),
-				                                removing ? std::string() : item.text);
-				status = 200;
-			}
-			results.push_back({{item.ns, item.name}, status});
+			results.push_back({{item.ns, item.name}, ApplyCollectionProp(ctx, c, item, removing)});
 		}
 	};
 
@@ -661,7 +695,7 @@ void DavProppatch(Ctx &ctx, const DavPath &p) {
 	davx::Writer w;
 	w.StartDoc(davx::kNsDav, "multistatus");
 	w.Open(davx::kNsDav, "response");
-	w.TextElem(davx::kNsDav, "href", CollectionHref(p.kind, ctx.username, c.room.room_num));
+	w.TextElem(davx::kNsDav, "href", CollectionHref(p.kind, ctx.username, c.segment));
 	for (int want : {200, 403, 409}) {
 		bool any = false;
 		for (const auto &r : results) {

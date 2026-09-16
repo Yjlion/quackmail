@@ -708,6 +708,8 @@ void PostRoomFeedRun(Ctx &ctx) {
 
 // ---- self-serve room creation --------------------------------------------
 
+} // namespace
+
 // Site-wide gate: does this user's access level alone clear the bar an operator
 // set? Independent of any particular room or floor.
 bool AxLevelMayCreateRooms(const Ctx &ctx) {
@@ -737,6 +739,8 @@ bool MayCreateRoomOnFloor(const Ctx &ctx, int64_t floor) {
 	}
 	return AxLevelMayCreateRooms(ctx) || quackmail::citadel::CanCreateRoomOnFloor(ctx.con, ctx.username, floor);
 }
+
+namespace {
 
 // Floors this caller may create a room on: every floor if the axlevel gate
 // clears, otherwise only the ones a `k` grant opens — which is also what keeps

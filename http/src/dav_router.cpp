@@ -89,12 +89,20 @@ DavPath ParseDavPath(const std::string &tail) {
 	}
 
 	// The room number. strtoll would read "12abc" as 12, so the whole segment
-	// has to be digits or this is not a collection path at all.
+	// has to be digits to be one.
+	//
+	// A segment that is *not* all digits is not an error here: it may be a
+	// collection a client named itself through MKCOL. Parsing cannot tell —
+	// that takes a lookup, and this function deliberately never touches the
+	// database. So the segment is carried through and ResolveCollection decides.
 	const std::string &num = seg[2];
-	if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos) {
+	p.segment = num;
+	if (num.empty()) {
 		return p;
 	}
-	p.room_num = (int64_t)std::strtoll(num.c_str(), nullptr, 10);
+	if (num.find_first_not_of("0123456789") == std::string::npos) {
+		p.room_num = (int64_t)std::strtoll(num.c_str(), nullptr, 10);
+	}
 
 	if (seg.size() == 3) {
 		p.type = DavRes::Collection;
@@ -133,12 +141,19 @@ std::string HomeHref(DavKind kind, const std::string &user) {
 	return std::string("/dav/") + HomeSeg(kind) + "/" + Seg(user) + "/";
 }
 
+std::string CollectionHref(DavKind kind, const std::string &user, const std::string &segment) {
+	return HomeHref(kind, user) + Seg(segment) + "/";
+}
 std::string CollectionHref(DavKind kind, const std::string &user, int64_t room_num) {
-	return HomeHref(kind, user) + std::to_string(room_num) + "/";
+	return CollectionHref(kind, user, std::to_string(room_num));
 }
 
 std::string ObjectHref(DavKind kind, const std::string &user, int64_t room_num, const std::string &name) {
 	return CollectionHref(kind, user, room_num) + Seg(name);
+}
+std::string ObjectHref(DavKind kind, const std::string &user, const std::string &segment,
+                       const std::string &name) {
+	return CollectionHref(kind, user, segment) + Seg(name);
 }
 
 const char *ObjectExt(DavKind kind) {
@@ -150,6 +165,46 @@ const char *ObjectMediaType(DavKind kind) {
 }
 
 // ---- collections ---------------------------------------------------------
+
+// The room a client-named collection segment is bound to, or -1.
+//
+// Only reached when the segment is not a decimal room number, so the numeric
+// URL space — every collection this server made before MKCOL existed, and every
+// href it still emits for one — never pays for this query.
+int64_t LookupCollectionSegment(Ctx &ctx, const std::string &user, const std::string &segment) {
+	if (user.empty() || segment.empty()) {
+		return -1;
+	}
+	auto r = Exec(ctx.con,
+	              "SELECT room_num FROM citadel_dav_collections WHERE username = $1 AND segment = $2",
+	              {Value(user), Value(segment)});
+	if (!r) {
+		return -1;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	if (mat.RowCount() == 0) {
+		return -1;
+	}
+	return mat.GetValue(0, 0).GetValue<int64_t>();
+}
+
+// The segment a collection is served under: the client's own name when it made
+// the collection, the room number otherwise. One href per room either way — a
+// room bound to a name is never also advertised by number, or a client would
+// see the same collection twice and sync it twice.
+std::string CollectionSegment(Ctx &ctx, int64_t room_num) {
+	auto r = Exec(ctx.con,
+	              "SELECT segment FROM citadel_dav_collections WHERE username = $1 AND room_num = $2 "
+	              "LIMIT 1",
+	              {Value(ctx.username), Value::BIGINT(room_num)});
+	if (r) {
+		auto &mat = r->Cast<MaterializedQueryResult>();
+		if (mat.RowCount() > 0) {
+			return mat.GetValue(0, 0).ToString();
+		}
+	}
+	return std::to_string(room_num);
+}
 
 DavKind KindForView(int64_t default_view) {
 	switch (default_view) {
@@ -184,6 +239,7 @@ std::vector<DavCollection> ListCollections(Ctx &ctx, DavKind kind) {
 		DavCollection c;
 		c.room = room;
 		c.kind = kind;
+		c.segment = CollectionSegment(ctx, room.room_num);
 		c.tasks = room.default_view == quackmail::citadel::VIEW_TASKS;
 		out.push_back(std::move(c));
 	}
@@ -191,13 +247,20 @@ std::vector<DavCollection> ListCollections(Ctx &ctx, DavKind kind) {
 }
 
 bool ResolveCollection(Ctx &ctx, const DavPath &p, DavCollection &out) {
-	if (p.room_num < 0) {
+	int64_t room_num = p.room_num;
+	if (room_num < 0) {
+		// Not a number: a client-named collection, if it is anything. The
+		// binding is per principal, and `p.user` has already been checked
+		// against the authenticated user by DavHandler.
+		room_num = LookupCollectionSegment(ctx, p.user, p.segment);
+	}
+	if (room_num < 0) {
 		return false;
 	}
 	Room room;
 	// ResolveRoomNumFor applies the private-room visibility rules; GetRoomByNum
 	// does not, and using it here would be a direct IDOR.
-	if (!ResolveRoomNumFor(ctx, p.room_num, room)) {
+	if (!ResolveRoomNumFor(ctx, room_num, room)) {
 		return false;
 	}
 	if (KindForView(room.default_view) != p.kind || p.kind == DavKind::None) {
@@ -208,6 +271,9 @@ bool ResolveCollection(Ctx &ctx, const DavPath &p, DavCollection &out) {
 	}
 	out.room = room;
 	out.kind = p.kind;
+	// The segment the client used, so every href in the response echoes the URL
+	// it asked about rather than switching it to the numeric form halfway.
+	out.segment = p.room_num >= 0 ? std::to_string(p.room_num) : p.segment;
 	out.tasks = room.default_view == quackmail::citadel::VIEW_TASKS;
 	return true;
 }
@@ -431,10 +497,20 @@ namespace {
 //                    "addressbook-access", however symmetrical that would be.
 //                    webcit-ng/server/room_propfind.c agrees.
 //
+//   extended-mkcol   RFC 5689. Claimed because MKCOL now accepts a body naming
+//                    the resourcetype it wants, which is how a CardDAV client
+//                    creates an address book — there is no MKADDRESSBOOK.
+//
 // Absent on purpose: access-control (RFC 3744 — we serve its properties but
-// implement no ACL method) and extended-mkcol (we have no MKCOL at all).
-const char *const kDavHeader = "1, 3, calendar-access, addressbook";
-const char *const kAllowHeader = "OPTIONS, PROPFIND, PROPPATCH, REPORT, GET, HEAD, PUT, DELETE";
+// implement no ACL method).
+const char *const kDavHeader = "1, 3, calendar-access, addressbook, extended-mkcol";
+
+} // namespace
+
+const char *const kAllowHeader =
+    "OPTIONS, PROPFIND, PROPPATCH, REPORT, GET, HEAD, PUT, DELETE, MKCOL, MKCALENDAR";
+
+namespace {
 
 void DavOptions(Ctx &ctx) {
 	ctx.resp.status = 204;
@@ -483,6 +559,8 @@ void DavHandler(Ctx &ctx) {
 		DavPut(ctx, p);
 	} else if (method == "DELETE") {
 		DavDelete(ctx, p);
+	} else if (method == "MKCOL" || method == "MKCALENDAR") {
+		DavMkcol(ctx, p);
 	} else {
 		// MKCOL, MKCALENDAR, COPY and MOVE reach the allowlist but stop here.
 		// Creating a calendar means creating a room, which has a floor, a name
