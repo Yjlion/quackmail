@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD "17" CACHE STRING "C++ standard to enforce")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(src/include ${QUACKMAIL_CORE_INCLUDE})
-set(EXTENSION_SOURCES src/quackmail_telnet_extension.cpp)
+set(EXTENSION_SOURCES src/quackmail_telnet_extension.cpp src/xmodem.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

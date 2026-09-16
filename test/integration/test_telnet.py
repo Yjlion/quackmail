@@ -16,6 +16,7 @@ endings per line), which empties the following prompt.
 
     (printf "leo\\nleo\\nK\\nT\\n"; sleep 4) | telnet 127.0.0.1 2300
 """
+import base64
 import http.cookiejar
 import os
 import re
@@ -87,6 +88,14 @@ def main():
     con.execute(f"LOAD '{ext('quackmail_telnet')}'")
     con.execute("CALL qm_user_add('bbsuser', 'secret')")
     con.execute("CALL qm_user_add('pageme', 'secret')")
+    # An aide, for the .Admin commands. bbsuser stays at axlevel 4 on purpose so
+    # the refusals below are real; axlevel is read at login, so it cannot be
+    # raised mid-session.
+    con.execute("CALL qm_user_add('bbsaide', 'secret')")
+    # The citadel_users row is created at first login, so an axlevel has to be
+    # inserted rather than updated -- the same way test_http.py seeds its admin.
+    con.execute("INSERT INTO citadel_users (username, usernum, axlevel) "
+                "VALUES ('bbsaide', nextval('citadel_user_seq'), 6)")
 
     for call in (
         f"SELECT note FROM qm_telnet_start('{HOST}', {PORT})",
@@ -234,6 +243,135 @@ def main():
             "WHERE cs.username = 'bbsuser' AND r.display_name = 'Zappable'"
         ).fetchone()[0] == 0, "visiting a forgotten room did not restore it"
 
+        # --- file areas ------------------------------------------------------
+        # QR_DIRECTORY|QR_UPLOAD|QR_DOWNLOAD|QR_VISDIR = 32|64|128|256. These
+        # four bits have existed in citadel_store.hpp since the beginning and
+        # nothing ever read them; a directory room's only visible effect was the
+        # ']' on the prompt.
+        con.execute("CALL cit_room_add('Uploads')")
+        con.execute("UPDATE citadel_rooms SET qr_flags = qr_flags | 32 | 64 | 128 | 256 "
+                    "WHERE display_name = 'Uploads'")
+        c.send(".G Uploads")
+
+        before = len(c.log)
+        out = c.send(".RF")[before:]
+        assert "no files" in out.lower(), out
+
+        # Upload by pasting base64, which is the path that needs no transfer
+        # protocol at the client end.
+        c.send(".EF")
+        c.send("notes.txt")
+        c.send("Some notes")
+        c.send("B")
+        c.send(base64.b64encode(b"hello from telnet\n").decode())
+        out = c.send(".")
+        assert "stored notes.txt" in out.lower(), out
+
+        # A file is a message: that is the whole storage design, and it is what
+        # makes quotas, tombstones and the room ACL apply without being told
+        # about files.
+        rows = con.execute(
+            "SELECT count(*) FROM citadel_messages m JOIN citadel_room_msgs rm USING (msgnum) "
+            "JOIN citadel_rooms r USING (room_num) "
+            "WHERE r.display_name = 'Uploads' AND m.euid = 'file/notes.txt'").fetchone()[0]
+        assert rows == 1, f"the upload did not land as a message ({rows})"
+
+        before = len(c.log)
+        out = c.send(".RF")[before:]
+        assert "notes.txt" in out, out
+        assert "Some notes" in out, "the description is missing from the listing"
+
+        # Typing it out, which is what a reader usually wants for a text file.
+        c.send(".RFG")
+        c.send("notes.txt")
+        out = c.send("T")
+        assert "hello from telnet" in out, out
+
+        # And base64 back out again, byte for byte.
+        c.send(".RFG")
+        c.send("notes.txt")
+        out = c.send("B")
+        m = re.search(r"---- begin notes\.txt ----(.*?)---- end notes\.txt ----", out, re.S)
+        assert m, f"no base64 block in the reply: {out[:300]}"
+        assert base64.b64decode("".join(m.group(1).split())) == b"hello from telnet\n", \
+            "the file did not round-trip through base64"
+
+        # .Admin File is aide-only, like the rest of the .A family. bbsuser is
+        # axlevel 4, so it refuses -- and that refusal is the first half of the
+        # assertion, because a gate only tested from the passing side is not
+        # tested.
+        before = len(c.log)
+        out = c.send(".AFD")[before:]
+        assert "Higher access required" in out, out
+        before = len(c.log)
+        out = c.send(".RF")[before:]
+        assert "notes.txt" in out, "the refused delete removed the file anyway"
+
+        # An aide, on a second connection, can do both -- which is what proves
+        # the refusal above was the gate rather than something else about the
+        # command. A second session also exercises the file area being shared
+        # rather than per-connection state.
+        a = Bbs(PORT)
+        a.send("bbsaide")
+        a.send("secret")
+        a.send(".G Uploads")
+        a.send(".AFE")
+        a.send("notes.txt")
+        out = a.send("Rewritten description")
+        assert "description updated" in out.lower(), out[-800:]
+
+        before = len(c.log)
+        out = c.send(".RF")[before:]
+        assert "Rewritten description" in out, "the other session did not see the new description"
+
+        a.send(".AFD")
+        out = a.send("notes.txt")
+        assert "deleted notes.txt" in out.lower(), out
+        a.send("T")
+        a.close()
+
+        before = len(c.log)
+        out = c.send(".RF")[before:]
+        assert "no files" in out.lower(), out
+
+        # A room without the bits is not a file area at all.
+        c.send(".G Lobby")
+        before = len(c.log)
+        out = c.send(".RF")[before:]
+        assert "not a file directory" in out.lower(), out
+
+        # --- help ------------------------------------------------------------
+        # There was no help mechanism: <?> printed a hard-coded menu and each
+        # dot-command family printed its own blurb. .H is prose, <?> is still
+        # the menu.
+        before = len(c.log)
+        out = c.send(".H")[before:]
+        assert "Help topics" in out, out
+        assert "files" in out, out
+        before = len(c.log)
+        out = c.send(".H files")[before:]
+        assert "File directories" in out, out
+        assert ".RFG" in out, out
+        before = len(c.log)
+        out = c.send(".H nosuchtopic")[before:]
+        assert "No help on" in out, out
+
+        # --- chat ------------------------------------------------------------
+        # Built on citadel_express, so a line typed here is the same row the web
+        # /chat view and XMPP read. That is the point of not giving it a channel
+        # table of its own.
+        # Deliberately not `pageme`: the <P>age assertions below pin that user's
+        # queue exactly, and a chat line is the same kind of row.
+        c.send("C")
+        c.send("bbsaide")
+        c.send("evening")
+        out = c.send("")
+        assert "leaving chat" in out.lower(), out
+        rows = con.execute(
+            "SELECT count(*) FROM citadel_express "
+            "WHERE from_user = 'bbsuser' AND to_user = 'bbsaide' AND text = 'evening'").fetchone()[0]
+        assert rows == 1, "the chat line did not reach citadel_express"
+
         # --- registration ----------------------------------------------------
         c.send(".EG")
         for field in ("Ada Lovelace", "1 Analytical Way", "London", "", "NW1", "555", "ada@example.com"):
@@ -316,7 +454,8 @@ def main():
         con.execute("CALL qm_telnet_stop()").fetchall()
         con.execute("CALL qm_telnets_stop()").fetchall()
 
-    print("PASS: telnet login, Lobby, enter/read message, known rooms, who, page, telnets,")
+    print("PASS: telnet login, Lobby, enter/read message, known rooms, who, page,")
+    print("      file areas, help, chat, telnets,")
     print("      and the telnet/web crossover in both directions")
 
 
@@ -371,6 +510,38 @@ def check_web_crossover(con):
         rows = con.execute(
             "SELECT count(*) FROM citadel_sessions WHERE client = 'Web session'").fetchone()[0]
         assert rows == 0, "signing out left the browser's presence row behind"
+
+        # ---- one file store, two front doors --------------------------------
+        # This is the assertion the whole file-area design exists for. A file
+        # uploaded over telnet has to be the same bytes fetched over WebDAV: not
+        # a copy, not a re-encoding, the same message. Without this, "three
+        # front doors over one store" is a claim rather than a fact.
+        room = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'Uploads'").fetchone()[0]
+        payload = bytes(range(256))  # every byte, including 0xFF and NUL
+        con.execute("CALL qm_config_set('qm_web_force_https', '0')")
+
+        c = Bbs(PORT)
+        c.send("bbsuser")
+        c.send("secret")
+        c.send(".G Uploads")
+        c.send(".EF")
+        c.send("crossover.bin")
+        c.send("from the BBS")
+        c.send("B")
+        c.send(base64.b64encode(payload).decode())
+        out = c.send(".")
+        assert "stored crossover.bin" in out.lower(), out
+        c.send("T")
+        c.close()
+
+        req = urllib.request.Request(
+            f"{base}/dav/files/bbsuser/{room}/crossover.bin", method="GET")
+        req.add_header("Authorization", "Basic " + base64.b64encode(b"bbsuser:secret").decode())
+        got = urllib.request.build_opener().open(req, timeout=10).read()
+        assert got == payload, (
+            f"the telnet upload did not come back over WebDAV byte for byte: "
+            f"{len(got)} of {len(payload)}")
     finally:
         con.execute("CALL qm_http_stop()").fetchall()
 

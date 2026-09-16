@@ -2,6 +2,8 @@
 
 #include "quackmail_telnet_extension.hpp"
 
+#include "xmodem.hpp"
+
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
@@ -9,6 +11,7 @@
 #include "quackmail/auth.hpp"
 #include "quackmail/citadel_msg.hpp"
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/filearea.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
@@ -17,6 +20,8 @@
 #include "quackmail/wildmat.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <string>
@@ -102,6 +107,109 @@ char PromptChar(const citadel::Room &room) {
 	return (room.qr_flags & citadel::QR_DIRECTORY) ? ']' : '>';
 }
 
+// ---- help ----------------------------------------------------------------
+//
+// Compiled-in text, overridable from a `Help` room. Real Citadel reads help out
+// of a directory on disk; this server is a single loadable extension with no
+// data directory to install, which is the same reason http/assets/ is compiled
+// in.
+//
+// The override is a euid-keyed message in a room named Help, so an aide can
+// rewrite a topic from any front-end that can post — and a site that never
+// touches it still ships working help rather than an empty screen. Nothing has
+// to be seeded for that to be true.
+
+struct HelpTopic {
+	const char *key;
+	const char *title;
+	const char *body;
+};
+
+const HelpTopic kHelpTopics[] = {
+    {"rooms", "Rooms and floors",
+     "Rooms hold messages; floors group rooms.\n\n"
+     "  <G>oto      the next room with unread messages\n"
+     "  <S>kip      leave this room unread and move on\n"
+     "  <K>nown     list the rooms you can see\n"
+     "  <Z>ap       forget a room; it stops appearing in <G>oto\n"
+     "  <U>ngoto    go back to the room you came from\n"
+     "  <A>bandon   leave without marking anything read\n"
+     "  <;>         floor commands: <;G>oto, <;K>nown, <;C>onfigure\n"},
+    {"messages", "Reading and writing",
+     "  <N>ew       unread messages in this room\n"
+     "  <F>orward   every message, oldest first\n"
+     "  <R>everse   every message, newest first\n"
+     "  <L>ast five the five most recent\n"
+     "  <E>nter     post a message\n"
+     "  <D>elete    remove one (yours, or any if you are an aide)\n"},
+    {"files", "File directories",
+     "A room may be a file directory. In one:\n\n"
+     "  <.RF>       list the files\n"
+     "  <.RFG>      fetch one -- type it out, Xmodem, or base64\n"
+     "  <.EF>       upload one\n"
+     "  <.AFD>      delete one (aide)\n"
+     "  <.AFE>      change a description (aide)\n\n"
+     "Xmodem-1K with CRC is the transfer protocol. The same files are\n"
+     "reachable over WebDAV and FTP, which is what to use for anything\n"
+     "large or for a whole directory at once.\n"},
+    {"chat", "Talking to people",
+     "  <W>ho       who is online now\n"
+     "  <P>age      send someone an instant message\n"
+     "  <C>hat      hold a conversation\n"
+     "  <Q>uiet     stop other people paging you\n\n"
+     "Chat, paging, the web chat page and XMPP are all the same\n"
+     "conversation: a message sent from here reaches someone reading\n"
+     "their mail in a browser, and their reply comes back here.\n"},
+    {"account", "Your account",
+     "  <.EP>       change your password\n"
+     "  <.EC>       terminal width, height, expert mode\n"
+     "  <.EG>       registration details\n"
+     "  <.EB>       your biography\n"
+     "  <X>         toggle expert mode (hides the menu)\n"},
+};
+
+// A topic's override, if an aide wrote one. "" means use the compiled text.
+std::string HelpOverride(Connection &con, const std::string &key) {
+	citadel::Room help_room;
+	if (!citadel::ResolveRoom(con, std::string(), "Help", help_room)) {
+		return std::string();
+	}
+	int64_t msgnum = citadel::FindByEuid(con, help_room.room_num, "help/" + key);
+	if (msgnum <= 0) {
+		return std::string();
+	}
+	citadel::Message msg;
+	if (!citadel::LoadMessage(con, msgnum, msg)) {
+		return std::string();
+	}
+	return citadel::BodyText(msg);
+}
+
+void ShowHelp(Connection &con, telnet::Session &t, const std::string &want) {
+	t.ResetPager();
+    std::string key = quackmail::util::Lower(want);
+	if (key.empty()) {
+		std::string out = "\nHelp topics:\n\n";
+		for (const auto &h : kHelpTopics) {
+			std::string k = h.key;
+			k.resize(std::max<size_t>(k.size(), 12), ' ');
+			out += "  " + k + h.title + "\n";
+		}
+		out += "\nType .H <topic>, or <?> for the command menu.\n";
+		t.Page(out);
+		return;
+	}
+	for (const auto &h : kHelpTopics) {
+		if (key != h.key) {
+			continue;
+		}
+		std::string body = HelpOverride(con, h.key);
+		t.Page("\n" + std::string(h.title) + "\n\n" + (body.empty() ? std::string(h.body) : body));
+		return;
+	}
+	t.Write("\nNo help on \"" + want + "\". Type .H for the list of topics.\n");
+}
+
 void ShowMenu(telnet::Session &t, const Bbs &s) {
 	t.Write("-----------------------------------------------------------------------\n"
 	        "Room cmds:    <K>nown rooms, <G>oto next room, <.G>oto a specific room,\n"
@@ -110,9 +218,9 @@ void ShowMenu(telnet::Session &t, const Bbs &s) {
 	        "Message cmds: <N>ew msgs, <F>orward read, <O>ld msgs, <R>everse read,\n"
 	        "              <L>ast five msgs, <E>nter a message, <D>elete a message\n"
 	        "General cmds: <?> help, <T>erminate, <W>ho is online, <P>age a user,\n"
-	        "              <M>ail, <I>nfo, <Q>uiet mode\n"
+	        "              <C>hat, <M>ail, <I>nfo, <Q>uiet mode\n"
 	        "Floors:       <;> floor commands (<;C>onfigure, <;G>oto, <;K>nown)\n"
-	        "Dot cmds:     <.K>nown, <.R>ead, <.E>nter, <.W>holist");
+	        "Dot cmds:     <.K>nown, <.R>ead, <.E>nter, <.W>holist, <.H>elp");
 	if (s.IsAide()) {
 		t.Write(", <.A>dmin");
 	}
@@ -767,6 +875,132 @@ void ShowPendingExpress(Connection &con, Bbs &s, telnet::Session &t) {
 	for (auto &e : citadel::PendingExpress(con, s.username)) {
 		t.Write("\n---\nMessage from " + e.from_user + ":\n" + e.text + "\n---\n");
 		citadel::MarkExpressDelivered(con, e.id);
+	}
+}
+
+// ---- chat ----------------------------------------------------------------
+//
+// Built on citadel_express rather than on a channel of its own, and that is the
+// whole design: the web /chat view, XMPP, native SEXP/GEXP and this are then one
+// conversation instead of four. A user paged from a terminal sees the reply in
+// their browser.
+//
+// The cost is that there is no room-wide chat the way real Citadel's CHAT verb
+// has: a message here is addressed to somebody. Talking to "everyone" fans out
+// one row per person currently online, which is a handful of rows and keeps
+// every other client in the conversation rather than inventing a channel table
+// only this front-end understands.
+
+const int64_t kChatWindowSeconds = 7 * 24 * 3600;
+const int64_t kChatScrollback = 40;
+
+void ShowChatLines(Bbs &s, telnet::Session &t, const std::vector<citadel::ExpressLine> &lines) {
+	for (const auto &l : lines) {
+		const bool mine = l.from_user == s.username;
+		t.Write(t.Colour(mine ? telnet::Session::Attr::Dim : telnet::Session::Attr::Notice) +
+		        (mine ? "-> " + l.to_user : "<- " + l.from_user) + ": " +
+		        t.Colour(telnet::Session::Attr::Reset) + l.text + "\n");
+	}
+}
+
+void ChatMode(Connection &con, Bbs &s, telnet::Session &t) {
+	if (!s.authed) {
+		t.Write("\nYou must be logged in to chat.\n");
+		return;
+	}
+
+	// Who to talk to. Defaulting to the most recent correspondent is what makes
+	// answering a page one keystroke rather than retyping a name.
+	auto recent = citadel::ExpressCorrespondents(con, s.username, kChatWindowSeconds);
+	std::string with;
+	if (!recent.empty()) {
+		std::string list;
+		for (size_t i = 0; i < recent.size() && i < 8; i++) {
+			list += (i ? ", " : "") + recent[i];
+		}
+		t.Write("\nRecent: " + list + "\n");
+	}
+    if (!t.Prompt("Chat with (. for everyone online) [" +
+                  (recent.empty() ? std::string("") : recent.front()) + "]: ",
+                  with, recent.empty() ? std::string() : recent.front())) {
+		return;
+	}
+	if (with.empty()) {
+		return;
+	}
+	const bool broadcast = with == ".";
+	if (!broadcast && citadel::GetOrAssignUserNum(con, with) == 0) {
+		// GetOrAssignUserNum returns 0 for a user that does not exist; it does
+		// not create one.
+		t.Write("\nNo such user.\n");
+		return;
+	}
+
+	t.Write("\nChat" + (broadcast ? std::string(" with everyone online")
+	                               : " with " + with) +
+	        ". Enter a blank line to leave, /r to refresh.\n\n");
+	ShowChatLines(s, t, citadel::ExpressHistory(con, s.username, broadcast ? std::string() : with,
+	                                            kChatWindowSeconds, kChatScrollback));
+
+	int64_t seen = citadel::ExpressChangeToken(con, s.username);
+	citadel::MarkExpressDeliveredThrough(con, s.username, seen);
+
+	for (;;) {
+		// A blocking ReadLine means incoming lines only appear when this user
+		// types. That is the honest limit of a line-oriented terminal without a
+		// second thread, and /r is the escape hatch — the same shape the web
+		// view's poll has, driven by hand.
+		std::string line;
+		if (!t.Prompt("> ", line)) {
+			return;
+		}
+		// Keep the session alive: a long conversation must not be reaped out
+		// from under the person having it.
+		citadel::TouchSession(con, s.session_id, s.stealth ? std::string() : s.username,
+		                      (s.stealth || !s.have_room) ? std::string() : s.room.display_name,
+		                      "chat", s.axlevel);
+
+		if (line.empty()) {
+			t.Write("\nLeaving chat.\n");
+			return;
+		}
+		if (line != "/r") {
+			if (broadcast) {
+				int sent = 0;
+				for (const auto &sess : citadel::ListSessions(con)) {
+					if (sess.username.empty() || sess.username == s.username) {
+						continue;
+					}
+					if (citadel::SendExpress(con, sess.username, s.username, line)) {
+						sent++;
+					}
+				}
+				if (sent == 0) {
+					t.Write("Nobody else is online.\n");
+				}
+			} else if (!citadel::SendExpress(con, with, s.username, line)) {
+				t.Write("That user is no longer reachable.\n");
+				return;
+			}
+		}
+
+		int64_t now_token = citadel::ExpressChangeToken(con, s.username);
+		if (now_token != seen) {
+			auto lines = citadel::ExpressHistory(con, s.username,
+			                                     broadcast ? std::string() : with,
+			                                     kChatWindowSeconds, kChatScrollback);
+			// Only what arrived since the last screen, or every refresh would
+			// repeat the whole transcript.
+			std::vector<citadel::ExpressLine> fresh;
+			for (const auto &l : lines) {
+				if (l.id > seen && l.from_user != s.username) {
+					fresh.push_back(l);
+				}
+			}
+			ShowChatLines(s, t, fresh);
+			seen = now_token;
+			citadel::MarkExpressDeliveredThrough(con, s.username, seen);
+		}
 	}
 }
 
@@ -1467,6 +1701,243 @@ Outcome FloorCommand(Connection &con, Bbs &s, telnet::Session &t, const std::str
 }
 
 // ".Admin ..." — the aide submenu.
+// ---- file areas ----------------------------------------------------------
+//
+// A directory room's files are messages, so everything below is the file store
+// in core/ plus a terminal in front of it. The permission questions are asked
+// there too rather than re-derived here — the same rule that has every
+// front-end ask CanPost instead of working it out again.
+
+namespace filearea = quackmail::filearea;
+
+// A size a person can read at a glance, which is the only reason a listing
+// exists at all.
+std::string SizeLabel(int64_t n) {
+	char buf[32];
+	if (n < 1024) {
+		std::snprintf(buf, sizeof(buf), "%lld B", (long long)n);
+	} else if (n < 1024 * 1024) {
+		std::snprintf(buf, sizeof(buf), "%.1f KB", (double)n / 1024.0);
+	} else {
+		std::snprintf(buf, sizeof(buf), "%.1f MB", (double)n / (1024.0 * 1024.0));
+	}
+	return buf;
+}
+
+// Is the current room a file area this user may look at? Writes the refusal
+// itself, so every caller is one `if`.
+bool RequireFileArea(Connection &con, Bbs &s, telnet::Session &t) {
+	if (!s.have_room || !filearea::IsFileArea(s.room)) {
+		t.Write("\nThis room is not a file directory.\n");
+		return false;
+	}
+	if (!filearea::CanList(con, s.username, s.room)) {
+		t.Write("\nYou may not list the files in this room.\n");
+		return false;
+	}
+	return true;
+}
+
+void ReadFileDirectory(Connection &con, Bbs &s, telnet::Session &t) {
+	if (!RequireFileArea(con, s, t)) {
+		return;
+	}
+	t.ResetPager();
+	auto files = filearea::ListFiles(con, s.room.room_num);
+	if (files.empty()) {
+		t.Write("\nThere are no files in this room.\n");
+		return;
+	}
+	std::string out = "\n Name                             Size        Uploaded by\n";
+	for (const auto &f : files) {
+		std::string name = f.name;
+		name.resize(std::max<size_t>(name.size(), 33), ' ');
+		std::string size = SizeLabel(f.size);
+		size.resize(std::max<size_t>(size.size(), 12), ' ');
+		out += " " + name + size + f.uploader + "\n";
+		if (!f.description.empty()) {
+			out += "     " + f.description + "\n";
+		}
+	}
+	out += "\n" + std::to_string(files.size()) + " file(s). <.RFG>et to download.\n";
+	t.Page(out);
+}
+
+// Does this look like something a person can read on a terminal?
+bool LooksTextual(const filearea::File &f, const std::string &content) {
+	if (f.content_type.rfind("text/", 0) == 0) {
+		return true;
+	}
+	// Otherwise decide from the bytes rather than from a header a client chose:
+    // a NUL anywhere is the reliable tell, and so is a high proportion of
+	// control characters.
+	size_t odd = 0;
+	for (unsigned char c : content) {
+		if (c == 0) {
+			return false;
+		}
+		if (c < 0x09 || (c > 0x0D && c < 0x20)) {
+			odd++;
+		}
+	}
+	return content.empty() || odd * 32 < content.size();
+}
+
+void ReadFileGet(Connection &con, Bbs &s, telnet::Session &t, const std::string &arg) {
+	if (!RequireFileArea(con, s, t)) {
+		return;
+	}
+	if (!filearea::CanDownload(con, s.username, s.room)) {
+		t.Write("\nDownloads are not enabled in this room.\n");
+		return;
+	}
+	std::string name = arg;
+	if (name.empty() && !t.Prompt("\nFilename: ", name)) {
+		return;
+	}
+	if (name.empty()) {
+		return;
+	}
+	filearea::File f;
+	std::string content;
+	if (!filearea::GetFile(con, s.room.room_num, name, f, content)) {
+		t.Write("\nNo such file.\n");
+		return;
+	}
+
+	// Three ways out, in the order that suits a terminal. Typing a text file is
+	// what a BBS reader usually wants; Xmodem is for anything else; base64 is
+	// the fallback for a terminal with no transfer protocol at all, and is
+	// pasteable into `base64 -d` on the other side.
+	std::string how;
+	std::string dflt = LooksTextual(f, content) ? "T" : "X";
+	if (!t.Prompt("\n<T>ype it out, <X>modem, <B>ase64, <Q>uit [" + dflt + "]: ", how, dflt)) {
+		return;
+	}
+	char c = how.empty() ? dflt[0] : (char)std::toupper((unsigned char)how[0]);
+	if (c == 'Q') {
+		return;
+	}
+	if (c == 'T') {
+		t.ResetPager();
+		t.Page("\n" + content + (content.empty() || content.back() == '\n' ? "" : "\n"));
+		return;
+	}
+	if (c == 'B') {
+		t.Write("\n---- begin " + f.name + " ----\n");
+		std::string b64 = quackmail::util::Base64Encode(content);
+		for (size_t at = 0; at < b64.size(); at += 76) {
+			t.Write(b64.substr(at, 76) + "\n");
+		}
+		t.Write("---- end " + f.name + " ----\n");
+		return;
+	}
+	t.Write("\nStart your Xmodem receive now.\n");
+	if (!quackmail::xmodem::Send(t, content)) {
+		t.Write("\nTransfer failed or was cancelled.\n");
+		return;
+	}
+	t.Write("\nTransfer complete: " + f.name + " (" + SizeLabel(f.size) + ").\n");
+}
+
+void EnterFile(Connection &con, Bbs &s, telnet::Session &t) {
+	if (!s.have_room || !filearea::IsFileArea(s.room)) {
+		t.Write("\nThis room is not a file directory.\n");
+		return;
+	}
+	if (!filearea::CanUpload(con, s.username, s.room)) {
+		t.Write("\nUploads are not enabled in this room, or you may not post here.\n");
+		return;
+	}
+	std::string name;
+	if (!t.Prompt("\nFilename: ", name) || name.empty()) {
+		return;
+	}
+	if (filearea::SanitizeName(name).empty()) {
+		t.Write("\nThat filename cannot be stored.\n");
+		return;
+	}
+	std::string desc;
+	if (!t.Prompt("Description (optional): ", desc)) {
+		return;
+	}
+
+	std::string how;
+	if (!t.Prompt("<X>modem or <B>ase64 paste [X]: ", how, "X")) {
+		return;
+	}
+	std::string content;
+	if (!how.empty() && std::toupper((unsigned char)how[0]) == 'B') {
+		t.Write("\nPaste the base64 now; end with a line containing a single dot.\n");
+		std::string b64;
+		for (;;) {
+			std::string line;
+			if (!t.ReadLine(line)) {
+				return;
+			}
+			if (line == ".") {
+				break;
+			}
+			b64 += line;
+		}
+		if (!quackmail::util::Base64Decode(b64, content)) {
+			t.Write("\nThat is not valid base64; nothing was stored.\n");
+			return;
+		}
+	} else {
+		t.Write("\nStart your Xmodem send now.\n");
+		// Bounded so a peer cannot fill the database from a terminal. The
+		// storage quota inside InsertMessage is the real ceiling; this is the
+		// one that stops the transfer before it is all in memory.
+		if (!quackmail::xmodem::Receive(t, content, 32u * 1024 * 1024)) {
+			t.Write("\nTransfer failed or was cancelled.\n");
+			return;
+		}
+	}
+
+	std::string err;
+	if (filearea::PutFile(con, s.room.room_num, name, content, std::string(), desc, s.username,
+	                      err) < 0) {
+		t.Write("\n" + (err.empty() ? std::string("The file could not be stored.") : err) + "\n");
+		return;
+	}
+	t.Write("\nStored " + name + " (" + SizeLabel((int64_t)content.size()) + ").\n");
+}
+
+// .Admin File: tidying up somebody else's upload, which is a room-admin job.
+void AdminFile(Connection &con, Bbs &s, telnet::Session &t, char sub) {
+	if (!s.have_room || !filearea::IsFileArea(s.room)) {
+		t.Write("\nThis room is not a file directory.\n");
+		return;
+	}
+	if (sub != 'D' && sub != 'E') {
+		t.Write("\nAdmin file: <.AFD>elete, <.AFE>dit description\n");
+		return;
+	}
+	std::string name;
+	if (!t.Prompt("\nFilename: ", name) || name.empty()) {
+		return;
+	}
+	std::string err;
+	if (sub == 'D') {
+		if (!filearea::RemoveFile(con, s.room.room_num, name, err)) {
+			t.Write("\n" + (err.empty() ? std::string("No such file.") : err) + "\n");
+			return;
+		}
+		t.Write("\nDeleted " + name + ".\n");
+		return;
+	}
+	std::string desc;
+	if (!t.Prompt("New description: ", desc)) {
+		return;
+	}
+	if (!filearea::DescribeFile(con, s.room.room_num, name, desc, err)) {
+		t.Write("\n" + (err.empty() ? std::string("No such file.") : err) + "\n");
+		return;
+	}
+	t.Write("\nDescription updated.\n");
+}
+
 void AdminCommand(Connection &con, Bbs &s, telnet::Session &t, const std::string &up) {
 	if (!s.IsAide()) {
 		t.Write("\nHigher access required.\n");
@@ -1501,9 +1972,13 @@ void AdminCommand(Connection &con, Bbs &s, telnet::Session &t, const std::string
 		}
 		break;
 	}
+	case 'F':
+		AdminFile(con, s, t, up.size() > 1 ? up[1] : '?');
+		break;
 	default:
 		t.Write("\nAdmin: <.AK>ill room, <.AE>dit room, <.AW>ho knows room, <.AI>nfo file,\n"
-		        "       <.AM>essage move, <.AUE>dit user, <.AUD>elete user, <.AV>alidate users\n");
+		        "       <.AM>essage move, <.AUE>dit user, <.AUD>elete user, <.AV>alidate users,\n"
+		        "       <.AFD>elete file, <.AFE>dit file description\n");
 		break;
 	}
 }
@@ -1568,9 +2043,18 @@ Outcome DotCommand(Connection &con, Bbs &s, telnet::Session &t, const std::strin
 		case 'L':
 			ReadMessages(con, s, t, "all", false, 5);
 			break;
+		case 'F':
+			// .RF lists, .RFG fetches — the third letter, the same way .AU
+			// already splits into .AUE and .AUD.
+			if (up.size() > 2 && up[2] == 'G') {
+				ReadFileGet(con, s, t, arg);
+			} else {
+				ReadFileDirectory(con, s, t);
+			}
+			break;
 		default:
 			t.Write("\nRead: <.RU>ser list, <.RB>io, <.RC>onfiguration, <.RS>ystem info,\n"
-			        "      <.RN>ew, <.RO>ld, <.RL>ast five\n");
+			        "      <.RN>ew, <.RO>ld, <.RL>ast five, <.RF>ile directory, <.RFG>et file\n");
 			break;
 		}
 		break;
@@ -1594,9 +2078,12 @@ Outcome DotCommand(Connection &con, Bbs &s, telnet::Session &t, const std::strin
 		case 'M':
 			EnterMessage(con, s, t);
 			break;
+		case 'F':
+			EnterFile(con, s, t);
+			break;
 		default:
 			t.Write("\nEnter: <.EP>assword, <.EC>onfiguration, re<.EG>istration, <.EB>io,\n"
-			        "       a new <.ER>oom, <.EM>essage\n");
+			        "       a new <.ER>oom, <.EM>essage, a <.EF>ile\n");
 			break;
 		}
 		break;
@@ -1615,7 +2102,9 @@ Outcome DotCommand(Connection &con, Bbs &s, telnet::Session &t, const std::strin
 		t.Write("\nGoodbye.\n");
 		return Outcome::Quit;
 	case 'H':
-		ShowMenu(t, s);
+		// A topic if one was named, the topic list otherwise. <?> is still the
+		// command menu; this is the prose.
+		ShowHelp(con, t, arg);
 		break;
 	default:
 		t.Write("\nUnknown command.\n");
@@ -1775,6 +2264,9 @@ void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerControl
 			break;
 		case 'P':
 			PageUser(con, s, t);
+			break;
+		case 'C':
+			ChatMode(con, s, t);
 			break;
 		case 'I':
 			if (s.have_room && !s.room.info.empty()) {

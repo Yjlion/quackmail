@@ -31,6 +31,9 @@ namespace qmweb {
 //   /dav/addressbooks/<user>/                    addressbook home
 //   /dav/addressbooks/<user>/<room>/             one addressbook
 //   /dav/addressbooks/<user>/<room>/<name>.vcf   one contact
+//   /dav/files/<user>/                           file-area home
+//   /dav/files/<user>/<room>/                    one file area
+//   /dav/files/<user>/<room>/<name>              one file, name as uploaded
 //
 // <room> is the room number, because a Citadel room name may contain '/' and
 // ParseDavPath has to split a path without a database. A collection a client
@@ -45,6 +48,11 @@ enum class DavKind {
 	None,
 	Calendar,    // VIEW_CALENDAR, VIEW_CALBRIEF, VIEW_TASKS
 	AddressBook, // VIEW_ADDRESSBOOK
+	// A QR_DIRECTORY room: plain WebDAV, no groupware type at all. Unlike the
+	// two above it is selected by a room *flag* rather than by its view, because
+	// a file area is a property of the room's flags in Citadel and always has
+	// been — the three bits were simply never read until now.
+	Files,
 };
 
 // Room creation gates, defined in web_rooms.cpp. DAV asks rather than deriving
@@ -139,6 +147,15 @@ struct DavObject {
 	std::string name;  // the resource name it is served under, extension included
 	std::string body;  // the text/calendar or text/vcard part, as stored
 	int64_t msgtime = 0;
+	// The media type to serve this object as. Empty means "whatever the
+	// collection kind implies", which is what every groupware object wants —
+	// a calendar holds text/calendar and nothing else. A file carries its own,
+	// because a file area holds whatever was put in it.
+	std::string content_type;
+	// The payload size, for getcontentlength. Set for a file even when `body`
+	// was not loaded, because a PROPFIND over a directory of large files must be
+	// able to report their sizes without reading all of them.
+	int64_t size = 0;
 };
 
 // ---- resource naming -----------------------------------------------------
@@ -252,6 +269,13 @@ void DavPropfind(Ctx &ctx, const DavPath &p);
 // MKCOL (RFC 4918 §9.3, extended by RFC 5689) and MKCALENDAR (RFC 4791 §5.3.1).
 // Both create a room; which verb it was decides only how the client said so.
 void DavMkcol(Ctx &ctx, const DavPath &p);
+// LOCK/UNLOCK (RFC 4918 §9.10-9.11), for file areas only. See dav_lock.cpp for
+// why the "no locking" decision is reversed there and nowhere else.
+void DavLock(Ctx &ctx, const DavPath &p);
+void DavUnlock(Ctx &ctx, const DavPath &p);
+// Is a write to `resource` blocked by somebody else's lock? False for every
+// collection kind but Files, which is the only one that locks.
+bool LockBlocks(Ctx &ctx, const DavCollection &c, const std::string &resource);
 // What a 405 lists, and what OPTIONS advertises.
 extern const char *const kAllowHeader;
 // One writable collection property, shared by PROPPATCH and by MKCOL's creation

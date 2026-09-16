@@ -1,4 +1,6 @@
 #include "dav.hpp"
+
+#include "quackmail/filearea.hpp"
 #include "web_views.hpp"
 
 #include "quackmail/ical.hpp"
@@ -123,7 +125,23 @@ void DavGet(Ctx &ctx, const DavPath &p, bool head_only) {
 	// way out while keeping Content-Length honest, which is the whole point of
 	// its head_only parameter. Clearing it here would advertise a length of nil.
 	(void)head_only;
-	ctx.resp.Bytes(o.body, std::string(ObjectMediaType(c.kind)) + "; charset=utf-8");
+	if (c.kind == DavKind::Files) {
+		// QR_DOWNLOAD is a separate question from "can you see the room": a
+		// directory may list its contents to people who may not take them.
+		if (!quackmail::filearea::CanDownload(ctx.con, ctx.username, c.room)) {
+			DavStatus(ctx, 403);
+			return;
+		}
+		// The type the file was uploaded with, and no charset: a file area holds
+		// arbitrary bytes, and declaring UTF-8 over a JPEG would be a lie.
+		// Content-Disposition keeps a browser from rendering somebody's uploaded
+		// HTML as a page on this origin.
+		ctx.resp.Bytes(o.body, o.content_type.empty() ? "application/octet-stream" : o.content_type);
+		ctx.resp.SetHeader("Content-Disposition",
+		                   "attachment; filename=\"" + quackmail::http::SanitizeFilename(o.name) + "\"");
+	} else {
+		ctx.resp.Bytes(o.body, std::string(ObjectMediaType(c.kind)) + "; charset=utf-8");
+	}
 	ctx.resp.SetHeader("ETag", etag);
 	ctx.resp.SetHeader("Cache-Control", "no-store");
 	ctx.resp.SetHeader("X-Content-Type-Options", "nosniff");
@@ -149,8 +167,12 @@ void DavPut(Ctx &ctx, const DavPath &p) {
 	// The media type, when the client bothered to send one. Checked loosely:
 	// the body is parsed below either way, and rejecting on the header alone
 	// would turn a client's sloppy Content-Type into a sync failure.
+	//
+	// Not for a file area: it holds whatever was put in it, so there is no type
+	// to check against. Checking one here would refuse every upload that is not
+	// an .ics.
 	std::string ct = quackmail::util::Lower(ctx.req.Header("Content-Type"));
-	if (!ct.empty()) {
+	if (!ct.empty() && c.kind != DavKind::Files) {
 		bool ok = c.kind == DavKind::AddressBook
 		              ? (ct.rfind("text/vcard", 0) == 0 || ct.rfind("text/x-vcard", 0) == 0)
 		              : ct.rfind("text/calendar", 0) == 0;
@@ -158,6 +180,58 @@ void DavPut(Ctx &ctx, const DavPath &p) {
 			DavStatus(ctx, 415);
 			return;
 		}
+	}
+
+	if (c.kind == DavKind::Files) {
+		if (!quackmail::filearea::CanUpload(ctx.con, ctx.username, c.room)) {
+			DavStatus(ctx, 403);
+			return;
+		}
+		std::string clean = quackmail::filearea::SanitizeName(p.name);
+		if (clean.empty() || clean != p.name) {
+			// The name is refused rather than silently corrected: a 201 for
+			// "notes.txt" when the client asked to PUT "../notes.txt" would tell
+			// it the resource is somewhere it is not.
+			DavStatus(ctx, 403);
+			return;
+		}
+		// Somebody else's lock. 423 rather than 403: the difference matters to a
+		// client, which retries a 423 and gives up on a 403.
+		if (LockBlocks(ctx, c, clean)) {
+			DavStatus(ctx, 423);
+			return;
+		}
+		quackmail::filearea::File before;
+		const bool replacing = quackmail::filearea::StatFile(ctx.con, c.room.room_num, clean, before);
+
+		std::string inm_f = ctx.req.Header("If-None-Match");
+		std::string im_f = ctx.req.Header("If-Match");
+		if (!inm_f.empty() && replacing) {
+			DavStatus(ctx, 412);
+			return;
+		}
+		if (!im_f.empty() && (!replacing || !ETagListMatches(im_f, ETagFor(before.msgnum)))) {
+			DavStatus(ctx, 412);
+			return;
+		}
+
+		std::string err;
+		int64_t msgnum = quackmail::filearea::PutFile(
+		    ctx.con, c.room.room_num, clean, ctx.req.body, ctx.req.Header("Content-Type"),
+		    std::string(), ctx.username, err);
+		if (msgnum < 0) {
+			// The storage quota lives inside InsertMessage, underneath PutFile,
+			// and is transient everywhere else in this server for the same
+			// reason: a client that retries should succeed once room is made.
+			DavStatus(ctx, 507);
+			return;
+		}
+		DavStatus(ctx, replacing ? 204 : 201);
+		ctx.resp.SetHeader("ETag", ETagFor(msgnum));
+		if (!replacing) {
+			ctx.resp.SetHeader("Location", ObjectHref(c.kind, ctx.username, c.segment, clean));
+		}
+		return;
 	}
 
 	std::string uid;
@@ -301,6 +375,28 @@ void DavDelete(Ctx &ctx, const DavPath &p) {
 	// the room, and Citadel expresses "may change this room" as CanPost.
 	if (!quackmail::citadel::CanPost(ctx.con, ctx.username, c.room)) {
 		DavStatus(ctx, 403);
+		return;
+	}
+
+	if (c.kind == DavKind::Files) {
+		// Removing a file is writing to the room, which is CanPost — the same
+		// predicate the upload side asks, minus the QR_UPLOAD bit, because a
+		// directory that no longer accepts deposits should still let its
+		// existing files be tidied away.
+		if (!quackmail::citadel::CanPost(ctx.con, ctx.username, c.room)) {
+			DavStatus(ctx, 403);
+			return;
+		}
+		if (LockBlocks(ctx, c, o.name)) {
+			DavStatus(ctx, 423);
+			return;
+		}
+		std::string ferr;
+		if (!quackmail::filearea::RemoveFile(ctx.con, c.room.room_num, o.name, ferr)) {
+			DavStatus(ctx, 409);
+			return;
+		}
+		DavStatus(ctx, 204);
 		return;
 	}
 

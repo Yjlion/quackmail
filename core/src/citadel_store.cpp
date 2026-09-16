@@ -290,6 +290,30 @@ void EnsureCitadelSchema(Connection &con) {
 	)");
 	con.Query("CREATE INDEX IF NOT EXISTS idx_dav_colls_room ON citadel_dav_collections(room_num)");
 
+	// WebDAV write locks (RFC 4918 §6), for file areas only.
+	//
+	// The groupware collections deliberately do not lock: ETags and If-Match
+	// are their consistency story, and every CalDAV/CardDAV client speaks that.
+	// A *file* share is different — Windows Explorer and macOS Finder refuse to
+	// mount a DAV class-1 share read-write at all, so without this the file
+	// areas would be read-only in the two clients people try first.
+	//
+	// Cross-session state, so it is a table rather than anything in C++: the
+	// lock a browser takes has to be visible to the FTP listener in another
+	// thread and to the next process after a restart.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_dav_locks (
+			token      VARCHAR PRIMARY KEY,
+			room_num   BIGINT,
+			resource   VARCHAR,
+			username   VARCHAR,
+			owner      VARCHAR,
+			depth      BIGINT DEFAULT 0,
+			expires_at BIGINT
+		)
+	)");
+	con.Query("CREATE INDEX IF NOT EXISTS idx_dav_locks_res ON citadel_dav_locks(room_num, resource)");
+
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_state (
 			username  VARCHAR,
@@ -1018,6 +1042,7 @@ bool KillRoom(Connection &con, int64_t room_num, std::string &err) {
 	// Room numbers are reusable, so a stale binding would point a client's old
 	// URL at whatever room is allocated next.
 	ExecP(con, "DELETE FROM citadel_dav_collections WHERE room_num = $1", {Value::BIGINT(room_num)});
+	ExecP(con, "DELETE FROM citadel_dav_locks WHERE room_num = $1", {Value::BIGINT(room_num)});
 	auto r = ExecP(con, "DELETE FROM citadel_rooms WHERE room_num = $1", {Value::BIGINT(room_num)});
 	if (!r) {
 		err = "delete failed";

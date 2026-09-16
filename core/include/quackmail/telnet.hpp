@@ -119,10 +119,33 @@ public:
 	// coloured line counts its escapes as visible columns and wraps early.
 	static size_t VisibleWidth(const std::string &text);
 
+	// ---- raw byte I/O ----------------------------------------------------
+	// For a binary file transfer (Xmodem), which is bytes rather than text: no
+	// CRLF translation on the way out, no line discipline on the way in.
+	//
+	// Note what WriteRaw still does: it doubles 0xFF. A telnet stream reserves
+	// that byte as IAC, so a payload byte of 0xFF has to be escaped or the peer
+	// reads it as the start of a command — which is exactly how a binary
+	// transfer over telnet corrupts every file containing one.
+	void WriteRaw(const std::string &bytes);
+
+	// One byte of payload, IAC sequences consumed and acted on as usual. Returns
+	// false on EOF or if `timeout_ms` passes with nothing arriving — a transfer
+	// protocol has to be able to time out and retry rather than block forever.
+	bool ReadRawByte(unsigned char &out, int timeout_ms);
+
+	// Discard whatever has already arrived. Xmodem needs this between retries:
+	// a NAK sent after a bad block must not be answered with the tail of the
+	// block that was already in flight.
+	void DrainInput(int settle_ms);
+
 private:
 	void Send3(unsigned char verb, unsigned char option);
 	// Next raw byte, honouring the pushback slot. False on EOF.
 	bool NextByte(unsigned char &u);
+	// Next byte of payload: IAC negotiation consumed and answered, no line
+	// discipline. -1 on EOF. GetChar is this plus CR/LF handling.
+	int NextPayloadByte();
 	// Consume a subnegotiation payload (IAC SB ... IAC SE), acting on NAWS.
 	void ReadSubnegotiation();
 	// The "<more>" prompt between screens. False if the reader asked to stop.

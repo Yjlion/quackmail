@@ -45,13 +45,18 @@ void WriteEarlyError(net::ClientStream &stream, int status, bool head_only) {
 // WebDAV verbs the /dav/ subtree answers — the router still 405s any of the
 // latter aimed anywhere else, so widening this list does not widen the site.
 //
-// Note what is absent: LOCK and UNLOCK. We advertise `DAV: 1` and never level 2,
-// so no client is entitled to them, and a lock table is a great deal of state to
-// keep for a guarantee CalDAV already gets from ETags.
+// LOCK and UNLOCK are here now, and only for file areas: `DAV: 2` is advertised
+// under /dav/files/ and nowhere else, because Explorer and Finder will not mount
+// a class-1 share read-write. The groupware collections still answer 405 and
+// still get their consistency from ETags and If-Match, which is what every
+// CalDAV client speaks.
+//
+// Still absent: COPY and MOVE are read but not implemented, which is the
+// router's 405 rather than a gap here.
 bool MethodSupported(const std::string &method) {
 	static const char *const kMethods[] = {"GET",      "HEAD",   "POST",     "OPTIONS", "PROPFIND",
 	                                       "PROPPATCH", "REPORT", "PUT",     "DELETE",  "MKCOL",
-	                                       "MKCALENDAR", "COPY",  "MOVE"};
+	                                       "MKCALENDAR", "COPY",  "MOVE",    "LOCK",    "UNLOCK"};
 	for (const char *m : kMethods) {
 		if (method == m) {
 			return true;

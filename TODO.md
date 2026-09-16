@@ -127,6 +127,60 @@ Unreleased, on top of v1.0.1.
         `Allow`. Neither is advertised until it works: a class we claim and do
         not honour is one a client keeps trying to use.
 
+- [x] **File areas, `C`hat and help files** — the rest of what `citadel.rc` has
+      and this server did not.
+  - [x] **The `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR` flags are read.** All three
+        have been in `citadel_store.hpp` since the beginning and nothing had ever
+        looked at them; the only file-area behaviour in the tree was the telnet
+        prompt printing `]` for a `QR_DIRECTORY` room.
+  - [x] **A file is a message.** A directory room's files are euid-keyed
+        messages carrying one attachment part — the same shape as a mail
+        attachment and as the wiki's binary payloads. That is the whole design
+        decision, and it is what makes storage quotas, the room ACL, DAV
+        tombstones and `KillRoom`'s cleanup all apply to files without any of
+        them being taught about files. A files table would have had to re-earn
+        every one of those.
+  - [x] **One store, three front doors.** `core/filearea.hpp` owns the
+        permission questions, so telnet, WebDAV and (next) FTP ask rather than
+        each re-deriving "a file is an attachment part" — the same rule that has
+        every front-end ask `CanPost`. `test_telnet.py` uploads over telnet and
+        fetches over WebDAV byte for byte, including `0x00` and `0xFF`, because
+        otherwise "three front doors over one store" is a claim rather than a
+        fact.
+  - [x] Telnet: `.RF`/`.RFG`/`.EF` and `.AFD`/`.AFE`, with **Xmodem-1K and
+        CRC-16** in both directions, a plain type-out through the pager, and
+        base64 for a terminal with no transfer protocol. Zmodem is deliberately
+        out — much more protocol for the same result over a link TCP has already
+        made reliable.
+  - [x] `telnet::Session` gained raw byte I/O for that, which meant splitting
+        `NextPayloadByte` out of `GetChar`: a binary transfer needs the IAC
+        handling and must **not** have the CR/LF line discipline on top, because
+        a `0x0D` inside a file is data. `WriteRaw` doubles `0xFF` — without that
+        a payload byte of `0xFF` reads at the far end as the start of a telnet
+        command, which is the classic way binary transfer over telnet corrupts a
+        file.
+  - [x] **WebDAV at `/dav/files/`**, a third `DavKind` — and the first selected
+        by a room *flag* rather than by a view. A file carries its own media type
+        and size, so `DavObject` gained both: a PROPFIND over a directory of
+        large files must report sizes without reading all of them.
+  - [x] **`LOCK`/`UNLOCK`, for file areas and nothing else.** This reverses the
+        "deliberately absent" note in the old backlog, and only here: ETags and
+        `If-Match` remain the entire consistency story for calendars and
+        contacts, which is what every CalDAV client speaks. A file share is the
+        case where that is not enough — Explorer and Finder refuse to mount a
+        class-1 WebDAV share read-write. `DAV: 2` is therefore per-path, and
+        `test_caldav.py` asserts both halves: claimed under `/dav/files/`, not
+        claimed on a calendar.
+  - [x] **`C`hat on `citadel_express`**, not on a channel of its own, so telnet
+        chat, `P`age, the web `/chat` view, XMPP and native `SEXP`/`GEXP` are one
+        conversation instead of five. Talking to "everyone" fans out one row per
+        online user rather than inventing a table only one front-end understands.
+  - [x] **Help files**: compiled-in topics, overridable from a `Help` room by
+        euid. Real Citadel reads help off disk; this server is a single loadable
+        extension with no data directory to install, which is the same reason
+        `http/assets/` is compiled in. A site that never touches it still ships
+        working help rather than an empty screen.
+
 Released work lives in [TODO-archive.md](TODO-archive.md), newest first.
 
 ## Backlog
@@ -151,9 +205,10 @@ The first came out of building 0.6.0 and is the one most likely to bite.
   `If-Match` are the consistency story. `MKCALENDAR`/`MKCOL`, the full
   `calendar-query` filter tree and `expand` have shipped; see above. Notes rooms
   stay out either way: vNote is not a DAV resource type.
-- Telnet BBS, still to fill in from `citadel.rc`: file transfer (the
-  `QR_UPLOAD`/`QR_DOWNLOAD`/`QR_VISDIR` room flags and the `.Read file` /
-  `.Admin File` family), `C`hat, and help files.
+- Telnet BBS: file transfer, `C`hat and help files have shipped (see above).
+  What is left from `citadel.rc` is the native file-transfer verbs —
+  `OPEN`/`READ`/`CLOS`/`UOPN`/`WRIT` — which would give the official `citadel`
+  text client downloads over the same store.
 - XMPP, not implemented (Citadel does not have them either): MUC, offline
   storage, stored rosters/subscriptions, s2s.
 - IMAP depth: `CONDSTORE`/`QRESYNC`, server-side sort/thread, `BODYSTRUCTURE`.
