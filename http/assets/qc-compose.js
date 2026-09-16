@@ -1,19 +1,39 @@
 // The rich-text composer.
 //
-// Deliberately hand-rolled, ~200 lines, no dependency. The alternative was
-// vendoring TinyMCE or Quill: 200 KB to 1 MB of third-party JavaScript whose
-// CVEs we would then own, most of them needing a build step this repo does not
-// have and should not gain, and all of them emitting markup that has to be
-// converted to mail-safe HTML anyway. `contenteditable` plus `execCommand`
-// covers exactly the six things HTML mail actually supports.
+// The editing engine is **Squire** (`http/assets/squire.js`), Fastmail's
+// contenteditable editor, MIT, vendored from `dist/squire.js` at upstream
+// c07e8d9f1afdf025a4c1558bf65c269c1e29056f. This file is the glue: a toolbar,
+// the mail-safe allow-list, recipient chips, attachments and the draft
+// autosave.
 //
-// `execCommand` is formally deprecated and universally implemented. The
-// replacement is to hand-roll Range surgery, which is considerably more code and
-// more ways to corrupt a selection.
+// This reverses what stood here before, and the reasoning is worth keeping.
+// The argument against a dependency was "TinyMCE or Quill: 200 KB to 1 MB of
+// third-party JavaScript whose CVEs we would then own, most of them needing a
+// build step this repo does not have and should not gain". Squire is the case
+// that argument did not consider: 60 KB minified, and its `dist/` is committed
+// upstream, so vendoring it is a download and a `tools/gen_assets.py` run —
+// exactly how `htmx.min.js` and `pico.css` already arrive. No build step was
+// gained. The CVE point stands and is now true of three vendored files rather
+// than two; `docs/web.md` is the record.
+//
+// What the hand-rolled version could not do was survive its own foundation.
+// `document.execCommand` is deprecated in every browser that implements it, it
+// cannot report caret state reliably enough to light a toolbar button, and its
+// paste path had to flatten everything to bare text because there was nothing
+// to sanitize markup with. All three are fixed here.
+//
+// **One thing Squire needs that is easy to miss:** its default
+// `sanitizeToDOMFragment` calls a global `DOMPurify`, which this tree does not
+// vendor. Supplying that hook is therefore mandatory, not an improvement — and
+// since it has to exist, it implements the *server's* allow-list
+// (`SanitizeForCompose`, core/src/html_sanitize.cpp) so the editor and the
+// message agree about what survives. They must be changed together.
 //
 // **This file is an enhancement, never a requirement.** The form ships with a
-// working <textarea>; if this never runs, composing still works and sends plain
-// text. That is why every hook below bails quietly when its element is absent.
+// working <textarea>; if this never runs — or if squire.js does not load —
+// composing still works and sends plain text. That is why every hook below
+// bails quietly when its element is absent, and why `initEditor` returns early
+// when `window.Squire` is undefined.
 //
 // Everything here is re-entrant. Compose docks into the mail reading pane as an
 // htmx swap, so the form can arrive long after this file ran, and can arrive
@@ -76,61 +96,225 @@
   }
 
   // ---- the rich-text editor ----------------------------------------------
+  //
+  // Squire (http/assets/squire.js) does the contenteditable work. Everything
+  // below is the glue: a toolbar, the mail-safe allow-list, and the sync seam.
+
+  // The allow-list, kept deliberately in step with SanitizeForCompose in
+  // core/src/html_sanitize.cpp. The server is the actual defence and will strip
+  // anything not in its own list on the way into the message — so a mismatch
+  // here is not a hole, it is a silent loss: formatting the editor shows and
+  // the message never carries. That failure mode has bitten this tree before
+  // (the style= attributes in web_notes.cpp), so these tables exist to be
+  // compared against that file, not to be trusted on their own.
+  var OK_TAGS = {
+    P: 1, BR: 1, B: 1, I: 1, EM: 1, STRONG: 1, U: 1, S: 1, A: 1, UL: 1,
+    OL: 1, LI: 1, BLOCKQUOTE: 1, PRE: 1, CODE: 1, SPAN: 1, DIV: 1, TABLE: 1,
+    THEAD: 1, TBODY: 1, TR: 1, TD: 1, TH: 1, IMG: 1, H1: 1, H2: 1, H3: 1,
+    H4: 1, HR: 1
+  };
+  // Not body text: the tag goes and takes its content with it. Dropping the tag
+  // alone would spill a pasted document's <title> into the message as a stray
+  // word.
+  var KILL_TAGS = { SCRIPT: 1, STYLE: 1, HEAD: 1, TITLE: 1, TEMPLATE: 1, NOSCRIPT: 1 };
+  var OK_STYLE = {
+    "color": 1, "background-color": 1, "font-weight": 1, "font-style": 1,
+    "font-size": 1, "font-family": 1, "text-align": 1, "text-decoration": 1,
+    "margin": 1, "margin-left": 1, "margin-right": 1, "margin-top": 1,
+    "margin-bottom": 1, "padding": 1, "padding-left": 1, "padding-right": 1,
+    "padding-top": 1, "padding-bottom": 1, "border-left": 1, "line-height": 1
+  };
+
+  function safeStyle(value) {
+    var out = [];
+    (value || "").split(";").forEach(function (decl) {
+      var colon = decl.indexOf(":");
+      if (colon < 0) return;
+      var prop = decl.slice(0, colon).trim().toLowerCase();
+      var val = decl.slice(colon + 1).trim();
+      if (!OK_STYLE[prop] || !val) return;
+      // url(), expression() and escapes are what a hostile paste uses; the
+      // server refuses any value containing them, so refuse them here too.
+      if (/url\(|expression|\\|\(/i.test(val)) return;
+      out.push(prop + ": " + val);
+    });
+    return out.join("; ");
+  }
+
+  function safeImgSrc(src) {
+    var v = (src || "").trim();
+    if (/^cid:/i.test(v)) return v;
+    // Only real raster types: data:image/svg+xml is scriptable.
+    if (/^data:image\/(png|jpeg|gif|webp)[;,]/i.test(v)) return v;
+    // A remote image in a mail body is a tracking pixel. The reader opts in to
+    // those on the display side; the composer never emits one.
+    return "";
+  }
+
+  function scrubAttributes(el) {
+    var tag = el.nodeName;
+    var attrs = [];
+    for (var i = 0; i < el.attributes.length; i++) attrs.push(el.attributes[i].name);
+    attrs.forEach(function (name) {
+      var lower = name.toLowerCase();
+      var value = el.getAttribute(name);
+      if (lower === "href" && tag === "A") {
+        if (!/^(https?|mailto):/i.test((value || "").trim())) {
+          el.removeAttribute(name);
+          return;
+        }
+        el.setAttribute("rel", "noopener noreferrer");
+        return;
+      }
+      if (lower === "src" && tag === "IMG") {
+        var safe = safeImgSrc(value);
+        if (safe) el.setAttribute(name, safe);
+        else el.removeAttribute(name);
+        return;
+      }
+      if (lower === "alt" || lower === "title") return;
+      if ((lower === "width" || lower === "height") && /^\d+$/.test(value || "")) return;
+      if (lower === "style") {
+        var css = safeStyle(value);
+        if (css) el.setAttribute(name, css);
+        else el.removeAttribute(name);
+        return;
+      }
+      if (lower === "rel" && tag === "A") return;
+      // Everything else, including every on* handler, class and id — the server
+      // strips those, so keeping them here would only mislead.
+      el.removeAttribute(name);
+    });
+  }
+
+  function scrubFragment(frag) {
+    // Walk a snapshot: the tree is being modified underneath.
+    var all = [];
+    var walker = document.createTreeWalker(frag, NodeFilter.SHOW_ELEMENT, null, false);
+    while (walker.nextNode()) all.push(walker.currentNode);
+    all.forEach(function (el) {
+      if (!el.parentNode) return; // already removed with an ancestor
+      var tag = el.nodeName;
+      if (KILL_TAGS[tag]) {
+        el.parentNode.removeChild(el);
+        return;
+      }
+      if (!OK_TAGS[tag]) {
+        // Unwrap: <html>, <body> and anything unrecognised are containers whose
+        // contents are still body text.
+        var parent = el.parentNode;
+        while (el.firstChild) parent.insertBefore(el.firstChild, el);
+        parent.removeChild(el);
+        return;
+      }
+      scrubAttributes(el);
+    });
+    return frag;
+  }
+
+  // Squire's own default for this hook calls a global DOMPurify, which this
+  // tree does not vendor — so supplying it is required, not an improvement.
+  // Parsing happens in an inert document: `innerHTML` on a detached <template>
+  // builds nodes without running anything or fetching anything.
+  function sanitizeToDOMFragment(html) {
+    var tpl = document.createElement("template");
+    tpl.innerHTML = html || "";
+    return scrubFragment(tpl.content);
+  }
 
   function initEditor(form) {
     var textarea = form.querySelector("textarea[name=body]");
     var htmlField = form.querySelector("input[name=html_body]");
     var richToggle = form.querySelector("input[name=rich]");
     if (!textarea || !htmlField || !richToggle) return;
+    // The asset failed to load, or is blocked. The form is still a working
+    // plain-text composer, the toggle stays hidden, and nothing below runs.
+    if (!window.Squire) return;
 
     // ---- the editor surface -------------------------------------------------
 
-    var editor = document.createElement("div");
-    editor.className = "richbody";
-    editor.setAttribute("contenteditable", "true");
-    editor.setAttribute("role", "textbox");
-    editor.setAttribute("aria-multiline", "true");
-    editor.setAttribute("aria-label", "Message body");
+    var root = document.createElement("div");
+    root.className = "richbody";
+    root.setAttribute("role", "textbox");
+    root.setAttribute("aria-multiline", "true");
+    // Named from the page's own label, so the accessible name is translated.
+    // A hardcoded English string here was wrong in every other locale.
+    if (document.getElementById("compose-body-label")) {
+      root.setAttribute("aria-labelledby", "compose-body-label");
+    } else {
+      root.setAttribute("aria-label", "Message body");
+    }
 
-    // Seed from whatever the server put in the textarea: a reply's quoted text, a
-    // draft being resumed. Escaped, then newlines become breaks — the textarea
-    // holds plain text, so treating it as markup would execute a reply's quoted
-    // content.
+    var sq = new window.Squire(root, {
+      // <div> rather than <p>: it is on the server's allow-list and it is what
+      // the existing messages in the store already look like.
+      blockTag: "DIV",
+      sanitizeToDOMFragment: sanitizeToDOMFragment,
+      // Typing a bare URL should not silently become a link the server then has
+      // to vet; the Link button is the way to make one.
+      addLinks: false
+    });
+
+    // Seed from whatever the server put in the textarea: a reply's quoted text,
+    // a draft being resumed. Escaped, then newlines become breaks — the
+    // textarea holds plain text, so treating it as markup would execute a
+    // reply's quoted content.
     function seed(text) {
       var div = document.createElement("div");
       div.textContent = text;
       return div.innerHTML.replace(/\n/g, "<br>");
     }
-    editor.innerHTML = seed(textarea.value);
+    sq.setHTML(seed(textarea.value));
+
+    // ---- the toolbar --------------------------------------------------------
 
     var toolbar = document.createElement("div");
     toolbar.className = "richtools";
 
-    // Only what mail HTML renders reliably across clients. A colour picker and a
-    // font menu would produce markup half of them ignore.
+    // Only what mail HTML renders reliably across clients. A colour picker and
+    // a font menu would produce markup half of them ignore.
+    //
+    // `query` is what Squire's getPath()/hasFormat() reports when the caret is
+    // inside this format, so a button can show whether it is on.
     var BUTTONS = [
-      ["bold", "B", "Bold", "b"],
-      ["italic", "I", "Italic", "i"],
-      ["underline", "U", "Underline", "u"],
-      ["insertUnorderedList", "• List", "Bulleted list", null],
-      ["insertOrderedList", "1. List", "Numbered list", null],
-      ["formatBlock:blockquote", "“ Quote", "Quote", null],
-      ["removeFormat", "Clear", "Remove formatting", null]
+      { label: "B", title: "Bold", key: "b", query: "B",
+        on: function () { sq.bold(); }, off: function () { sq.removeBold(); } },
+      { label: "I", title: "Italic", key: "i", query: "I",
+        on: function () { sq.italic(); }, off: function () { sq.removeItalic(); } },
+      { label: "U", title: "Underline", key: "u", query: "U",
+        on: function () { sq.underline(); }, off: function () { sq.removeUnderline(); } },
+      { label: "• List", title: "Bulleted list", query: "UL",
+        on: function () { sq.makeUnorderedList(); }, off: function () { sq.removeList(); } },
+      { label: "1. List", title: "Numbered list", query: "OL",
+        on: function () { sq.makeOrderedList(); }, off: function () { sq.removeList(); } },
+      { label: "“ Quote", title: "Quote", query: "BLOCKQUOTE",
+        on: function () { sq.increaseQuoteLevel(); }, off: function () { sq.decreaseQuoteLevel(); } },
+      { label: "Clear", title: "Remove formatting",
+        on: function () { sq.removeAllFormatting(); } }
     ];
 
+    var buttons = [];
     BUTTONS.forEach(function (spec) {
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "btn sec";
-      btn.title = spec[2] + (spec[3] ? " (Ctrl+" + spec[3].toUpperCase() + ")" : "");
-      btn.textContent = spec[1];
+      btn.title = spec.title + (spec.key ? " (Ctrl+" + spec.key.toUpperCase() + ")" : "");
+      btn.textContent = spec.label;
+      if (spec.query) btn.setAttribute("aria-pressed", "false");
       btn.addEventListener("mousedown", function (ev) {
         // mousedown, not click: clicking a button would move focus out of the
         // editor and collapse the selection before the command ran.
         ev.preventDefault();
-        exec(spec[0]);
+        sq.focus();
+        try {
+          if (spec.query && spec.off && btn.getAttribute("aria-pressed") === "true") spec.off();
+          else spec.on();
+        } catch (e) {
+          // One unsupported command is not worth breaking the composer over.
+        }
       });
       toolbar.appendChild(btn);
+      buttons.push({ btn: btn, spec: spec });
     });
 
     var linkBtn = document.createElement("button");
@@ -140,69 +324,50 @@
     linkBtn.title = "Insert a link";
     linkBtn.addEventListener("mousedown", function (ev) {
       ev.preventDefault();
+      sq.focus();
       var url = window.prompt("Link to which address?", "https://");
       if (!url) return;
-      // Only the schemes the server's allow-list keeps, so the button cannot
-      // produce something that silently disappears on save.
+      // Only the schemes the allow-list keeps, so the button cannot produce
+      // something that silently disappears on save.
       if (!/^(https?:|mailto:)/i.test(url)) {
         window.alert("Links must start with http://, https:// or mailto:");
         return;
       }
-      exec("createLink", url);
+      sq.makeLink(url, { rel: "noopener noreferrer" });
     });
     toolbar.appendChild(linkBtn);
 
-    function exec(command, value) {
-      editor.focus();
-      var parts = command.split(":");
-      try {
-        if (parts.length === 2) {
-          document.execCommand(parts[0], false, parts[1]);
-        } else {
-          document.execCommand(command, false, value === undefined ? null : value);
+    // The toolbar follows the caret. execCommand's queryCommandState could not
+    // do this reliably; Squire reports the path it is in, so a button can say
+    // whether it is on.
+    function refreshButtons() {
+      buttons.forEach(function (b) {
+        if (!b.spec.query) return;
+        var on = false;
+        try {
+          on = !!sq.hasFormat(b.spec.query);
+        } catch (e) {
+          on = false;
         }
-      } catch (e) {
-        // An unsupported command is not worth breaking the composer over.
-      }
+        b.btn.setAttribute("aria-pressed", on ? "true" : "false");
+      });
     }
-
-    // Ctrl/Cmd+B/I/U. The browser usually does these anyway inside a
-    // contenteditable; binding them means the behaviour is the same everywhere.
-    editor.addEventListener("keydown", function (ev) {
-      if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
-      var map = { b: "bold", i: "italic", u: "underline" };
-      var cmd = map[ev.key.toLowerCase()];
-      if (cmd) {
-        ev.preventDefault();
-        exec(cmd);
-      }
-    });
+    sq.addEventListener("pathChange", refreshButtons);
+    sq.addEventListener("select", refreshButtons);
 
     // ---- paste --------------------------------------------------------------
     // A paste from a web page carries its whole stylesheet, its scripts and its
-    // tracking pixels. The server's allow-list is the actual defence — this only
-    // spares the user a body full of markup that is about to be stripped anyway.
-    editor.addEventListener("paste", function (ev) {
-      if (!ev.clipboardData) return;
-      var html = ev.clipboardData.getData("text/html");
-      var text = ev.clipboardData.getData("text/plain");
-      ev.preventDefault();
-      if (html) {
-        // Reduce to text plus paragraph breaks. Deliberately crude: keeping some
-        // of a hostile page's markup is worse than losing its formatting.
-        var tmp = document.createElement("div");
-        tmp.innerHTML = html;
-        var stripped = tmp.textContent || "";
-        document.execCommand("insertText", false, stripped);
-        return;
-      }
-      document.execCommand("insertText", false, text || "");
-    });
+    // tracking pixels. Squire routes every paste through sanitizeToDOMFragment
+    // above, which is the same allow-list the server applies — so unlike the
+    // previous editor, a paste keeps its bold and its lists instead of being
+    // flattened to bare text, and still cannot carry anything the message would
+    // not have carried anyway.
 
     // ---- inline images ------------------------------------------------------
     // A dropped or pasted image becomes a data: URI in the editor. The server
     // turns those into `cid:` parts on send, so the message is self-contained
-    // rather than pointing at anything remote.
+    // rather than pointing at anything remote. Object URLs are deliberately not
+    // used: the page's CSP allows `img-src 'self' data:` and not `blob:`.
     function insertImage(file) {
       if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
         window.alert("Only PNG, JPEG, GIF and WebP images can be inserted.");
@@ -214,15 +379,14 @@
       }
       var reader = new FileReader();
       reader.onload = function () {
-        editor.focus();
-        document.execCommand("insertHTML", false,
-          '<img src="' + reader.result + '" alt="' + (file.name || "image") + '">');
+        sq.focus();
+        sq.insertImage(reader.result, { alt: file.name || "image" });
       };
       reader.readAsDataURL(file);
     }
 
-    editor.addEventListener("dragover", function (ev) { ev.preventDefault(); });
-    editor.addEventListener("drop", function (ev) {
+    root.addEventListener("dragover", function (ev) { ev.preventDefault(); });
+    root.addEventListener("drop", function (ev) {
       if (!ev.dataTransfer || !ev.dataTransfer.files || !ev.dataTransfer.files.length) return;
       ev.preventDefault();
       insertImage(ev.dataTransfer.files[0]);
@@ -231,7 +395,7 @@
     // ---- wiring -------------------------------------------------------------
 
     textarea.parentNode.insertBefore(toolbar, textarea);
-    textarea.parentNode.insertBefore(editor, textarea);
+    textarea.parentNode.insertBefore(root, textarea);
 
     // The textarea stays in the DOM, hidden, and stays authoritative for the
     // plain-text half of the message. Removing it would mean a JS error mid-edit
@@ -241,7 +405,7 @@
     var label = richToggle.closest("label") || richToggle.parentNode;
 
     function setRich(on) {
-      editor.style.display = on ? "" : "none";
+      root.style.display = on ? "" : "none";
       toolbar.style.display = on ? "" : "none";
       textarea.classList.toggle("richhidden", on);
     }
@@ -252,15 +416,28 @@
     richToggle.addEventListener("change", function () { setRich(richToggle.checked); });
     if (label) label.classList.add("richavailable");
 
+    // An edit inside the editor is an edit to the form. Squire's root is not a
+    // form control, so its input events do not bubble as the form's own do, and
+    // without this the autosave below would never see a body-only change.
+    sq.addEventListener("input", function () {
+      form.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
     // Named, and hung on the form, because the autosave below has to produce
     // exactly the same two fields a real submit would. Two copies of this would
     // be two definitions of what a draft contains.
     form.qcSyncBody = function () {
       if (richToggle.checked) {
-        htmlField.value = editor.innerHTML;
-        // The plain-text half comes from the editor's text, so a recipient with no
-        // HTML gets what was actually written rather than the pre-edit seed.
-        textarea.value = editor.innerText || editor.textContent || "";
+        htmlField.value = sq.getHTML();
+        // The plain-text half comes from the editor's text, so a recipient with
+        // no HTML gets what was actually written rather than the pre-edit seed.
+        var el = sq.getRoot();
+        // Squire parks a zero-width space in an inline node that has no text
+        // yet — click Bold on an empty line and the DOM holds U+200B until you
+        // type. getHTML() strips them; innerText does not, so the plain-text
+        // half would carry an invisible character into every message the HTML
+        // half does not. Strip them here for the same reason Squire does there.
+        textarea.value = (el.innerText || el.textContent || "").replace(/\u200B/g, "");
       } else {
         htmlField.value = "";
       }

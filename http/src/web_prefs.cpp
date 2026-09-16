@@ -1327,7 +1327,7 @@ void PostSieveRuleStop(Ctx &ctx) {
 void GetSieve(Ctx &ctx) {
 	PageOpts opts;
 	opts.active = "sieve";
-	opts.script = "qc-sieve.js";
+	opts.scripts = {"qc-sieve.js"};
 	Render(ctx, "Mail filters", SieveBody(ctx, ctx.username, "/prefs/sieve"), opts);
 }
 

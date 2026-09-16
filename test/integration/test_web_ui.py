@@ -360,6 +360,89 @@ def main():
                       "() => document.querySelector('input[type=file][name=attachment]').files.length")
                   == 0)
 
+            # ---- the rich-text editor -----------------------------------
+            # Nothing outside a browser can see this. test_richmail.py drives
+            # /mail/send with urllib and posts html_body by hand, which proves
+            # the server's half and never once runs the editor -- so before this
+            # block the whole editing surface was untested.
+            print("editor")
+            check("Squire loaded", page.evaluate("() => typeof window.Squire") == "function")
+            check("the editor replaced the textarea",
+                  page.locator("#reader .richbody[contenteditable=true]").count() == 1)
+            check("the formatting option is offered once the editor is up",
+                  page.locator("#reader .richopt.richavailable").count() == 1)
+            check("the textarea is still in the DOM as the fallback",
+                  page.locator("#reader textarea[name=body]").count() == 1)
+
+            editor = page.locator("#reader .richbody")
+            editor.click()
+            # Clicking the body must focus the body. It did not: the editor
+            # mounted inside the <label> wrapping the textarea, and a click
+            # anywhere in a label is forwarded to that label's own control --
+            # with the textarea hidden, that was the first toolbar button, so
+            # typing went nowhere. Invisible to urllib and to every check above.
+            check("clicking the message body focuses it",
+                  page.evaluate(
+                      "() => document.activeElement.classList.contains('richbody')"),
+                  page.evaluate("() => document.activeElement.className"))
+            page.keyboard.type("plain then ")
+            # Bold via the toolbar button, not a keyboard shortcut: the button
+            # is the part this repo wrote.
+            page.locator("#reader .richtools button[title^='Bold']").click()
+            page.keyboard.type("loud")
+            check("the toolbar reflects the caret",
+                  page.locator("#reader .richtools button[title^='Bold']")
+                      .get_attribute("aria-pressed") == "true")
+
+            page.evaluate(
+                "() => document.querySelector('form[data-compose]').qcSyncBody()")
+            html = page.evaluate(
+                "() => document.querySelector('input[name=html_body]').value")
+            text = page.evaluate(
+                "() => document.querySelector('textarea[name=body]').value")
+            check("the HTML half carries the formatting",
+                  "<b>" in html.lower() and "loud" in html, html[:160])
+            check("the plain half is the text that was typed",
+                  "plain then loud" in text.replace("\u00a0", " "),
+                  "text=" + repr(text[:200]) + " html=" + repr(html[:200]))
+
+            # A paste from a web page. The old editor flattened every paste to
+            # bare text because it had nothing to sanitize markup with; Squire
+            # runs it through the same allow-list the server applies, so the
+            # formatting survives and the script does not.
+            page.evaluate("""() => {
+                const sq = document.querySelector('.richbody');
+                const dt = new DataTransfer();
+                dt.setData('text/html',
+                    '<div>kept <b>bold</b><script>window.pwned=1</script>' +
+                    '<img src="http://evil.example/px.gif"><a href="javascript:x()">x</a></div>');
+                dt.setData('text/plain', 'kept bold x');
+                sq.focus();
+                sq.dispatchEvent(new ClipboardEvent('paste',
+                    {clipboardData: dt, bubbles: true, cancelable: true}));
+            }""")
+            page.wait_for_timeout(200)
+            page.evaluate(
+                "() => document.querySelector('form[data-compose]').qcSyncBody()")
+            pasted = page.evaluate(
+                "() => document.querySelector('input[name=html_body]').value")
+            check("a paste keeps its formatting", "<b>" in pasted.lower(), pasted[:200])
+            check("a pasted script does not run",
+                  page.evaluate("() => window.pwned") in (None, False))
+            check("a pasted script tag is gone", "<script" not in pasted.lower(), pasted[:200])
+            check("a pasted tracking pixel is gone", "evil.example" not in pasted, pasted[:200])
+            check("a pasted javascript: link is gone", "javascript:" not in pasted.lower(), pasted[:200])
+
+            # Turning formatting off is what makes the message plain text: the
+            # server decides on html_body being empty, nothing else.
+            page.locator("#reader .richopt input[name=rich]").uncheck()
+            page.evaluate(
+                "() => document.querySelector('form[data-compose]').qcSyncBody()")
+            check("formatting off empties the HTML field",
+                  page.evaluate(
+                      "() => document.querySelector('input[name=html_body]').value") == "")
+            page.locator("#reader .richopt input[name=rich]").check()
+
             # ---- themes -------------------------------------------------
             print("themes")
             page.goto(BASE + "/prefs", wait_until="networkidle")

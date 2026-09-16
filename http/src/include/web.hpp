@@ -297,10 +297,16 @@ struct PageOpts {
 	bool panes = false;
 	// A per-page action strip rendered by the shell, above `body`.
 	std::string toolbar;
-	// An extra script from /static, by logical name ("qc-compose.js"), loaded
-	// deferred after the shared one. Pages that need no script leave it empty,
-	// which is most of them.
-	std::string script;
+	// Extra scripts from /static, by logical name ("qc-compose.js"), loaded
+	// deferred after the shared ones. Pages that need no script leave this
+	// empty, which is most of them.
+	//
+	// Order is significant and is the reason this is a list rather than one
+	// name: `defer` scripts run in document order, so a page that needs a
+	// library before its own code lists the library first. The composer needs
+	// exactly that — squire.js then qc-compose.js — and a single slot forced
+	// the alternative of concatenating a vendored file into one of ours.
+	std::vector<std::string> scripts;
 	// Per-page CSS, emitted as a nonced <style> after the theme block.
 	//
 	// For rules a page can only know at render time — the colour a particular

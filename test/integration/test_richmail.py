@@ -140,6 +140,12 @@ def main():
         assert b'name="html_body"' in form, "the compose form has no HTML field"
         assert b'name="body"' in form, "the compose form lost its textarea"
         assert b"qc-compose." in form, "the compose page does not load the editor script"
+        # Squire is the editing engine, and it must be listed *before*
+        # qc-compose.js: both are `defer`, which runs them in document order, and
+        # qc-compose.js constructs a Squire instance as soon as it boots.
+        assert b"squire." in form, "the compose page does not load Squire"
+        assert form.index(b"squire.") < form.index(b"qc-compose."), \
+            "squire.js is loaded after qc-compose.js, which needs it at boot"
         token = csrf(form)
 
         # ---- a plain send stays a single part --------------------------------
