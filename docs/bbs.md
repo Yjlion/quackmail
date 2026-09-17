@@ -20,8 +20,34 @@ listings):
 - **Messages**: `MSGS` (`all`/`new`/`old`/`last`/`first`/`gt`/`lt`), `MSG0`
   (field listing), `MSG2` (raw), `ENT0` (post).
 
-Config-heavy admin verbs (`CONF`, `DOWN`, `SCDN`, `TERM`, `EXPI`), the Citadel
-network mesh, and instant messaging are deferred (see Roadmap).
+- **Configuration**: `CONF` — `GETVAL`/`PUTVAL`/`LISTVAL` (the modern key/value
+  form, which maps straight onto `citadel_config`), `GETSYS`/`PUTSYS` (arbitrary
+  stanzas as euid-keyed messages in *Local System Configuration*), and the
+  deprecated positional `GET`/`SET`. Citadel's own source marks those last two
+  "please do not add fields or change their order", and its text client still
+  sends them, so all 73 positions are answered — retired ones included, as blank
+  lines, because renumbering would shift every field after them. Aide-only, and
+  a `SET` is logged to the Aide room.
+- **Expiry**: `GPEX`/`SPEX` read and write a policy (mode `0` next-level, `1`
+  manual, `2` by count, `3` by age) at four levels — room, floor, site, and
+  mailboxes — and `TDAP` runs the purger. A room that says next-level defers to
+  its floor, then to the site; with nothing configured anywhere the answer is
+  *manual*, because deleting mail on the strength of an empty configuration
+  would be the worst available reading of it. `QR_PERMANENT` rooms are never
+  swept, which is what that flag has always claimed and never did.
+
+  Worth knowing: the modern Citadel **server** implements neither `GPEX` nor
+  `SPEX`, while its own text client still sends them — so that client's expiry
+  editor talks to nothing against a real Citadel. It works here.
+
+  The sweep also runs on a timer (`qm_expire`, and `qm_expire_run()` for one
+  pass now). Deliberately a timer rather than the 1-in-16 coin flip in the HTTP
+  router that every other sweep hangs off: a site with no web traffic would
+  otherwise never expire anything.
+
+`DOWN`, `SCDN`, `TERM`, the Citadel network mesh and the native file-transfer
+verbs (`OPEN`/`READ`/`CLOS`/`UOPN`/`WRIT`) are deferred (see Roadmap). There is
+no `EXPI` verb in Citadel; `TDAP` is the one that runs the purger.
 
 ## The BBS shell (telnet)
 
@@ -130,6 +156,27 @@ stored as ordinary Citadel messages, so an article posted over NNTP is readable
 from a Citadel client, the BBS shell, IMAP and POP3. (It also resolves
 `<message-id>` fetches and reports real `:bytes`/`:lines` in `OVER`, both of
 which Citadel punts on.)
+
+### Peer feeds
+
+`IHAVE` (RFC 3977 §6.3.2) and `MODE STREAM` with `CHECK`/`TAKETHIS` (RFC 4644),
+so this server can take a news feed from a peer. All three turn on one question
+— *do I already have this article?* — which was unanswerable until a Message-ID
+index existed: resolving an id previously meant scanning the selected group,
+fine for a reader fetching one article and hopeless for a peer offering
+thousands.
+
+Unlike everything else here, **this half has no Citadel behind it**: Citadel's
+own NNTP implements none of these verbs. The RFCs are the spec.
+
+Three decisions worth knowing:
+
+- **A peer must authenticate.** The verbs sit after the `480` gate deliberately.
+- **An article for a group this server does not carry is refused permanently**
+  (`437`), not deferred. Creating a room for every group a peer offers would let
+  one peer fill the room list.
+- **A transit article keeps the `From:` it arrived with.** Rewriting it to the
+  peer's login would be forging it.
 
 ## Instant messaging (XMPP)
 

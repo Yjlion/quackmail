@@ -376,6 +376,185 @@ void HandleOver(Connection &con, Nntp &s, net::ClientStream &stream, const std::
 
 // ------------------------------------------------------------------ POST
 
+// ---- the peer feed: IHAVE, and MODE STREAM's CHECK/TAKETHIS --------------
+//
+// RFC 3977 §6.3.2 (IHAVE) and RFC 4644 (streaming). Note that this is the one
+// piece of this server's Citadel-facing work with **no parity oracle behind
+// it**: Citadel's own NNTP implements none of these — it has ACTIVE, AUTHINFO,
+// GROUP, LISTGROUP, NEWSGROUPS and the article verbs and stops there. So the
+// RFCs are the spec, and the wire below is theirs rather than Citadel's.
+//
+// The whole point of all three is the question "do I already have this?", which
+// was unanswerable until citadel_msgids existed: the ARTICLE-by-message-id path
+// scans the selected group, which is fine for a reader fetching one article and
+// hopeless for a peer offering thousands.
+
+// Take an offered article and file it. Shared by IHAVE and TAKETHIS, which
+// differ only in what they say and when they say it.
+//
+// Returns false with `why` set when the article could not be filed.
+bool AcceptOfferedArticle(Connection &con, Nntp &s, const std::string &article,
+                          const std::string &node, const std::string &msgid, std::string &why) {
+	auto parsed = mime::Parse(article);
+	auto header = [&parsed](const std::string &name) {
+		for (auto &h : parsed.headers) {
+			if (util::Upper(h.first) == util::Upper(name)) {
+				return h.second;
+			}
+		}
+		return std::string();
+	};
+
+	std::string ng = header("Newsgroups");
+	std::vector<std::string> groups;
+	size_t start = 0;
+	while (start <= ng.size() && !ng.empty()) {
+		size_t comma = ng.find(',', start);
+		std::string one = ng.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+		while (!one.empty() && (one.front() == ' ' || one.front() == '\t')) {
+			one.erase(0, 1);
+		}
+		while (!one.empty() && (one.back() == ' ' || one.back() == '\t' || one.back() == '\r')) {
+			one.pop_back();
+		}
+		if (!one.empty()) {
+			groups.push_back(one);
+		}
+		if (comma == std::string::npos) {
+			break;
+		}
+		start = comma + 1;
+	}
+	if (groups.empty()) {
+		why = "no newsgroup specified";
+		return false;
+	}
+
+	// A transit article is filed only into groups this server actually carries.
+	// Silently creating a room for every group a peer offers would let one peer
+	// fill the room list.
+	std::vector<int64_t> rooms;
+	for (auto &g : groups) {
+		citadel::Room room;
+		if (!citadel::ResolveRoom(con, s.username, citadel::NewsgroupToRoom(g), room)) {
+			continue;
+		}
+		if (!CanPost(con, s, room)) {
+			continue;
+		}
+		rooms.push_back(room.room_num);
+	}
+	if (rooms.empty()) {
+		why = "no newsgroup carried here";
+		return false;
+	}
+
+	citadel::Message msg;
+	// The article's own From:, not the peer's login: this is transit, and
+	// rewriting the author would be forging it.
+	msg.author = header("From").empty() ? s.username : header("From");
+	msg.author_usernum = 0;
+	msg.msgtime = NowEpoch();
+	msg.format_type = 4;
+	msg.subject = parsed.subject.empty() ? header("Subject") : parsed.subject;
+	msg.references = header("References");
+	msg.node = header("Path");
+	msg.raw = article;
+
+	std::string err;
+	int64_t msgnum = citadel::InsertMessage(con, msg, rooms, err);
+	if (msgnum < 0) {
+		why = err;
+		return false;
+	}
+	citadel::RecordMessageId(con, msgid.empty() ? citadel::MessageId(msg, node) : msgid, msgnum);
+	if (s.have_group) {
+		s.articles = RoomArticles(con, s.room.room_num);
+	}
+	return true;
+}
+
+// IHAVE <message-id> — RFC 3977 §6.3.2. Two round trips: the peer names the
+// article, we say whether we want it, then it sends.
+void HandleIhave(Connection &con, Nntp &s, net::ClientStream &stream, const std::string &arg,
+                 const std::string &node) {
+	std::string msgid = arg;
+	if (msgid.size() < 3 || msgid.front() != '<' || msgid.back() != '>') {
+		stream.WriteLine("435 article not wanted");
+		return;
+	}
+	if (citadel::FindByMessageId(con, msgid) >= 0) {
+		// 435 rather than 437: "I already have it" is not "it is bad", and a
+		// peer uses the difference to decide whether to keep offering it.
+		stream.WriteLine("435 article not wanted");
+		return;
+	}
+	stream.WriteLine("335 send it");
+
+	std::string article;
+	if (!stream.ReadDotStuffed(article, kMaxArticleBytes)) {
+		stream.WriteLine("436 transfer failed: article too large or connection lost");
+		return;
+	}
+	std::string why;
+	if (!AcceptOfferedArticle(con, s, article, node, msgid, why)) {
+		// 437 is permanent ("do not offer this again"), 436 is "try later".
+		// Getting these the wrong way round makes a peer either retry forever
+		// or drop an article it should have kept.
+		stream.WriteLine((why == "no newsgroup carried here" || why == "no newsgroup specified")
+		                     ? "437 article rejected: " + why
+		                     : "436 transfer failed: " + why);
+		return;
+	}
+	stream.WriteLine("235 article transferred OK");
+}
+
+// CHECK <message-id> — RFC 4644. The streaming form of IHAVE's first half: the
+// peer may ask about many articles without waiting for each answer.
+void HandleCheck(Connection &con, net::ClientStream &stream, const std::string &arg) {
+	std::string msgid = arg;
+	if (msgid.size() < 3 || msgid.front() != '<' || msgid.back() != '>') {
+		stream.WriteLine("438 " + msgid + " syntax error");
+		return;
+	}
+	if (citadel::FindByMessageId(con, msgid) >= 0) {
+		stream.WriteLine("438 " + msgid + " already have it");
+		return;
+	}
+	stream.WriteLine("238 " + msgid + " send it");
+}
+
+// TAKETHIS <message-id> — RFC 4644. The article follows immediately, with no
+// intervening reply: that is the whole point of streaming, and it means a
+// failure here still has to read the article off the wire before answering or
+// the connection desynchronises.
+void HandleTakethis(Connection &con, Nntp &s, net::ClientStream &stream, const std::string &arg,
+                    const std::string &node) {
+	std::string msgid = arg;
+	std::string article;
+	const bool read_ok = stream.ReadDotStuffed(article, kMaxArticleBytes);
+	if (!read_ok) {
+		stream.WriteLine("439 " + msgid + " transfer failed");
+		return;
+	}
+	if (msgid.size() < 3 || msgid.front() != '<' || msgid.back() != '>') {
+		stream.WriteLine("439 " + msgid + " syntax error");
+		return;
+	}
+	if (citadel::FindByMessageId(con, msgid) >= 0) {
+		// Already held. The article was still read off the wire above, which is
+		// what keeps the stream in step.
+		stream.WriteLine("439 " + msgid + " already have it");
+		return;
+	}
+	std::string why;
+	if (!AcceptOfferedArticle(con, s, article, node, msgid, why)) {
+		stream.WriteLine("439 " + msgid + " " + why);
+		return;
+	}
+	stream.WriteLine("239 " + msgid + " article transferred OK");
+}
+
 void HandlePost(Connection &con, Nntp &s, net::ClientStream &stream, const std::string &node) {
 	if (!s.authed) {
 		stream.WriteLine("440 posting not permitted");
@@ -460,6 +639,12 @@ void HandlePost(Connection &con, Nntp &s, net::ClientStream &stream, const std::
 		stream.WriteLine("441 posting failed: " + err);
 		return;
 	}
+	// An article that arrived with its own Message-ID keeps it: a peer that
+	// offers the same one again has to be told we already have it, and the
+	// derived id would not match what the peer is asking about.
+	std::string incoming_id = header("Message-ID");
+	citadel::RecordMessageId(con, incoming_id.empty() ? citadel::MessageId(msg, node) : incoming_id,
+	                         msgnum);
 	// Keep the session's view of the group current.
 	if (s.have_group) {
 		s.articles = RoomArticles(con, s.room.room_num);
@@ -511,6 +696,13 @@ void HandleNntp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 			stream.WriteLine("LIST ACTIVE NEWSGROUPS OVERVIEW.FMT");
 			stream.WriteLine("OVER");
 			stream.WriteLine("POST");
+			// Advertised only to an authenticated peer: an anonymous session is
+			// refused these below, and a capability offered and then refused is
+			// one a peer keeps trying.
+			if (s.authed) {
+				stream.WriteLine("IHAVE");
+				stream.WriteLine("STREAMING");
+			}
 			if (!stream.IsTls() && ctrl.StartTlsEnabled()) {
 				stream.WriteLine("STARTTLS");
 			}
@@ -531,9 +723,14 @@ void HandleNntp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 				}
 			}
 		} else if (verb == "MODE") {
-			if (util::Upper(Word(line, 1)) == "READER") {
+			std::string mode = util::Upper(Word(line, 1));
+			if (mode == "READER") {
 				// 200 (not Citadel's 201) because posting is permitted.
 				stream.WriteLine("200 Reader mode, posting permitted");
+			} else if (mode == "STREAM") {
+				// RFC 4644: from here the peer may pipeline CHECK and TAKETHIS
+				// without waiting for each reply.
+				stream.WriteLine("203 Streaming permitted");
 			} else {
 				stream.WriteLine("501 unknown mode");
 			}
@@ -590,6 +787,12 @@ void HandleNntp(DatabaseInstance &db, net::ClientStream &stream, ServerControlle
 			HandleOver(con, s, stream, line, node);
 		} else if (verb == "POST") {
 			HandlePost(con, s, stream, node);
+		} else if (verb == "IHAVE") {
+			HandleIhave(con, s, stream, Word(line, 1), node);
+		} else if (verb == "CHECK") {
+			HandleCheck(con, stream, Word(line, 1));
+		} else if (verb == "TAKETHIS") {
+			HandleTakethis(con, s, stream, Word(line, 1), node);
 		} else {
 			stream.WriteLine("500 I'm afraid I can't do that.");
 		}

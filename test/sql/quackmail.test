@@ -299,6 +299,24 @@ SELECT distributed, recipients, digests, note FROM qm_listserv_run();
 ----
 0	0	0	ok
 
+# The expiry worker, and its one-shot. With no policy configured anywhere the
+# sweep must purge nothing -- deleting somebody's mail because no operator ever
+# set a policy would be the worst possible reading of an empty configuration.
+query II
+SELECT purged, note FROM qm_expire_run();
+----
+0	ok
+
+query I
+SELECT note FROM qm_expire_start(poll_secs => 5);
+----
+started
+
+query I
+SELECT note FROM qm_expire_stop();
+----
+stopped
+
 # The fetch worker is the same shape over the same PeriodicWorker.
 query I
 SELECT note FROM qm_fetch_start(poll_secs => 5);

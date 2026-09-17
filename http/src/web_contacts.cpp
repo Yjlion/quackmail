@@ -1,6 +1,8 @@
 #include "web_views.hpp"
 
 #include "quackmail/util.hpp"
+
+#include <set>
 #include "quackmail/vcard.hpp"
 
 #include <algorithm>
@@ -399,23 +401,44 @@ std::vector<std::string> ContactAddressOptions(Ctx &ctx) {
 	if (!ctx.Authed()) {
 		return out;
 	}
-	int64_t room_num = quackmail::citadel::FindUserRoom(ctx.con, ctx.username, "Contacts");
-	if (room_num < 0) {
-		return out;
-	}
-	Room room;
-	if (!quackmail::citadel::GetRoomByNum(ctx.con, room_num, room)) {
-		return out;
-	}
-	for (auto &e : LoadContacts(ctx, room)) {
-		std::string name = e.card.Fn();
-		for (auto &email : e.card.Emails()) {
-			if (email.empty()) {
-				continue;
-			}
-			out.push_back(name.empty() ? email : name + " <" + email + ">");
+	std::set<std::string> seen;
+
+	// The user's own Contacts, then the Global Address Book — which is every
+	// account on this system, now that registering publishes a vCard into it.
+	// Own contacts first, so a colleague the user has their own card for is
+	// offered with the name *they* gave rather than the one the directory has.
+	auto harvest = [&](int64_t room_num) {
+		if (room_num < 0) {
+			return;
 		}
-	}
+		Room room;
+		if (!quackmail::citadel::GetRoomByNum(ctx.con, room_num, room)) {
+			return;
+		}
+		// The address book is a shared room, so it is only offered to somebody
+		// who may actually read it.
+		if (quackmail::citadel::EffectiveRights(ctx.con, ctx.username, room).find('r') ==
+		    std::string::npos) {
+			return;
+		}
+		for (auto &e : LoadContacts(ctx, room)) {
+			std::string name = e.card.Fn();
+			for (auto &email : e.card.Emails()) {
+				if (email.empty()) {
+					continue;
+				}
+				// Dedupe on the address: the same person in both books should
+				// appear once, not twice with different labels.
+				if (!seen.insert(quackmail::util::Lower(email)).second) {
+					continue;
+				}
+				out.push_back(name.empty() ? email : name + " <" + email + ">");
+			}
+		}
+	};
+
+	harvest(quackmail::citadel::FindUserRoom(ctx.con, ctx.username, "Contacts"));
+	harvest(quackmail::citadel::kGlobalAddressBookRoom);
 	return out;
 }
 

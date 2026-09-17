@@ -59,6 +59,8 @@ constexpr int64_t kUserSettableFlags = US_LASTOLD | US_EXPERT | US_UNLISTED | US
 // Reserved room numbers (fixed, seeded ids) — match Citadel's low room numbers.
 constexpr int64_t kLobbyRoom = 0;
 constexpr int64_t kAideRoom = 1;
+// Citadel's ADDRESS_BOOK_ROOM ("Global Address Book"), seeded with this number.
+constexpr int64_t kGlobalAddressBookRoom = 2;
 
 // Access level at which a user is an aide (system administrator).
 constexpr int64_t kAideAxLevel = 6;
@@ -201,6 +203,36 @@ struct Registration {
 };
 
 bool GetRegistration(duckdb::Connection &con, const std::string &username, Registration &out);
+
+// Publish a user's vCard into the Global Address Book (room 2).
+//
+// Citadel does this in serv_vcard.c: when a user's own vCard is written, the
+// server points the *same message* into ADDRESS_BOOK_ROOM — a pointer, not a
+// copy, which is exactly what citadel_room_msgs is. Without it that room stays
+// empty on a real system, which is why nothing has ever been able to look
+// somebody up on this server.
+//
+// Built from the registration when there is one and from the account otherwise,
+// so a user who never ran REGI is still findable by name. Safe to call
+// repeatedly: the card is keyed by euid, so it is replaced rather than
+// duplicated.
+bool PublishUserVcard(duckdb::Connection &con, const std::string &username, std::string &err);
+
+// ---- the Message-ID index ------------------------------------------------
+//
+// "Do I already have this article?" — the whole of NNTP's IHAVE and CHECK.
+// Until this existed the only way to answer was to scan a group, which is fine
+// for a reader fetching one article by id and useless for a peer offering
+// thousands.
+//
+// Records an id against a message number. Idempotent: offering the same article
+// twice records it once.
+void RecordMessageId(duckdb::Connection &con, const std::string &msgid, int64_t msgnum);
+
+// The message this id names, or -1. Also returns -1 when the row exists but the
+// message it pointed at is gone — a stale row must not make the server claim to
+// have an article it cannot serve.
+int64_t FindByMessageId(duckdb::Connection &con, const std::string &msgid);
 bool SetRegistration(duckdb::Connection &con, const std::string &username, const Registration &reg);
 // Replace only the biography, leaving the registration fields alone.
 bool SetBio(duckdb::Connection &con, const std::string &username, const std::string &bio);
@@ -487,6 +519,55 @@ bool MayCreateRoom(duckdb::Connection &con, const std::string &username, int64_t
 // web's floor picker asks "may this user create anywhere at all" before
 // offering a list. Exposed so the `qm_room_create_axlevel` parsing exists once.
 int64_t RoomCreateAxLevel(duckdb::Connection &con);
+
+// Write a configuration value. The read side has been here since the beginning;
+// the write side was hand-rolled as the same upsert in four different places,
+// which is three too many now that the native CONF verb sets values too.
+void SetConfig(duckdb::Connection &con, const std::string &name, const std::string &value);
+
+// Every configuration key and value, sorted by key — what `CONF LISTVAL`
+// answers.
+std::vector<std::pair<std::string, std::string>> ListConfig(duckdb::Connection &con);
+
+// ---- message expiry policy -----------------------------------------------
+//
+// Citadel's model, and deliberately its numbers: a policy is a mode and a
+// value, held at four levels, and a room that says NEXTLEVEL defers to its
+// floor, which defers to the site. The official text client sends GPEX/SPEX
+// with exactly these integers.
+//
+// Worth knowing: the modern Citadel *server* no longer answers GPEX or SPEX at
+// all, though its own client still sends them — so the client's expiry editor
+// talks to nothing. Implementing them here makes it work again.
+enum ExpireMode {
+	EXPIRE_NEXTLEVEL = 0, // inherit from the next level up
+	EXPIRE_MANUAL = 1,    // never purge automatically
+	EXPIRE_NUMMSGS = 2,   // keep at most `value` messages
+	EXPIRE_AGE = 3,       // keep messages younger than `value` days
+};
+
+struct ExpirePolicy {
+	int64_t mode = EXPIRE_NEXTLEVEL;
+	int64_t value = 0;
+
+	ExpirePolicy();
+};
+
+// `which` is one of Citadel's own names: "roompolicy", "floorpolicy",
+// "sitepolicy", "mailboxespolicy". `room` is consulted only for the first two.
+bool GetExpirePolicy(duckdb::Connection &con, const std::string &which, const Room &room,
+                     ExpirePolicy &out);
+bool SetExpirePolicy(duckdb::Connection &con, const std::string &which, const Room &room,
+                     const ExpirePolicy &policy, std::string &err);
+
+// The policy that actually applies to a room, with NEXTLEVEL resolved: room,
+// then its floor, then the site. Never returns NEXTLEVEL.
+ExpirePolicy EffectiveExpirePolicy(duckdb::Connection &con, const Room &room);
+
+// Purge what the policies say to purge. Returns how many messages were
+// unlinked. A QR_PERMANENT room is never swept, which is what that flag has
+// always claimed to mean and never did.
+int64_t RunExpiry(duckdb::Connection &con, std::string &err);
 
 // True when `display_name` would collide with the personal-room keyspace.
 //

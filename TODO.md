@@ -208,6 +208,83 @@ Unreleased, on top of v1.0.1.
         silently — `release.yml`'s hardcoded extension list, which would have
         built and tested fine locally while shipping no artifact.
 
+- [x] **Citadel breadth, part 1: `CONF` and message expiry.** Both were read out
+      of Citadel's own source before a line was written, and both premises in the
+      backlog turned out to be wrong in ways that would have shipped a protocol
+      interoperating with nothing.
+  - [x] **`CONF` is not the positional verb the backlog assumed.** The modern
+        form is key/value — `GETVAL`/`PUTVAL`/`LISTVAL` — which maps straight
+        onto `citadel_config` with no translation at all. The positional
+        `GET`/`SET` still exists, is marked *"deprecated; please do not add
+        fields or change their order"* in `control.c`, and is still sent by
+        Citadel's own text client — so all **73** positions are answered,
+        retired ones included as blank lines, because renumbering to close a gap
+        shifts every field after it. `GETSYS`/`PUTSYS` store stanzas as
+        euid-keyed messages in *Local System Configuration*, which is
+        `UpsertByEuid` and needed no new mechanism.
+  - [x] **There is no `EXPI` verb.** Citadel's is `TDAP`, "manually initiate
+        auto-purger". And the modern Citadel *server* implements neither `GPEX`
+        nor `SPEX`, though its own client still sends them — that client's
+        expiry editor talks to nothing against a real Citadel. It works here.
+  - [x] The policy model is Citadel's, numbers included: next-level, manual, by
+        count, by age, at room / floor / site / mailboxes. With nothing set
+        anywhere the answer is **manual** — deleting mail on the strength of an
+        empty configuration would be the worst available reading of it. And
+        `QR_PERMANENT` finally means something: it has been set on seeded and
+        personal rooms since the beginning and nothing has ever read it.
+  - [x] The sweep is a `PeriodicWorker` with a `qm_expire_run()` one-shot, not
+        another passenger on the 1-in-16 coin flip in `web_router.cpp`. Every
+        other sweep in this tree rides that, which means a site with no web
+        traffic sweeps nothing — tolerable for tombstones, not for the sweep
+        that deletes messages.
+  - [x] A second pass collects `citadel_messages` rows no `citadel_room_msgs`
+        entry points at. `DeleteMessage` deliberately leaves the row when
+        another room still holds a copy, which is right; without the second pass
+        the unreferenced remainder would accumulate forever.
+  - [x] `citadel::SetConfig` and `ListConfig` in core. The read side has been
+        there since the beginning; the write side was the same hand-rolled
+        upsert in four places.
+
+- [x] **Citadel breadth, part 2: the Global Address Book actually has people in
+      it.** The room has been seeded since the beginning and nothing has ever
+      written to it, so nobody could be looked up on this server. Citadel points
+      a user's own vCard into `ADDRESS_BOOK_ROOM` whenever it is written
+      (`serv_vcard.c`); `PublishUserVcard` does the same on `NEWU` and on `REGI`,
+      keyed by euid so re-registering replaces the card rather than leaving a
+      second one.
+  - [x] `GVSN`, `GVEA` and `DVCA` — Citadel's actual verbs. There is no `IGAB`,
+        whatever the backlog said.
+  - [x] **The web composer's recipient picker now sees the directory.**
+        `ContactAddressOptions` read only the user's own Contacts room, so the
+        address book being empty was half the reason it looked thin. Own
+        contacts are harvested first and addresses deduped, so a colleague you
+        have your own card for is offered with the name *you* gave them; the
+        shared room is only offered to somebody who may actually read it.
+
+- [x] **Citadel breadth, part 3: the NNTP peer feed** — `IHAVE`, and
+      `MODE STREAM` with `CHECK`/`TAKETHIS`. This server can now take a news
+      feed from a peer.
+  - [x] **A Message-ID index** (`citadel_msgids`), which is the prerequisite all
+        three verbs turn on. Resolving an id previously meant scanning the
+        selected group — fine for a reader fetching one article, hopeless for a
+        peer offering thousands. The lookup joins `citadel_messages`, so a row
+        whose message has since been purged cannot make this server claim to
+        have an article it can no longer serve; the expiry sweep does not know
+        about this table and should not have to.
+  - [x] **No parity oracle for this one, and that is worth stating.** Citadel's
+        own NNTP implements none of these verbs — it has `ACTIVE`, `AUTHINFO`,
+        `GROUP`, `LISTGROUP`, `NEWSGROUPS` and the article verbs and stops. The
+        RFCs are the spec here, unlike everything else in this section.
+  - [x] Three decisions: a peer must authenticate (the verbs sit after the `480`
+        gate deliberately); an article for a group this server does not carry is
+        refused **permanently** (`437`), because creating a room for every group
+        a peer offers would let one peer fill the room list; and a transit
+        article keeps the `From:` it arrived with, because rewriting it would be
+        forging it.
+  - [x] A `TAKETHIS` for an article already held still reads the article off the
+        wire before answering — otherwise the connection desynchronises, which
+        the test proves by issuing a command after the refusal.
+
 Released work lives in [TODO-archive.md](TODO-archive.md), newest first.
 
 ## Backlog
@@ -244,9 +321,28 @@ The first came out of building 0.6.0 and is the one most likely to bite.
   rather than an index, because a thread id is a function of the References
   header rather than a stored column — fine at BBS scale, wrong at mailbox
   scale.
-- Citadel breadth: `CONF`/config verbs, `EXPI` message expiry, address books /
-  vCard rooms, the Citadel network mesh (inter-node replication, and with it the
-  NNTP peer-feed verbs `IHAVE`/`CHECK`/`TAKETHIS`).
+- Citadel breadth, what is left. `CONF` and expiry have shipped (above).
+  Remaining:
+  - **The native file-transfer verbs** — `OPEN`/`READ`/`CLOS`/`UOPN`/`UCLS`/
+    `WRIT`, plus `DELF`/`MOVF` and the `RDIR`/`QDIR` listings. These sit on the
+    file areas that already exist, and would give the official `citadel` text
+    client downloads. The best-specified piece left, and the natural follow-on
+    to the file-area work.
+  - **Address books** have shipped (above). What is left of them is the
+    per-user `My Citadel Config` room Citadel keeps a user's own card in; this
+    publishes straight to the shared book instead, which is the half that
+    mattered.
+  - **The Citadel network mesh is gone from Citadel**, and this entry should
+    not have survived as long as it did. Modern Citadel's per-room netconfig
+    accepts exactly seven keys — `listrecp`, `lastsent`, `roommailalias`,
+    `pop3client`, `rssclient`, `subpending`, `unsubpending` (`netconfig.c`) —
+    which is mailing lists, POP3 pulls, RSS and list subscriptions. There is no
+    node list, no `ignet_push_share`, no inter-node replication anywhere in the
+    tree. **QuackCit already implements every one of those seven**, through
+    `listserv`, `mail_client` and `fetch`. So there is nothing here to mirror;
+    anyone wanting inter-node replication would be designing it, not porting it.
+    The NNTP peer-feed half has shipped (above) and is the part that turned out
+    to be real.
 - SMTP: PIPELINING, CHUNKING/BDAT, DSN.
 - Mail authentication depth: DMARC aggregate (`rua`) reports; ARC, so forwarded
   mail keeps an authenticated chain; MTA-STS / DANE for outbound transport.

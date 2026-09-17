@@ -1,6 +1,7 @@
 #include "quackmail/citadel_store.hpp"
 
 #include "quackmail/citadel_msg.hpp"
+#include "quackmail/vcard.hpp"
 #include "quackmail/quota.hpp"
 #include "quackmail/wiki.hpp"
 
@@ -313,6 +314,25 @@ void EnsureCitadelSchema(Connection &con) {
 		)
 	)");
 	con.Query("CREATE INDEX IF NOT EXISTS idx_dav_locks_res ON citadel_dav_locks(room_num, resource)");
+
+	// RFC 822 Message-ID -> message number.
+	//
+	// "Do I already have this article?" is the whole of NNTP's IHAVE and CHECK,
+	// and until now there was no way to answer it: the ARTICLE-by-message-id
+	// path scans the current group, which is fine for a reader fetching one
+	// article and useless for a peer offering thousands.
+	//
+	// A separate table rather than a column on citadel_messages, because a
+	// message's id is derived (see citadel::MessageId) rather than stored, and
+	// because a row here is only worth having for messages that arrived from
+	// somewhere else or are offered outward.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_msgids (
+			msgid  VARCHAR PRIMARY KEY,
+			msgnum BIGINT
+		)
+	)");
+	con.Query("CREATE INDEX IF NOT EXISTS idx_msgids_msgnum ON citadel_msgids(msgnum)");
 
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_state (
@@ -1732,6 +1752,296 @@ std::vector<int64_t> CreatableFloors(Connection &con, const std::string &usernam
 	}
 	std::sort(out.begin(), out.end());
 	return out;
+}
+
+// ---- the Message-ID index ------------------------------------------------
+
+void RecordMessageId(Connection &con, const std::string &msgid, int64_t msgnum) {
+	if (msgid.empty() || msgnum <= 0) {
+		return;
+	}
+	ExecP(con,
+	      "INSERT INTO citadel_msgids (msgid, msgnum) VALUES ($1, $2) "
+	      "ON CONFLICT (msgid) DO UPDATE SET msgnum = excluded.msgnum",
+	      {Value(msgid), Value::BIGINT(msgnum)});
+}
+
+int64_t FindByMessageId(Connection &con, const std::string &msgid) {
+	if (msgid.empty()) {
+		return -1;
+	}
+	// The join is the point: a row whose message has since been purged must not
+	// make this server claim to have an article it can no longer serve. An
+	// expiry sweep does not know about this table, and should not have to.
+	auto v = ScalarP(con,
+	                 "SELECT i.msgnum FROM citadel_msgids i "
+	                 "JOIN citadel_messages m ON m.msgnum = i.msgnum WHERE i.msgid = $1",
+	                 {Value(msgid)});
+	return v.IsNull() ? -1 : v.GetValue<int64_t>();
+}
+
+// ---- the Global Address Book --------------------------------------------
+
+bool PublishUserVcard(Connection &con, const std::string &username, std::string &err) {
+	if (username.empty()) {
+		err = "no user";
+		return false;
+	}
+	int64_t usernum = GetOrAssignUserNum(con, username);
+	if (usernum == 0) {
+		// Returns 0 for a user that does not exist; it does not create one.
+		err = "no such user";
+		return false;
+	}
+
+	Registration reg;
+	GetRegistration(con, username, reg);
+
+	// The euid is stable per user, so re-registering replaces the card rather
+	// than leaving a second one behind. Citadel keys a vCard by its own UID;
+	// this is that UID, chosen so it cannot collide with a contact somebody
+	// imported.
+	std::string uid = "user-" + std::to_string(usernum) + "@" + GetConfig(con, "c_nodename", "quackcit");
+
+	vcard::Card card;
+	card.version = 3;
+	card.Set("UID", uid);
+	// FN is what a lookup shows. The real name when they gave one, the account
+	// name otherwise -- never empty, because a card with no label cannot be
+	// listed.
+	card.Set("FN", reg.real_name.empty() ? username : reg.real_name);
+	if (!reg.real_name.empty()) {
+		// N wants five components; we only ever know the whole string, so it
+		// goes in the family slot rather than being split on a guess about
+		// which word is the surname.
+		card.SetComponents("N", {reg.real_name, "", "", "", ""});
+	} else {
+		card.SetComponents("N", {username, "", "", "", ""});
+	}
+	card.Set("NICKNAME", username);
+	std::string email = reg.email;
+	if (email.empty()) {
+		email = username + "@" + GetConfig(con, "c_fqdn", GetConfig(con, "c_nodename", "quackcit"));
+	}
+	card.Set("EMAIL", email);
+	if (!reg.phone.empty()) {
+		card.Set("TEL", reg.phone);
+	}
+	if (!reg.street.empty() || !reg.city.empty() || !reg.state.empty() || !reg.zipcode.empty() ||
+	    !reg.country.empty()) {
+		card.SetComponents("ADR", {"", "", reg.street, reg.city, reg.state, reg.zipcode, reg.country});
+	}
+
+	Message msg;
+	msg.euid = uid;
+	msg.subject = card.Fn();
+	msg.author = username;
+	msg.msgtime = (int64_t)std::time(nullptr);
+	msg.format_type = 4;
+	msg.raw = WrapObject("text/vcard", vcard::Emit(card, 3), card.Fn(), uid, username,
+	                     GetConfig(con, "c_nodename", "quackcit"));
+
+	return UpsertByEuid(con, msg, kGlobalAddressBookRoom, err) >= 0;
+}
+
+ExpirePolicy::ExpirePolicy() {
+}
+
+void SetConfig(Connection &con, const std::string &name, const std::string &value) {
+	ExecP(con,
+	      "INSERT INTO citadel_config (name, value) VALUES ($1, $2) "
+	      "ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+	      {Value(name), Value(value)});
+}
+
+std::vector<std::pair<std::string, std::string>> ListConfig(Connection &con) {
+	std::vector<std::pair<std::string, std::string>> out;
+	auto r = con.Query("SELECT name, value FROM citadel_config ORDER BY name");
+	if (!r || r->HasError()) {
+		return out;
+	}
+	auto &mat = r->Cast<MaterializedQueryResult>();
+	for (idx_t i = 0; i < mat.RowCount(); i++) {
+		out.emplace_back(mat.GetValue(0, i).ToString(), mat.GetValue(1, i).ToString());
+	}
+	return out;
+}
+
+// ---- expiry policy -------------------------------------------------------
+//
+// Held in citadel_config rather than in new columns on citadel_rooms and
+// citadel_floors. That table is already a keyed store, it needs no migration on
+// an existing database, and a policy is read once per sweep rather than per
+// message — so the join a column would save is not a cost worth a schema change.
+namespace {
+
+std::string ExpireKey(const std::string &which, const Room &room) {
+	if (which == "roompolicy") {
+		return "c_ep_room_" + std::to_string(room.room_num);
+	}
+	if (which == "floorpolicy") {
+		return "c_ep_floor_" + std::to_string(room.floor_num);
+	}
+	if (which == "mailboxespolicy") {
+		return "c_ep_mailboxes";
+	}
+	return "c_ep_site";
+}
+
+bool ValidWhich(const std::string &which) {
+	return which == "roompolicy" || which == "floorpolicy" || which == "sitepolicy" ||
+	       which == "mailboxespolicy";
+}
+
+ExpirePolicy ReadPolicy(Connection &con, const std::string &key) {
+	ExpirePolicy p;
+	std::string raw = GetConfig(con, key, "");
+	if (raw.empty()) {
+		return p;
+	}
+	size_t bar = raw.find('|');
+	if (bar == std::string::npos) {
+		return p;
+	}
+	p.mode = std::strtoll(raw.substr(0, bar).c_str(), nullptr, 10);
+	p.value = std::strtoll(raw.substr(bar + 1).c_str(), nullptr, 10);
+	if (p.mode < EXPIRE_NEXTLEVEL || p.mode > EXPIRE_AGE) {
+		p.mode = EXPIRE_NEXTLEVEL;
+		p.value = 0;
+	}
+	return p;
+}
+
+} // namespace
+
+bool GetExpirePolicy(Connection &con, const std::string &which, const Room &room,
+                     ExpirePolicy &out) {
+	if (!ValidWhich(which)) {
+		return false;
+	}
+	out = ReadPolicy(con, ExpireKey(which, room));
+	return true;
+}
+
+bool SetExpirePolicy(Connection &con, const std::string &which, const Room &room,
+                     const ExpirePolicy &policy, std::string &err) {
+	if (!ValidWhich(which)) {
+		err = "Unknown policy level.";
+		return false;
+	}
+	if (policy.mode < EXPIRE_NEXTLEVEL || policy.mode > EXPIRE_AGE) {
+		err = "Unknown expiry mode.";
+		return false;
+	}
+	// The client refuses to send it and the server refuses to store it: a count
+	// or an age of zero would mean "purge everything", which is never what
+	// somebody setting a policy meant.
+	if (policy.mode >= EXPIRE_NUMMSGS && policy.value < 1) {
+		err = "That expiry mode needs a value of at least 1.";
+		return false;
+	}
+	SetConfig(con, ExpireKey(which, room),
+	          std::to_string(policy.mode) + "|" + std::to_string(policy.value));
+	return true;
+}
+
+ExpirePolicy EffectiveExpirePolicy(Connection &con, const Room &room) {
+	// Room, then floor, then site — and "mailboxespolicy" instead of the site
+	// for a personal room, which is the whole reason that fourth level exists.
+	ExpirePolicy p = ReadPolicy(con, ExpireKey("roompolicy", room));
+	if (p.mode != EXPIRE_NEXTLEVEL) {
+		return p;
+	}
+	if (room.qr_flags & QR_MAILBOX) {
+		p = ReadPolicy(con, "c_ep_mailboxes");
+		if (p.mode != EXPIRE_NEXTLEVEL) {
+			return p;
+		}
+	} else {
+		p = ReadPolicy(con, ExpireKey("floorpolicy", room));
+		if (p.mode != EXPIRE_NEXTLEVEL) {
+			return p;
+		}
+	}
+	p = ReadPolicy(con, "c_ep_site");
+	if (p.mode == EXPIRE_NEXTLEVEL) {
+		// Nothing configured anywhere. MANUAL rather than a made-up default:
+		// deleting somebody's mail because no operator ever set a policy would
+		// be the worst possible reading of an empty configuration.
+		p.mode = EXPIRE_MANUAL;
+		p.value = 0;
+	}
+	return p;
+}
+
+int64_t RunExpiry(Connection &con, std::string &err) {
+	int64_t purged = 0;
+	int64_t now = (int64_t)std::time(nullptr);
+
+	// Every room, not one user's view of them: ListRooms applies the
+	// private-room visibility rules, which is exactly wrong for a sweep that has
+	// to consider rooms nobody can currently see.
+	std::vector<Room> rooms;
+	{
+		auto rq = con.Query("SELECT room_num, floor_num, qr_flags FROM citadel_rooms ORDER BY room_num");
+		if (!rq || rq->HasError()) {
+			err = rq ? rq->GetError() : std::string("could not list rooms");
+			return 0;
+		}
+		auto &mat = rq->Cast<MaterializedQueryResult>();
+		for (idx_t i = 0; i < mat.RowCount(); i++) {
+			Room r;
+			r.room_num = mat.GetValue(0, i).GetValue<int64_t>();
+			r.floor_num = mat.GetValue(1, i).GetValue<int64_t>();
+			r.qr_flags = mat.GetValue(2, i).GetValue<int64_t>();
+			rooms.push_back(r);
+		}
+	}
+
+	for (const auto &room : rooms) {
+		// QR_PERMANENT has been set on seeded and personal rooms since the
+		// beginning and has never done anything. This is the thing it meant.
+		if (room.qr_flags & QR_PERMANENT) {
+			continue;
+		}
+		ExpirePolicy p = EffectiveExpirePolicy(con, room);
+		if (p.mode == EXPIRE_MANUAL || p.mode == EXPIRE_NEXTLEVEL) {
+			continue;
+		}
+		auto msgnums = RoomMessages(con, room.room_num, "all", 0, 0);
+		std::vector<int64_t> doomed;
+		if (p.mode == EXPIRE_NUMMSGS) {
+			if ((int64_t)msgnums.size() > p.value) {
+				// RoomMessages is ascending, so the oldest are at the front.
+				doomed.assign(msgnums.begin(), msgnums.end() - (size_t)p.value);
+			}
+		} else if (p.mode == EXPIRE_AGE) {
+			int64_t cutoff = now - p.value * 86400;
+			for (int64_t msgnum : msgnums) {
+				Message msg;
+				if (LoadMessage(con, msgnum, msg) && msg.msgtime > 0 && msg.msgtime < cutoff) {
+					doomed.push_back(msgnum);
+				}
+			}
+		}
+		for (int64_t msgnum : doomed) {
+			std::string derr;
+			if (DeleteMessage(con, room.room_num, msgnum, derr)) {
+				purged++;
+			}
+		}
+	}
+
+	// Second pass: DeleteMessage unlinks a message from one room and leaves the
+	// row when another room still points at it, which is right — a copy filed
+	// elsewhere must survive. But a row nothing points at any more is storage
+	// nobody can reach, and without this it would accumulate forever.
+	auto r = con.Query("DELETE FROM citadel_messages WHERE msgnum NOT IN "
+	                   "(SELECT msgnum FROM citadel_room_msgs)");
+	if (r && r->HasError()) {
+		err = r->GetError();
+	}
+	return purged;
 }
 
 int64_t RoomCreateAxLevel(Connection &con) {
