@@ -24,11 +24,46 @@ they live in `quackcit_services()` in
 | NNTP / NNTPS | `quackmail_nntp` | 119 (1119) / 563 (1563) | STARTTLS / implicit |
 | XMPP / XMPPS | `quackmail_xmpp` | 5222 (15222) / 5223 (15223) | STARTTLS / implicit |
 | Telnet / Telnets | `quackmail_telnet` | 23 (2300) / 992 (2992) | none / implicit |
+| FTP / FTPS | `quackmail_ftp` | 21 (1021) / 990 (1990) | AUTH TLS / implicit |
 | HTTP / HTTPS | `quackmail_http` | 80 (8080) / 443 (8443) | none / implicit |
 
 `quackmail_spool` binds nothing: it is the timer-driven half (mailing lists,
 remote pulls, certificate renewal). See [Mailing lists and feeds](lists.md) and
 [TLS](tls.md).
+
+## FTP and FTPS
+
+A third front door onto the **file areas** — the same rooms, flags and
+permissions the telnet `.RF` family and `/dav/files/` use. Nothing about a file
+is stored twice.
+
+The filesystem is two levels and no deeper, because a Citadel room has no
+sub-rooms: `/` lists the file areas you can see, `/<room>/` lists its files.
+`MKD` creates a directory room (same permission as creating one anywhere else),
+`RMD` removes one, and `RNFR`/`RNTO` renames a file — which is a store under the
+new name and a remove of the old, because the name *is* the message's euid.
+
+Verbs: `USER`, `PASS`, `AUTH`, `PBSZ`, `PROT`, `SYST`, `FEAT`, `OPTS`, `TYPE`,
+`PWD`, `CWD`, `CDUP`, `PASV`, `EPSV`, `LIST`, `NLST`, `MLSD`, `MLST`, `RETR`,
+`STOR`, `DELE`, `SIZE`, `MDTM`, `MKD`, `RMD`, `RNFR`/`RNTO`, `NOOP`, `QUIT`.
+
+Three deliberate refusals:
+
+- **Cleartext credentials are refused by default.** `USER`/`PASS` before
+  `AUTH TLS` answers `534` unless `qm_ftp_allow_cleartext` is set. Every other
+  protocol here has a TLS story; plain FTP on port 21 should be the opt-in.
+- **`PORT`/`EPRT` answer `502`.** Active mode makes the server dial an address
+  the client names, which is a port-scanning primitive and useless behind NAT.
+  Passive only.
+- **No `APPE`, `REST` or `STOU`.** A file is one message written whole; there is
+  nothing to resume into.
+
+The passive data port is chosen by the kernel unless `qm_ftp_pasv_low` and
+`qm_ftp_pasv_high` bound it, which a deployment behind a firewall needs. The
+listener binds `AF_INET`, so `EPSV` reports IPv4. `PROT P` wraps the data
+connection in TLS from the control connection's context; a client that insists
+on TLS session reuse between the two (vsftpd's `require_ssl_reuse` posture) will
+not be satisfied, because the sessions are not shared.
 
 ## Citadel (native)
 

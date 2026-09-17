@@ -55,8 +55,8 @@ GEN=ninja CMAKE_BUILD_PARALLEL_LEVEL=2 make release
 ```
 
 The first DuckDB build takes ~20–40 minutes; incremental rebuilds are fast,
-**except** that anything under `core/` is compiled into all twelve extensions,
-so touching `core/src/*.cpp` or a header they share is a twelve-way rebuild.
+**except** that anything under `core/` is compiled into all thirteen extensions,
+so touching `core/src/*.cpp` or a header they share is a thirteen-way rebuild.
 
 See the `add-listener`, `add-module`, and `add-worker` skills for the
 step-by-step checklists on adding a network listener, a new extension module,

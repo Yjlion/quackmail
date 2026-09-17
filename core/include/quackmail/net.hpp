@@ -19,6 +19,26 @@ namespace net {
 // kernel's full retry schedule, which is minutes.
 int Connect(const std::string &host, int port, int timeout_ms, std::string &err);
 
+// Bind a listening socket on an ephemeral port and report which one. Returns the
+// listening fd, or -1 with `err` set; `port` is filled in on success.
+//
+// This is not what ServerController does. That owns one long-lived listener and
+// an accept thread per protocol; this is a socket that exists for one transfer
+// and is closed again — an FTP passive data channel, where the client is told a
+// port and connects back to it.
+//
+// `low`/`high` bound the port range, for a deployment behind a firewall that has
+// to open a fixed window. 0/0 lets the kernel choose.
+int ListenEphemeral(const std::string &host, int low, int high, int &port, std::string &err);
+
+// Accept exactly one connection on `listen_fd`, giving up after `timeout_ms`.
+// Returns the accepted fd, or -1 with `err` set. The listening socket is the
+// caller's to close either way.
+//
+// Bounded on purpose: a data channel a client never connects to must not hold a
+// session thread for the kernel's own timeout.
+int AcceptOnce(int listen_fd, int timeout_ms, std::string &err);
+
 // A connected client socket, optionally wrapped in TLS. Provides buffered line
 // reading (CRLF-terminated) suitable for text mail protocols, plus an in-band
 // STARTTLS upgrade.

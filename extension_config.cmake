@@ -41,6 +41,11 @@ duckdb_extension_load(quackmail_pop3
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/pop3
 )
 
+# FTP / FTPS over the Citadel file areas (rooms are directories).
+duckdb_extension_load(quackmail_ftp
+    SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/ftp
+)
+
 # NNTP / NNTPS news reader + poster (rooms are newsgroups).
 duckdb_extension_load(quackmail_nntp
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/nntp

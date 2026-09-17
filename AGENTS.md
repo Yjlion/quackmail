@@ -1,6 +1,6 @@
 # AGENTS.md
 
-QuackMail (QuackCit) is a Citadel BBS/groupware server implemented as 12
+QuackMail (QuackCit) is a Citadel BBS/groupware server implemented as 13
 loadable DuckDB extensions in C++17. The shared core compiles once into a
 static library linked into every extension. See [CLAUDE.md](CLAUDE.md) for
 full architecture, gotchas, and the reuse API catalog ([docs/contributing.md](docs/contributing.md)
@@ -21,7 +21,7 @@ GEN=ninja CMAKE_BUILD_PARALLEL_LEVEL=2 make release
 ```
 
 **Core changes are expensive.** Every `core/src/*.cpp` or shared header is
-compiled into all 12 extensions. One core edit → 12 extension rebuilds.
+compiled into all 13 extensions. One core edit → 13 extension rebuilds.
 
 ## Test
 

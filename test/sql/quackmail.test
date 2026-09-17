@@ -16,6 +16,8 @@ require quackmail_telnet
 
 require quackmail_nntp
 
+require quackmail_ftp
+
 require quackmail_xmpp
 
 require quackmail_http
@@ -188,6 +190,29 @@ stopped
 
 query I
 SELECT note FROM qm_nntps_stop();
+----
+stopped
+
+# FTP and FTPS. A file area is a room, so this extension binds a port and
+# stores nothing of its own -- but it still has to load, start and stop like
+# every other listener, which is what this cycle is for.
+query I
+SELECT note FROM qm_ftp_start('127.0.0.1', 11021, starttls => true);
+----
+started
+
+query I
+SELECT note FROM qm_ftps_start('127.0.0.1', 11990, implicit_tls => true);
+----
+started
+
+query I
+SELECT note FROM qm_ftp_stop();
+----
+stopped
+
+query I
+SELECT note FROM qm_ftps_stop();
 ----
 stopped
 

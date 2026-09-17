@@ -712,32 +712,29 @@ void PostRoomFeedRun(Ctx &ctx) {
 
 // Site-wide gate: does this user's access level alone clear the bar an operator
 // set? Independent of any particular room or floor.
+//
+// The bar itself is citadel::RoomCreateAxLevel, so the config parsing exists
+// once rather than here and again in core. This is the session's answer to it —
+// ctx.axlevel is read at login, which is what the rest of the request already
+// trusts.
 bool AxLevelMayCreateRooms(const Ctx &ctx) {
 	if (!ctx.Authed()) {
 		return false;
 	}
-	// Defaults to the aide level, so nothing changes on an existing server until
-	// an operator lowers it. A value that is not a number is treated as the
-	// default rather than as 0 — a typo must not open the door.
-	std::string want = ConfigStr(ctx.con, "qm_room_create_axlevel", "");
-	int64_t level = quackmail::citadel::kAideAxLevel;
-	if (!want.empty()) {
-		char *end = nullptr;
-		long parsed = std::strtol(want.c_str(), &end, 10);
-		if (end != want.c_str() && *end == '\0' && parsed >= 0 && parsed <= 6) {
-			level = (int64_t)parsed;
-		}
-	}
-	return ctx.axlevel >= level;
+	return ctx.axlevel >= quackmail::citadel::RoomCreateAxLevel(ctx.con);
 }
 
 // May `username` create a room on `floor` specifically — the axlevel gate, or a
 // `k` grant on some room they can see on that floor.
+//
+// The rule itself lives in citadel::MayCreateRoom, because three front doors ask
+// it now: this one, DAV's MKCOL and FTP's MKD. This is the web's wrapper around
+// it, and nothing more.
 bool MayCreateRoomOnFloor(const Ctx &ctx, int64_t floor) {
 	if (!ctx.Authed()) {
 		return false;
 	}
-	return AxLevelMayCreateRooms(ctx) || quackmail::citadel::CanCreateRoomOnFloor(ctx.con, ctx.username, floor);
+	return quackmail::citadel::MayCreateRoom(ctx.con, ctx.username, floor);
 }
 
 namespace {
