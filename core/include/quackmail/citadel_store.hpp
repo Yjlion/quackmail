@@ -488,6 +488,55 @@ bool MayCreateRoom(duckdb::Connection &con, const std::string &username, int64_t
 // offering a list. Exposed so the `qm_room_create_axlevel` parsing exists once.
 int64_t RoomCreateAxLevel(duckdb::Connection &con);
 
+// Write a configuration value. The read side has been here since the beginning;
+// the write side was hand-rolled as the same upsert in four different places,
+// which is three too many now that the native CONF verb sets values too.
+void SetConfig(duckdb::Connection &con, const std::string &name, const std::string &value);
+
+// Every configuration key and value, sorted by key — what `CONF LISTVAL`
+// answers.
+std::vector<std::pair<std::string, std::string>> ListConfig(duckdb::Connection &con);
+
+// ---- message expiry policy -----------------------------------------------
+//
+// Citadel's model, and deliberately its numbers: a policy is a mode and a
+// value, held at four levels, and a room that says NEXTLEVEL defers to its
+// floor, which defers to the site. The official text client sends GPEX/SPEX
+// with exactly these integers.
+//
+// Worth knowing: the modern Citadel *server* no longer answers GPEX or SPEX at
+// all, though its own client still sends them — so the client's expiry editor
+// talks to nothing. Implementing them here makes it work again.
+enum ExpireMode {
+	EXPIRE_NEXTLEVEL = 0, // inherit from the next level up
+	EXPIRE_MANUAL = 1,    // never purge automatically
+	EXPIRE_NUMMSGS = 2,   // keep at most `value` messages
+	EXPIRE_AGE = 3,       // keep messages younger than `value` days
+};
+
+struct ExpirePolicy {
+	int64_t mode = EXPIRE_NEXTLEVEL;
+	int64_t value = 0;
+
+	ExpirePolicy();
+};
+
+// `which` is one of Citadel's own names: "roompolicy", "floorpolicy",
+// "sitepolicy", "mailboxespolicy". `room` is consulted only for the first two.
+bool GetExpirePolicy(duckdb::Connection &con, const std::string &which, const Room &room,
+                     ExpirePolicy &out);
+bool SetExpirePolicy(duckdb::Connection &con, const std::string &which, const Room &room,
+                     const ExpirePolicy &policy, std::string &err);
+
+// The policy that actually applies to a room, with NEXTLEVEL resolved: room,
+// then its floor, then the site. Never returns NEXTLEVEL.
+ExpirePolicy EffectiveExpirePolicy(duckdb::Connection &con, const Room &room);
+
+// Purge what the policies say to purge. Returns how many messages were
+// unlinked. A QR_PERMANENT room is never swept, which is what that flag has
+// always claimed to mean and never did.
+int64_t RunExpiry(duckdb::Connection &con, std::string &err);
+
 // True when `display_name` would collide with the personal-room keyspace.
 //
 // A public room's internal key *is* its display name, while a personal room's is

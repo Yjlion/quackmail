@@ -389,6 +389,262 @@ void HandleMsg2(Connection &con, net::ClientStream &stream, const std::vector<st
 // cmd_regi() reads it in the real server (serv_vcard.c): name, address, city,
 // state, zip, telephone, e-mail, country. The same record the BBS shell's
 // <.E>nter re<G>istration and the web console's preferences page write.
+// ---- CONF: get and set system configuration ------------------------------
+//
+// Taken from citadel/server/control.c, cmd_conf(). Five sub-commands, and the
+// first two are marked deprecated *in Citadel's own source* -- "please do not
+// add fields or change their order" -- but the official text client still sends
+// them, so they have to work.
+//
+//   CONF GET              the legacy positional list, 72 lines then 000
+//   CONF SET              the same list back, terminated by 000
+//   CONF GETVAL|<key>     one value:  "200 <value>|"
+//   CONF PUTVAL|<key>|<v> set one:    "200 setting '<k>' to '<v>'"
+//   CONF LISTVAL          every key:  "100 ...", then "<key>|<value>" lines
+//   CONF GETSYS|<mime>    a stanza out of the SYSCONFIG room
+//   CONF PUTSYS|<mime>    store one
+//
+// GETVAL/PUTVAL/LISTVAL map straight onto citadel_config, which is already a
+// keyed store -- so the modern half of this verb needs no translation at all.
+// The positional half does, and that table is below.
+
+// The legacy CONF GET/SET field order, verbatim from control.c. An empty name
+// is a position Citadel abandoned: it still occupies a line on the wire, and
+// renumbering to close the gap would break every client.
+struct ConfField {
+	const char *name; // "" = a retired position
+	bool numeric;
+};
+
+const ConfField kConfFields[] = {
+    {"c_nodename", false},    {"c_fqdn", false},        {"c_humannode", false},
+    {"", false},              {"c_creataide", true},    {"c_sleeping", true},
+    {"c_initax", true},       {"c_regiscall", true},    {"c_twitdetect", true},
+    {"c_twitroom", false},    {"c_moreprompt", false},  {"c_restrict", true},
+    {"c_site_location", false}, {"c_sysadm", false},    {"c_maxsessions", true},
+    {"", false},              {"c_userpurge", true},    {"c_roompurge", true},
+    {"c_logpages", false},    {"c_createax", true},     {"c_maxmsglen", true},
+    {"c_min_workers", true},  {"c_max_workers", true},  {"c_pop3_port", true},
+    {"c_smtp_port", true},    {"c_rfc822_strict_from", true}, {"c_aide_zap", true},
+    {"c_imap_port", true},    {"", false},              {"c_disable_newu", true},
+    {"", false},              {"c_purge_hour", true},   {"c_ldap_host", false},
+    {"c_ldap_port", true},    {"c_ldap_base_dn", false}, {"c_ldap_bind_dn", false},
+    {"c_ldap_bind_pw", false}, {"c_ip_addr", false},    {"c_msa_port", true},
+    {"c_imaps_port", true},   {"c_pop3s_port", true},   {"c_smtps_port", true},
+    {"c_enable_fulltext", true}, {"c_ldap_admin_group", false}, {"", false},
+    {"c_allow_spoofing", true}, {"c_journal_email", true}, {"c_journal_pubmsgs", true},
+    {"c_journal_dest", false}, {"c_default_cal_zone", false}, {"c_pftcpdict_port", true},
+    {"", false},              {"c_auth_mode", true},    {"", false},
+    {"", false},              {"", false},              {"", false},
+    {"c_rbl_at_greeting", true}, {"", false},           {"", false},
+    {"c_pager_program", false}, {"c_imap_keep_from", true}, {"c_xmpp_c2s_port", true},
+    {"c_xmpp_s2s_port", true}, {"c_pop3_fetch", true},  {"c_pop3_fastest", true},
+    {"c_spam_flag_only", true}, {"c_guest_logins", true}, {"c_port_number", true},
+    {"c_ctdluid", true},      {"c_nntp_port", true},    {"c_nntps_port", true},
+    {"smtp_advertise_starttls", true},
+};
+
+// The room arbitrary configuration stanzas live in, keyed by MIME type. Citadel
+// calls it "Local System Configuration"; CtdlGetSysConfig/CtdlPutSysConfig read
+// and write euid-keyed messages there, which is exactly UpsertByEuid here.
+const char *const kSysConfigRoom = "Local System Configuration";
+
+int64_t SysConfigRoom(Connection &con) {
+	citadel::Room room;
+	if (citadel::ResolveRoom(con, std::string(), kSysConfigRoom, room)) {
+		return room.room_num;
+	}
+	std::string err;
+	// QR_PERMANENT|QR_PRIVATE: it is not a room anybody reads, and it must not
+	// be purged when it happens to be empty.
+	int64_t num = citadel::CreateRoom(con, kSysConfigRoom, 0,
+	                                  citadel::QR_PERMANENT | citadel::QR_PRIVATE, "", 0, err);
+	return num;
+}
+
+void HandleConf(Connection &con, Session &s, net::ClientStream &stream, const std::string &rest) {
+	if (s.axlevel < citadel::kAideAxLevel) {
+		stream.WriteLine("540 Higher access required.");
+		return;
+	}
+	std::string sub = util::Upper(Field(SplitPipe(rest), 0));
+
+	if (sub == "GET") {
+		std::vector<std::string> lines;
+		for (const auto &f : kConfFields) {
+			lines.push_back(f.name[0] == '\0'
+			                    ? std::string()
+			                    : citadel::GetConfig(con, f.name, f.numeric ? "0" : ""));
+		}
+		WriteListing(stream, lines, "Configuration...");
+		return;
+	}
+	if (sub == "SET") {
+		stream.WriteLine("400 Send configuration...");
+		std::string line;
+		size_t at = 0;
+		const size_t count = sizeof(kConfFields) / sizeof(kConfFields[0]);
+		while (stream.ReadLine(line, 8192)) {
+			if (line == "000") {
+				break;
+			}
+			// A retired position is read and discarded rather than skipped: the
+			// client sends a line for it either way, and treating it as the next
+			// live field would shift everything after it.
+			if (at < count && kConfFields[at].name[0] != '\0') {
+				citadel::SetConfig(con, kConfFields[at].name, line);
+			}
+			at++;
+		}
+		// No reply: control.c's SET branch ends silently, and a client that
+		// waited for one would hang. What it does do is log to the Aide room,
+		// which is the only record that the configuration changed at all.
+		citadel::PostAideMessage(con, "Citadel Configuration Manager Message",
+		                         "The global system configuration has been edited by " +
+		                             (s.username.empty() ? std::string("an administrator") : s.username) +
+		                             ".\n");
+		return;
+	}
+	if (sub == "GETVAL") {
+		std::string key = Field(SplitPipe(rest), 1);
+		std::string v = citadel::GetConfig(con, key, "");
+		if (v.empty()) {
+			stream.WriteLine("500 |");
+		} else {
+			stream.WriteLine("200 " + v + "|");
+		}
+		return;
+	}
+	if (sub == "PUTVAL") {
+		std::string key = Field(SplitPipe(rest), 1);
+		if (key.empty()) {
+			stream.WriteLine("500 name and value required");
+			return;
+		}
+		std::string value = Field(SplitPipe(rest), 2);
+		citadel::SetConfig(con, key, value);
+		stream.WriteLine("200 setting '" + key + "' to '" + value + "'");
+		return;
+	}
+	if (sub == "LISTVAL") {
+		std::vector<std::string> lines;
+		for (const auto &kv : citadel::ListConfig(con)) {
+			lines.push_back(kv.first + "|" + kv.second);
+		}
+		WriteListing(stream, lines, "all configuration variables");
+		return;
+	}
+	if (sub == "GETSYS") {
+		std::string name = Field(SplitPipe(rest), 1);
+		int64_t room = SysConfigRoom(con);
+		int64_t msgnum = room >= 0 ? citadel::FindByEuid(con, room, name) : -1;
+		citadel::Message msg;
+		if (msgnum <= 0 || !citadel::LoadMessage(con, msgnum, msg)) {
+			stream.WriteLine("550 No such configuration.");
+			return;
+		}
+		std::vector<std::string> lines;
+		std::string body = citadel::BodyText(msg);
+		size_t at = 0;
+		while (at <= body.size() && !body.empty()) {
+			size_t nl = body.find('\n', at);
+			if (nl == std::string::npos) {
+				if (at < body.size()) {
+					lines.push_back(body.substr(at));
+				}
+				break;
+			}
+			lines.push_back(body.substr(at, nl - at));
+			at = nl + 1;
+		}
+		WriteListing(stream, lines, name);
+		return;
+	}
+	if (sub == "PUTSYS") {
+		std::string name = Field(SplitPipe(rest), 1);
+		stream.WriteLine("400 " + name);
+		std::string body;
+		std::string line;
+		while (stream.ReadLine(line, 8192)) {
+			if (line == "000") {
+				break;
+			}
+			body += line + "\n";
+		}
+		int64_t room = SysConfigRoom(con);
+		if (room < 0) {
+			return;
+		}
+		citadel::Message msg;
+		msg.euid = name;
+		msg.subject = name;
+		msg.author = s.username.empty() ? std::string("Citadel") : s.username;
+		msg.msgtime = (int64_t)std::time(nullptr);
+		msg.format_type = 0;
+		msg.raw = body;
+		std::string err;
+		citadel::UpsertByEuid(con, msg, room, err);
+		return;
+	}
+	stream.WriteLine("550 Illegal option(s) specified.");
+}
+
+// ---- GPEX / SPEX / TDAP: message expiry ----------------------------------
+//
+// Worth recording, because it is the sort of thing that looks like a bug later:
+// the modern Citadel *server* does not implement GPEX or SPEX at all, while its
+// own text client still sends them -- so the client's expiry-policy editor
+// currently talks to nothing. The policy model itself (EXPIRE_NEXTLEVEL /
+// MANUAL / NUMMSGS / AGE, and the four levels) is real and is what the server's
+// own purger reads. Implementing the two verbs here makes that editor work.
+//
+// TDAP is Citadel's "manually initiate auto-purger" and is the verb that
+// actually runs a sweep. There is no EXPI.
+
+void HandleGpex(Connection &con, Session &s, net::ClientStream &stream, const std::string &rest) {
+	if (s.axlevel < citadel::kAideAxLevel) {
+		stream.WriteLine("540 Higher access required.");
+		return;
+	}
+	std::string which = util::Lower(Field(SplitPipe(rest), 0));
+	citadel::ExpirePolicy p;
+	if (!citadel::GetExpirePolicy(con, which, s.room, p)) {
+		stream.WriteLine("550 Illegal option(s) specified.");
+		return;
+	}
+	stream.WriteLine("200 " + std::to_string(p.mode) + "|" + std::to_string(p.value) + "|");
+}
+
+void HandleSpex(Connection &con, Session &s, net::ClientStream &stream, const std::string &rest) {
+	if (s.axlevel < citadel::kAideAxLevel) {
+		stream.WriteLine("540 Higher access required.");
+		return;
+	}
+	citadel::ExpirePolicy p;
+	p.mode = std::strtoll(Field(SplitPipe(rest), 1).c_str(), nullptr, 10);
+	p.value = std::strtoll(Field(SplitPipe(rest), 2).c_str(), nullptr, 10);
+	std::string err;
+	if (!citadel::SetExpirePolicy(con, util::Lower(Field(SplitPipe(rest), 0)), s.room, p, err)) {
+		stream.WriteLine("550 " + err);
+		return;
+	}
+	stream.WriteLine("200 Policy set.");
+}
+
+void HandleTdap(Connection &con, Session &s, net::ClientStream &stream) {
+	if (s.axlevel < citadel::kAideAxLevel) {
+		stream.WriteLine("540 Higher access required.");
+		return;
+	}
+	std::string err;
+	int64_t purged = citadel::RunExpiry(con, err);
+	if (!err.empty()) {
+		stream.WriteLine("550 " + err);
+		return;
+	}
+	stream.WriteLine("200 Purger finished; " + std::to_string(purged) + " message(s) expired.");
+}
+
 void HandleRegi(Connection &con, Session &s, net::ClientStream &stream) {
 	if (!s.authed) {
 		stream.WriteLine("530 You must log in first.");
@@ -896,6 +1152,14 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				citadel::SetLastRead(con, s.username, s.room.room_num, n);
 				stream.WriteLine("200 " + std::to_string(n));
 			}
+		} else if (verb == "CONF") {
+			HandleConf(con, s, stream, rest);
+		} else if (verb == "GPEX") {
+			HandleGpex(con, s, stream, rest);
+		} else if (verb == "SPEX") {
+			HandleSpex(con, s, stream, rest);
+		} else if (verb == "TDAP") {
+			HandleTdap(con, s, stream);
 		} else if (verb == "MESG") {
 			// The client requests named system banners (e.g. "MESG hello" for the
 			// login banner) during handshake; a real server returns the text.

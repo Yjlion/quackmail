@@ -10,6 +10,7 @@
 #include "duckdb/main/materialized_query_result.hpp"
 
 #include "quackmail/acme.hpp"
+#include "quackmail/citadel_store.hpp"
 #include "quackmail/fetch.hpp"
 #include "quackmail/listserv.hpp"
 #include "quackmail/mail_store.hpp"
@@ -36,6 +37,7 @@ using namespace quackmail;
 PeriodicWorker g_listserv;
 PeriodicWorker g_fetch;
 PeriodicWorker g_acme;
+PeriodicWorker g_expire;
 
 void ListservTick(Connection &con) {
 	listserv::SpoolResult res;
@@ -49,6 +51,16 @@ void AcmeTick(Connection &con) {
 	// others and does not hammer a rate-limited CA.
 	std::vector<acme::Result> results;
 	acme::RunOnce(con, "", false, results);
+}
+
+void ExpireTick(Connection &con) {
+	// Message expiry. On a timer rather than on the 1-in-16 coin flip in the
+	// HTTP router that every other sweep in this tree hangs off: that one means
+	// a site with no web traffic never sweeps anything, which for the sweep that
+	// *deletes messages* would be the difference between a policy and a
+	// decoration.
+	std::string err;
+	citadel::RunExpiry(con, err);
 }
 
 void FetchTick(Connection &con) {
@@ -658,6 +670,58 @@ void AcmeReloadFunc(ClientContext &, TableFunctionInput &data, DataChunk &output
 	EmitRows(data, output);
 }
 
+// ---------------------------------------------------------------------------
+// qm_expire_run() — one sweep, synchronously.
+//
+// The worker runs this on a timer; a test (and an admin who has just set a
+// policy) needs it to happen now and to say how much it removed. Every
+// assertion about expiry goes through this rather than waiting out an interval.
+// ---------------------------------------------------------------------------
+
+struct ExpireRunBindData : public FunctionData {
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<ExpireRunBindData>(*this);
+	}
+	bool Equals(const FunctionData &) const override {
+		return false;
+	}
+};
+
+struct ExpireRunGlobalState : public GlobalTableFunctionState {
+	bool emitted = false;
+	int64_t purged = 0;
+	std::string note;
+};
+
+unique_ptr<FunctionData> ExpireRunBind(ClientContext &, TableFunctionBindInput &,
+                                       vector<LogicalType> &return_types, vector<string> &names) {
+	names = {"purged", "note"};
+	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR};
+	return make_uniq<ExpireRunBindData>();
+}
+
+unique_ptr<GlobalTableFunctionState> ExpireRunInit(ClientContext &context, TableFunctionInitInput &) {
+	auto gstate = make_uniq<ExpireRunGlobalState>();
+	Connection con(*context.db);
+	store::EnsureSchema(con);
+	std::string err;
+	gstate->purged = citadel::RunExpiry(con, err);
+	gstate->note = err.empty() ? "ok" : ("error: " + err);
+	return std::move(gstate);
+}
+
+void ExpireRunFunc(ClientContext &, TableFunctionInput &data, DataChunk &output) {
+	auto &g = data.global_state->Cast<ExpireRunGlobalState>();
+	if (g.emitted) {
+		output.SetCardinality(0);
+		return;
+	}
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value::BIGINT(g.purged));
+	output.SetValue(1, 0, Value(g.note));
+	g.emitted = true;
+}
+
 void LoadInternal(ExtensionLoader &loader) {
 	Connection con(loader.GetDatabaseInstance());
 	store::EnsureSchema(con);
@@ -666,6 +730,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	RegisterWorkerControls(loader, "qm_listserv", "listserv", g_listserv, ListservTick);
 	RegisterWorkerControls(loader, "qm_fetch", "fetch", g_fetch, FetchTick);
 	RegisterWorkerControls(loader, "qm_acme", "acme", g_acme, AcmeTick);
+	RegisterWorkerControls(loader, "qm_expire", "expire", g_expire, ExpireTick);
 
 	TableFunction run("qm_listserv_run", {}, RunFunc, RunBind, RunInit);
 	run.named_parameters["room_num"] = LogicalType::BIGINT;
@@ -675,6 +740,9 @@ void LoadInternal(ExtensionLoader &loader) {
 	fetch_run.named_parameters["feed"] = LogicalType::VARCHAR;
 	fetch_run.named_parameters["force"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(fetch_run);
+
+	loader.RegisterFunction(
+	    TableFunction("qm_expire_run", {}, ExpireRunFunc, ExpireRunBind, ExpireRunInit));
 
 	TableFunction acme_run("qm_acme_run", {}, AcmeRunFunc, AcmeRunBind, AcmeRunInit);
 	acme_run.named_parameters["name"] = LogicalType::VARCHAR;
