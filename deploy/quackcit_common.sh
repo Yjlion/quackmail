@@ -394,6 +394,8 @@ TELNET       quackmail_telnet      qm_telnet           2300   none      -
 TELNETS      quackmail_telnet      qm_telnets          2992   implicit  -
 NNTP         quackmail_nntp        qm_nntp             1119   starttls  -
 NNTPS        quackmail_nntp        qm_nntps            1563   implicit  -
+FTP          quackmail_ftp         qm_ftp              1021   starttls  -
+FTPS         quackmail_ftp         qm_ftps             1990   implicit  -
 XMPP         quackmail_xmpp        qm_xmpp             15222  starttls  -
 XMPPS        quackmail_xmpp        qm_xmpps            15223  implicit  -
 HTTP         quackmail_http        qm_http             8080   none      -

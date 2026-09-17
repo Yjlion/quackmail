@@ -471,6 +471,23 @@ bool CanAdminister(duckdb::Connection &con, const std::string &username, const R
 std::vector<int64_t> CreatableFloors(duckdb::Connection &con, const std::string &username);
 bool CanCreateRoomOnFloor(duckdb::Connection &con, const std::string &username, int64_t floor);
 
+// May `username` create a room on `floor` at all?
+//
+// The site-wide bar an operator set (`qm_room_create_axlevel`, defaulting to
+// the aide level so nothing changes on an existing server) *or* a `k` grant on
+// that floor. In core rather than in one front-end because three of them now
+// ask it — the web's "new room", DAV's MKCOL and FTP's MKD — and two copies of
+// a permission rule is one rule and one bug.
+//
+// A `qm_room_create_axlevel` that is not a number is treated as the default
+// rather than as 0: a typo must not open the door.
+bool MayCreateRoom(duckdb::Connection &con, const std::string &username, int64_t floor);
+
+// The site-wide bar itself, for a caller that needs it without a floor — the
+// web's floor picker asks "may this user create anywhere at all" before
+// offering a list. Exposed so the `qm_room_create_axlevel` parsing exists once.
+int64_t RoomCreateAxLevel(duckdb::Connection &con);
+
 // True when `display_name` would collide with the personal-room keyspace.
 //
 // A public room's internal key *is* its display name, while a personal room's is

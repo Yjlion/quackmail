@@ -181,6 +181,33 @@ Unreleased, on top of v1.0.1.
         `http/assets/` is compiled in. A site that never touches it still ships
         working help rather than an empty screen.
 
+- [x] **FTP and FTPS** (`quackmail_ftp`), the third front door onto the file
+      areas. The same rooms, flags and permission questions; nothing about a
+      file is stored twice.
+  - [x] **`core/net.cpp` gained `ListenEphemeral` and `AcceptOnce`.** The only
+        `socket`/`bind`/`listen` in the tree was inside `ServerController`, which
+        owns one long-lived listener and an accept thread per protocol. A
+        passive data channel is the opposite: a socket that exists for one
+        transfer. `qm_ftp_pasv_low`/`_high` bound the range, because no
+        firewalled deployment can work without that, and the range is tried a
+        port at a time since the kernel has no way to be told "anything in
+        50000-50100".
+  - [x] **`citadel::MayCreateRoom` moved into core.** Three front doors ask it
+        now — the web's "new room", DAV's `MKCOL` and FTP's `MKD` — and the
+        site-axlevel rule was living in `web_rooms.cpp` where only one of them
+        could see it. Found by `MKD` refusing a user the web would have allowed.
+  - [x] Three deliberate refusals, each stated in `docs/protocols.md` rather
+        than left looking unimplemented: **cleartext credentials are refused by
+        default** (`534` unless `qm_ftp_allow_cleartext`), because every other
+        protocol here has a TLS story; **`PORT`/`EPRT` answer `502`**, because
+        active mode makes the server dial an address the client names; and no
+        `APPE`/`REST`/`STOU`, because a file is one message written whole.
+  - [x] `RNFR`/`RNTO` is a store under the new name and a remove of the old: the
+        name *is* the message's euid, not a column to update.
+  - [x] The `add-module` checklist end to end, including the step that fails
+        silently — `release.yml`'s hardcoded extension list, which would have
+        built and tested fine locally while shipping no artifact.
+
 Released work lives in [TODO-archive.md](TODO-archive.md), newest first.
 
 ## Backlog

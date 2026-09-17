@@ -108,7 +108,7 @@ jobs:
           for ext in quackmail quackmail_citadel quackmail_smtp_in quackmail_smtp_out \
                      quackmail_imap quackmail_managesieve quackmail_pop3 \
                      quackmail_telnet quackmail_nntp quackmail_xmpp quackmail_http \
-                     quackmail_spool; do
+                     quackmail_ftp quackmail_spool; do
             cp "build/release/extension/${ext}/${ext}.duckdb_extension" "${out}/"
           done
 

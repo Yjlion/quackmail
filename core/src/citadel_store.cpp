@@ -1734,6 +1734,32 @@ std::vector<int64_t> CreatableFloors(Connection &con, const std::string &usernam
 	return out;
 }
 
+int64_t RoomCreateAxLevel(Connection &con) {
+	// Defaults to the aide level, so nothing changes on an existing server until
+	// an operator lowers it. A value that is not a number is treated as the
+	// default rather than as 0 -- a typo must not open the door.
+	std::string want = GetConfig(con, "qm_room_create_axlevel", "");
+	if (want.empty()) {
+		return kAideAxLevel;
+	}
+	char *end = nullptr;
+	long parsed = std::strtol(want.c_str(), &end, 10);
+	if (end != want.c_str() && *end == '\0' && parsed >= 0 && parsed <= 6) {
+		return (int64_t)parsed;
+	}
+	return kAideAxLevel;
+}
+
+bool MayCreateRoom(Connection &con, const std::string &username, int64_t floor) {
+	if (username.empty()) {
+		return false;
+	}
+	if (GetAxLevel(con, username) >= RoomCreateAxLevel(con)) {
+		return true;
+	}
+	return CanCreateRoomOnFloor(con, username, floor);
+}
+
 bool CanCreateRoomOnFloor(Connection &con, const std::string &username, int64_t floor) {
 	auto floors = CreatableFloors(con, username);
 	return std::find(floors.begin(), floors.end(), floor) != floors.end();

@@ -54,6 +54,90 @@ bool ConnectOne(int fd, const struct sockaddr *addr, socklen_t addrlen, int time
 
 } // namespace
 
+int ListenEphemeral(const std::string &host, int low, int high, int &port, std::string &err) {
+	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) {
+		err = std::string("socket() failed: ") + std::strerror(errno);
+		return -1;
+	}
+	int yes = 1;
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+	struct sockaddr_in sa;
+	std::memset(&sa, 0, sizeof(sa));
+	sa.sin_family = AF_INET;
+	sa.sin_addr.s_addr = host.empty() ? htonl(INADDR_ANY) : inet_addr(host.c_str());
+	if (sa.sin_addr.s_addr == INADDR_NONE) {
+		sa.sin_addr.s_addr = htonl(INADDR_ANY);
+	}
+
+	// A bounded range is tried one port at a time rather than handed to the
+	// kernel, because the kernel has no way to be told "anything in 50000-50100"
+	// — and a deployment behind a firewall needs exactly that.
+	bool bound = false;
+	if (low > 0 && high >= low) {
+		for (int p = low; p <= high && !bound; p++) {
+			sa.sin_port = htons((uint16_t)p);
+			if (::bind(fd, reinterpret_cast<struct sockaddr *>(&sa), sizeof(sa)) == 0) {
+				bound = true;
+			}
+		}
+		if (!bound) {
+			err = "no free port in the configured passive range";
+			::close(fd);
+			return -1;
+		}
+	} else {
+		sa.sin_port = 0; // the kernel picks
+		if (::bind(fd, reinterpret_cast<struct sockaddr *>(&sa), sizeof(sa)) < 0) {
+			err = std::string("bind() failed: ") + std::strerror(errno);
+			::close(fd);
+			return -1;
+		}
+	}
+
+	// Backlog 1: exactly one client is expected, and a second connection to a
+	// passive port is either a mistake or someone else trying to steal the
+	// transfer.
+	if (::listen(fd, 1) < 0) {
+		err = std::string("listen() failed: ") + std::strerror(errno);
+		::close(fd);
+		return -1;
+	}
+
+	struct sockaddr_in bound_addr;
+	socklen_t len = sizeof(bound_addr);
+	if (::getsockname(fd, reinterpret_cast<struct sockaddr *>(&bound_addr), &len) < 0) {
+		err = std::string("getsockname() failed: ") + std::strerror(errno);
+		::close(fd);
+		return -1;
+	}
+	port = ntohs(bound_addr.sin_port);
+	return fd;
+}
+
+int AcceptOnce(int listen_fd, int timeout_ms, std::string &err) {
+	struct pollfd pfd;
+	pfd.fd = listen_fd;
+	pfd.events = POLLIN;
+	pfd.revents = 0;
+	int r = ::poll(&pfd, 1, timeout_ms);
+	if (r == 0) {
+		err = "timed out waiting for the data connection";
+		return -1;
+	}
+	if (r < 0) {
+		err = std::string("poll() failed: ") + std::strerror(errno);
+		return -1;
+	}
+	int fd = ::accept(listen_fd, nullptr, nullptr);
+	if (fd < 0) {
+		err = std::string("accept() failed: ") + std::strerror(errno);
+		return -1;
+	}
+	return fd;
+}
+
 int Connect(const std::string &host, int port, int timeout_ms, std::string &err) {
 	struct addrinfo hints;
 	std::memset(&hints, 0, sizeof(hints));
