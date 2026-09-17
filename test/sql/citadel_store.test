@@ -149,9 +149,10 @@ SELECT count(*) FROM duckdb_tables() WHERE table_name IN (
     'citadel_messages', 'citadel_room_msgs', 'citadel_room_tombstones',
     'citadel_room_state', 'citadel_msg_flags', 'citadel_config',
     'citadel_sessions', 'citadel_user_prefs', 'citadel_room_acl',
-    'citadel_express', 'citadel_dav_names', 'citadel_dav_collections');
+    'citadel_express', 'citadel_dav_names', 'citadel_dav_collections',
+    'citadel_dav_locks');
 ----
-16
+17
 
 # What a DAV client calls each object.
 #
@@ -186,6 +187,24 @@ username,segment,room_num
 
 query I
 SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_dav_colls_room';
+----
+1
+
+# WebDAV write locks, for file areas only.
+#
+# The groupware collections deliberately do not lock — ETags and If-Match are
+# their consistency story and every CalDAV client speaks it. A file share is the
+# case where that is not enough: Explorer and Finder refuse to mount a DAV
+# class-1 share read-write, so `DAV: 2` is claimed under /dav/files/ and nowhere
+# else.
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index)
+FROM duckdb_columns() WHERE table_name = 'citadel_dav_locks';
+----
+token,room_num,resource,username,owner,depth,expires_at
+
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_dav_locks_res';
 ----
 1
 

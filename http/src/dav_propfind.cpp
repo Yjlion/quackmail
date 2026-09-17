@@ -110,7 +110,9 @@ bool EmitProp(Ctx &ctx, davx::Writer &w, const PropSource &src, const std::strin
 			label = src.user;
 			break;
 		case DavRes::Home:
-			label = src.kind == DavKind::AddressBook ? "Address Books" : "Calendars";
+			label = src.kind == DavKind::AddressBook ? "Address Books"
+			        : src.kind == DavKind::Files   ? "Files"
+			                                       : "Calendars";
 			break;
 		case DavRes::Collection:
 			label = src.coll ? src.coll->room.display_name : std::string();
@@ -186,6 +188,15 @@ bool EmitProp(Ctx &ctx, davx::Writer &w, const PropSource &src, const std::strin
 		if (!src.obj) {
 			return false;
 		}
+		if (src.kind == DavKind::Files) {
+			// The type the file was uploaded with. A file area holds whatever
+			// was put in it, so unlike a calendar this cannot be derived from
+			// the collection — and no charset, because most of them are not text.
+			w.TextElem(ns, name,
+			           src.obj->content_type.empty() ? "application/octet-stream"
+			                                         : src.obj->content_type);
+			return true;
+		}
 		std::string type = std::string(ObjectMediaType(src.kind)) + "; charset=utf-8";
 		if (src.kind == DavKind::Calendar && src.coll) {
 			// Apple's clients use this to tell a task list from a calendar
@@ -199,7 +210,12 @@ bool EmitProp(Ctx &ctx, davx::Writer &w, const PropSource &src, const std::strin
 		if (!src.obj) {
 			return false;
 		}
-		w.TextElem(ns, name, std::to_string(src.obj->body.size()));
+		// `size` for a file, because a listing does not load file bodies: a
+		// PROPFIND over a directory of ten-megabyte files must not read all of
+		// them to report how big they are.
+		w.TextElem(ns, name,
+		           std::to_string(src.kind == DavKind::Files ? (size_t)src.obj->size
+		                                                     : src.obj->body.size()));
 		return true;
 	}
 	if (is_dav && name == "getlastmodified") {

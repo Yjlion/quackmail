@@ -1,4 +1,6 @@
 #include "dav.hpp"
+
+#include "quackmail/filearea.hpp"
 #include "web_views.hpp"
 
 #include "quackmail/util.hpp"
@@ -72,6 +74,8 @@ DavPath ParseDavPath(const std::string &tail) {
 		p.kind = DavKind::Calendar;
 	} else if (seg[0] == "addressbooks") {
 		p.kind = DavKind::AddressBook;
+	} else if (seg[0] == "files") {
+		p.kind = DavKind::Files;
 	} else {
 		return p;
 	}
@@ -111,7 +115,10 @@ DavPath ParseDavPath(const std::string &tail) {
 	if (seg.size() == 4) {
 		p.type = DavRes::Object;
 		p.name = seg[3];
-		p.euid = davx::EuidForName(StripExt(seg[3]));
+		// A file's name is the name it was uploaded under, extension and all —
+		// it is not an euid encoding and stripping ".ics" off "notes.ics" would
+		// be renaming somebody's file.
+		p.euid = p.kind == DavKind::Files ? seg[3] : davx::EuidForName(StripExt(seg[3]));
 		return p;
 	}
 	return p; // deeper than the tree goes
@@ -128,7 +135,14 @@ std::string Seg(const std::string &s) {
 }
 
 const char *HomeSeg(DavKind kind) {
-	return kind == DavKind::AddressBook ? "addressbooks" : "calendars";
+	switch (kind) {
+	case DavKind::AddressBook:
+		return "addressbooks";
+	case DavKind::Files:
+		return "files";
+	default:
+		return "calendars";
+	}
 }
 
 } // namespace
@@ -157,9 +171,21 @@ std::string ObjectHref(DavKind kind, const std::string &user, const std::string 
 }
 
 const char *ObjectExt(DavKind kind) {
-	return kind == DavKind::AddressBook ? ".vcf" : ".ics";
+	switch (kind) {
+	case DavKind::AddressBook:
+		return ".vcf";
+	case DavKind::Files:
+		// A file is served under the name it was uploaded with. There is no
+		// extension to append, and appending one would rename it.
+		return "";
+	default:
+		return ".ics";
+	}
 }
 
+// The media type for a *groupware* object, which is a function of the
+// collection kind. A file carries its own, recorded when it was uploaded, so
+// this is not consulted for one — see DavObject::content_type.
 const char *ObjectMediaType(DavKind kind) {
 	return kind == DavKind::AddressBook ? "text/vcard" : "text/calendar";
 }
@@ -224,10 +250,20 @@ DavKind KindForView(int64_t default_view) {
 	}
 }
 
+// A file area is a QR_DIRECTORY room whatever its view, so this takes the room
+// rather than the view alone. KindForView still answers for the groupware kinds
+// and is what MKCOL inverts.
+DavKind KindForRoom(const quackmail::citadel::Room &room) {
+	if (quackmail::filearea::IsFileArea(room)) {
+		return DavKind::Files;
+	}
+	return KindForView(room.default_view);
+}
+
 std::vector<DavCollection> ListCollections(Ctx &ctx, DavKind kind) {
 	std::vector<DavCollection> out;
 	for (auto &room : quackmail::citadel::ListRooms(ctx.con, ctx.username, -1, "all")) {
-		if (KindForView(room.default_view) != kind) {
+		if (KindForRoom(room) != kind) {
 			continue;
 		}
 		// A passworded room the user has not unlocked stays out of the listing.
@@ -263,7 +299,7 @@ bool ResolveCollection(Ctx &ctx, const DavPath &p, DavCollection &out) {
 	if (!ResolveRoomNumFor(ctx, room_num, room)) {
 		return false;
 	}
-	if (KindForView(room.default_view) != p.kind || p.kind == DavKind::None) {
+	if (KindForRoom(room) != p.kind || p.kind == DavKind::None) {
 		return false;
 	}
 	if (!quackmail::citadel::RoomUnlocked(ctx.con, ctx.username, room)) {
@@ -336,6 +372,23 @@ void UnbindResourceName(Ctx &ctx, const DavCollection &c, const std::string &nam
 
 std::vector<DavObject> ListObjects(Ctx &ctx, const DavCollection &c) {
 	std::vector<DavObject> out;
+	if (c.kind == DavKind::Files) {
+		// A file area holds files rather than groupware objects, so the listing
+		// comes from the file store instead of from ObjectBody's type filter.
+		// Bodies are deliberately not loaded here: a PROPFIND over a directory
+		// of ten-megabyte files must not read all of them to report their sizes.
+		for (const auto &f : quackmail::filearea::ListFiles(ctx.con, c.room.room_num)) {
+			DavObject o;
+			o.msgnum = f.msgnum;
+			o.euid = f.name;
+			o.name = f.name;
+			o.msgtime = f.uploaded_at;
+			o.content_type = f.content_type;
+			o.size = f.size;
+			out.push_back(std::move(o));
+		}
+		return out;
+	}
 	std::string want = ObjectMediaType(c.kind);
 	for (int64_t msgnum : quackmail::citadel::RoomMessages(ctx.con, c.room.room_num, "all", 0, 0)) {
 		quackmail::citadel::Message msg;
@@ -363,6 +416,21 @@ std::vector<DavObject> ListObjects(Ctx &ctx, const DavCollection &c) {
 bool LoadObject(Ctx &ctx, const DavCollection &c, const std::string &euid, DavObject &out) {
 	if (euid.empty()) {
 		return false;
+	}
+	if (c.kind == DavKind::Files) {
+		quackmail::filearea::File f;
+		std::string content;
+		if (!quackmail::filearea::GetFile(ctx.con, c.room.room_num, euid, f, content)) {
+			return false;
+		}
+		out.msgnum = f.msgnum;
+		out.euid = f.name;
+		out.name = f.name;
+		out.body = std::move(content);
+		out.msgtime = f.uploaded_at;
+		out.content_type = f.content_type;
+		out.size = f.size;
+		return true;
 	}
 	int64_t msgnum = quackmail::citadel::FindByEuid(ctx.con, c.room.room_num, euid);
 	if (msgnum < 0) {
@@ -504,18 +572,27 @@ namespace {
 // Absent on purpose: access-control (RFC 3744 — we serve its properties but
 // implement no ACL method).
 const char *const kDavHeader = "1, 3, calendar-access, addressbook, extended-mkcol";
+// Class 2 is LOCK, and it is claimed for file areas *only*. Advertising it over
+// the groupware collections would be a promise those do not keep — their
+// consistency story is ETags and If-Match, deliberately. See dav_lock.cpp.
+const char *const kDavHeaderFiles = "1, 2, 3, calendar-access, addressbook, extended-mkcol";
+
+const char *DavHeaderFor(const DavPath &p) {
+	return p.kind == DavKind::Files ? kDavHeaderFiles : kDavHeader;
+}
 
 } // namespace
 
 const char *const kAllowHeader =
-    "OPTIONS, PROPFIND, PROPPATCH, REPORT, GET, HEAD, PUT, DELETE, MKCOL, MKCALENDAR";
+    "OPTIONS, PROPFIND, PROPPATCH, REPORT, GET, HEAD, PUT, DELETE, MKCOL, MKCALENDAR, "
+    "LOCK, UNLOCK";
 
 namespace {
 
-void DavOptions(Ctx &ctx) {
+void DavOptions(Ctx &ctx, const DavPath &p) {
 	ctx.resp.status = 204;
 	ctx.resp.body.clear();
-	ctx.resp.SetHeader("DAV", kDavHeader);
+	ctx.resp.SetHeader("DAV", DavHeaderFor(p));
 	ctx.resp.SetHeader("Allow", kAllowHeader);
 	ctx.resp.SetHeader("Cache-Control", "no-store");
 }
@@ -523,17 +600,19 @@ void DavOptions(Ctx &ctx) {
 // The whole /dav/ subtree. Registered as one route with method "*" so the ten
 // verbs are one linear-scan entry rather than ten.
 void DavHandler(Ctx &ctx) {
-	// Advertised on every response, not only on OPTIONS: some clients sniff for
-	// the header on the first request they happen to make.
-	ctx.resp.SetHeader("DAV", kDavHeader);
-
 	const std::string &method = ctx.req.method;
+	DavPath p = ParseDavPath(ctx.Cap(0));
+
+	// Advertised on every response, not only on OPTIONS: some clients sniff for
+	// the header on the first request they happen to make. Per-path, because
+	// class 2 is true of file areas and deliberately not of the rest.
+	ctx.resp.SetHeader("DAV", DavHeaderFor(p));
+
 	if (method == "OPTIONS") {
-		DavOptions(ctx);
+		DavOptions(ctx, p);
 		return;
 	}
 
-	DavPath p = ParseDavPath(ctx.Cap(0));
 	if (p.type == DavRes::None) {
 		DavStatus(ctx, 404);
 		return;
@@ -561,6 +640,10 @@ void DavHandler(Ctx &ctx) {
 		DavDelete(ctx, p);
 	} else if (method == "MKCOL" || method == "MKCALENDAR") {
 		DavMkcol(ctx, p);
+	} else if (method == "LOCK") {
+		DavLock(ctx, p);
+	} else if (method == "UNLOCK") {
+		DavUnlock(ctx, p);
 	} else {
 		// MKCOL, MKCALENDAR, COPY and MOVE reach the allowlist but stop here.
 		// Creating a calendar means creating a room, which has a floor, a name

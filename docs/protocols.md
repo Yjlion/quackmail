@@ -115,12 +115,21 @@ Three surfaces on one listener pair. See [The web interface](web.md).
 | Webmail, BBS, groupware, admin | — | server-rendered, works with JavaScript off |
 | CalDAV | 4791, 5545, 5689, 6638 (partial) | collections, objects, the full `calendar-query` filter tree, `expand`, `MKCALENDAR`, free/busy, iTIP/iMIP |
 | CardDAV | 6352, 5689 | collections, objects, `addressbook-query`, extended `MKCOL` |
+| WebDAV files | 4918 | `/dav/files/`, over the `QR_DIRECTORY` room flags, with `LOCK`/`UNLOCK` |
 | JMAP | 8620, 8621, 9425 | Session, `Email/*`, `Mailbox/*`, `Thread/*`, blob up/download, submission, `Quota/get` |
 
 **Not** — RFC 6638 auto-scheduling (the `schedule-inbox-URL`/`schedule-outbox-URL`
-collections and outbox `POST`), DAV `LOCK`/`UNLOCK` (ETags and `If-Match` are
-the consistency story instead), `COPY`/`MOVE`. JMAP: `Email/import`,
+collections and outbox `POST`), `COPY`/`MOVE`. JMAP: `Email/import`,
 `SearchSnippet/get`, push over EventSource, `Quota/query`.
+
+**`LOCK`/`UNLOCK` exist for file areas and for nothing else.** The groupware
+collections keep ETags and `If-Match` as their whole consistency story, which is
+what every CalDAV and CardDAV client speaks, and `DAV: 2` is *not* claimed on
+them — a compliance class we advertise and do not honour is one a client keeps
+trying to use. A file share is the case where that is not enough: Windows
+Explorer and macOS Finder refuse to mount a class-1 WebDAV share read-write, so
+`/dav/files/` claims class 2 and takes exclusive write locks with a ten-minute
+timeout.
 
 A DAV collection is a **room**, so creating one takes the same permission
 creating a room through the web interface takes: the site-wide

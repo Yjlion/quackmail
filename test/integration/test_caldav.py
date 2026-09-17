@@ -809,13 +809,118 @@ def main():
         ).fetchall()
         assert rows[0][0] == 0, "the collection binding outlived the room"
 
+        # ---- file areas over WebDAV -----------------------------------------
+        # QR_DIRECTORY|QR_UPLOAD|QR_DOWNLOAD|QR_VISDIR = 32|64|128|256. A file
+        # area is selected by a room *flag*, not by a view, which is the one
+        # structural difference from the two groupware kinds.
+        con.execute("CALL cit_room_add('Shared Files')")
+        con.execute("UPDATE citadel_rooms SET qr_flags = qr_flags | 32 | 64 | 128 | 256 "
+                    "WHERE display_name = 'Shared Files'")
+        fileroom = con.execute(
+            "SELECT room_num FROM citadel_rooms WHERE display_name = 'Shared Files'").fetchone()[0]
+        files = f"/dav/files/{USER}/{fileroom}/"
+
+        # The home set lists it, and it is a plain collection -- no calendar or
+        # addressbook resourcetype child.
+        status, _, xml = d.propfind(f"/dav/files/{USER}/", prop(["D:displayname", "D:resourcetype"]),
+                                    depth="1")
+        assert status == 207, f"PROPFIND on the files home returned {status}"
+        assert "Shared Files" in xml, f"the file area is missing from its home: {xml[:400]}"
+        # The *elements*, not the string: StartDoc declares the whole namespace
+        # registry on the root, and "calendarserver.org" contains "calendar".
+        assert "<C:calendar/>" not in xml and "<CARD:addressbook/>" not in xml, \
+            f"a file area is being advertised as a groupware collection: {xml[:600]}"
+        assert "<D:collection/>" in xml, f"a file area is not a collection: {xml[:600]}"
+
+        # Binary, byte for byte. A file area holds whatever was put in it, so
+        # this is the assertion that matters most: every byte 0-255, including
+        # the 0xFF that a telnet transfer has to escape and the NUL that a
+        # text-oriented path would truncate at.
+        blob = bytes(range(256)) * 8
+        status, headers, _ = d.go("PUT", files + "blob.bin", blob,
+                                  {"Content-Type": "application/octet-stream"})
+        assert status == 201, f"PUT of a binary file returned {status}"
+        etag = headers.get("ETag", "")
+        assert etag, "a stored file has no ETag"
+
+        req = urllib.request.Request(BASE + files + "blob.bin", method="GET")
+        req.add_header("Authorization", "Basic " + d.auth)
+        raw = d.op.open(req, timeout=20).read()
+        assert raw == blob, f"the file did not round-trip: {len(raw)} bytes back of {len(blob)}"
+
+        # Size and type come from the file, not from the collection.
+        status, _, xml = d.propfind(files + "blob.bin",
+                                    prop(["D:getcontentlength", "D:getcontenttype",
+                                          "D:getlastmodified"]), depth="0")
+        assert f"<D:getcontentlength>{len(blob)}</D:getcontentlength>" in xml, \
+            f"getcontentlength is wrong: {xml[:500]}"
+        assert "application/octet-stream" in xml, f"getcontenttype is wrong: {xml[:500]}"
+
+        # ---- LOCK -----------------------------------------------------------
+        # Class 2 is claimed for file areas and deliberately nowhere else: the
+        # groupware collections keep ETags and If-Match as their whole
+        # consistency story. Explorer and Finder will not mount a class-1 share
+        # read-write, which is the entire reason this exists.
+        status, headers, _ = d.go("OPTIONS", files)
+        assert re.search(r"\b2\b", headers.get("DAV", "")), \
+            f"a file area does not claim DAV class 2: {headers.get('DAV')}"
+        status, headers, _ = d.go("OPTIONS", calendar)
+        assert not re.search(r"\b2\b", headers.get("DAV", "")), \
+            f"a calendar claims DAV class 2: {headers.get('DAV')}"
+
+        lockbody = ('<?xml version="1.0"?><D:lockinfo xmlns:D="DAV:">'
+                    "<D:lockscope><D:exclusive/></D:lockscope>"
+                    "<D:locktype><D:write/></D:locktype>"
+                    "<D:owner>ann</D:owner></D:lockinfo>")
+        status, headers, xml = d.go("LOCK", files + "blob.bin", lockbody.encode(),
+                                    {"Content-Type": "application/xml"})
+        assert status == 200, f"LOCK returned {status}"
+        token = headers.get("Lock-Token", "").strip("<>")
+        assert token.startswith("opaquelocktoken:"), f"no usable lock token: {headers}"
+        assert "activelock" in xml and token in xml, f"lockdiscovery is missing the token: {xml[:400]}"
+
+        # Somebody else's write is refused with 423, which a client retries --
+        # unlike a 403, which it gives up on.
+        other = Dav(OTHER, OTHER_PASSWORD)
+        con.execute("INSERT INTO citadel_room_acl (room_num, identifier, rights) "
+                    f"VALUES ({fileroom}, '{OTHER}', 'lrswip')")
+        status, _, _ = other.go("PUT", f"/dav/files/{OTHER}/{fileroom}/blob.bin", b"nope",
+                                {"Content-Type": "application/octet-stream"})
+        assert status == 423, f"a write over somebody else's lock returned {status}"
+
+        # The holder still writes, token quoted or not.
+        status, _, _ = d.go("PUT", files + "blob.bin", blob,
+                            {"Content-Type": "application/octet-stream",
+                             "If": "(<" + token + ">)"})
+        assert status in (200, 204), f"the lock holder could not write: {status}"
+
+        status, _, _ = d.go("UNLOCK", files + "blob.bin", None, {"Lock-Token": "<" + token + ">"})
+        assert status == 204, f"UNLOCK returned {status}"
+        status, _, _ = other.go("PUT", f"/dav/files/{OTHER}/{fileroom}/blob.bin", b"fine",
+                                {"Content-Type": "application/octet-stream"})
+        assert status in (200, 204), f"a write after UNLOCK returned {status}"
+
+        # An UNLOCK naming a token that is not on this resource is 409, not 204:
+        # a client that gets 204 believes it released something.
+        status, _, _ = d.go("UNLOCK", files + "blob.bin", None,
+                            {"Lock-Token": "<opaquelocktoken:made-up>"})
+        assert status == 409, f"UNLOCK with a bogus token returned {status}"
+
+        # Locking is not offered on the groupware collections at all.
+        status, _, _ = d.go("LOCK", calendar + dav_name(EVENT_UID) + ".ics", lockbody.encode(),
+                            {"Content-Type": "application/xml"})
+        assert status == 405, f"LOCK on a calendar object returned {status}"
+
+        status, _, _ = d.go("DELETE", files + "blob.bin")
+        assert status == 204, f"DELETE of a file returned {status}"
+
     finally:
         con.execute("CALL qm_http_stop()")
         con.execute("CALL qm_imap_stop()")
         con.close()
 
     print("PASS: CalDAV and CardDAV (discovery, Basic auth, PROPFIND, REPORT, "
-          "conditional writes, filters, expand, MKCOL/MKCALENDAR, "
+          "conditional writes, filters, expand, MKCOL/MKCALENDAR, file areas, LOCK, "
           "sync-collection, permissions, storage quota, "
           "IMAP parity)")
 

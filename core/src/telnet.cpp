@@ -171,10 +171,13 @@ void Session::SetSize(int width, int height) {
 	height_ = height < 5 ? 5 : (height > 500 ? 500 : height);
 }
 
-int Session::GetChar() {
+// One byte of payload with telnet option negotiation consumed and answered, and
+// nothing else done to it. Split out of GetChar because a binary transfer needs
+// exactly this and must *not* have the CR/LF line discipline GetChar applies on
+// top — a 0x0D byte inside a file is data, not a line ending.
+int Session::NextPayloadByte() {
 	unsigned char u;
 	while (NextByte(u)) {
-
 		if (u == IAC) {
 			unsigned char verb;
 			if (!NextByte(verb)) {
@@ -221,6 +224,15 @@ int Session::GetChar() {
 			}
 			continue; // other two-byte commands (NOP, AYT, ...) are ignored
 		}
+		return u;
+	}
+	return -1;
+}
+
+int Session::GetChar() {
+	int got = NextPayloadByte();
+	while (got >= 0) {
+		unsigned char u = (unsigned char)got;
 
 		// CR LF and CR NUL both mean "end of line": report the CR and swallow the
 		// partner byte here. Piping a CRLF file into a telnet client puts CR CR LF
@@ -230,14 +242,16 @@ int Session::GetChar() {
 		if (pending_cr_) {
 			pending_cr_ = false;
 			if (u == '\n' || u == 0) {
+				got = NextPayloadByte();
 				continue;
 			}
 			if (u == '\r') {
-				unsigned char next;
-				if (!NextByte(next)) {
+				int next = NextPayloadByte();
+				if (next < 0) {
 					return -1;
 				}
 				if (next == '\n' || next == 0) {
+					got = NextPayloadByte();
 					continue; // CR CR LF -> a single terminator
 				}
 				pushback_ = next;
@@ -297,6 +311,60 @@ void Session::Write(const std::string &text) {
 		}
 	}
 	stream_.Write(out);
+}
+
+// ---- raw byte I/O ----------------------------------------------------------
+
+void Session::WriteRaw(const std::string &bytes) {
+	// 0xFF is IAC. A payload byte of 0xFF sent as-is is read by the peer as the
+	// start of a telnet command, which is how a binary transfer over telnet
+	// silently corrupts any file containing one. Doubling it is the escape the
+	// protocol defines (RFC 854).
+	std::string out;
+	out.reserve(bytes.size() + 8);
+	for (char c : bytes) {
+		out.push_back(c);
+		if ((unsigned char)c == 0xFF) {
+			out.push_back((char)0xFF);
+		}
+	}
+	stream_.Write(out);
+}
+
+bool Session::ReadRawByte(unsigned char &out, int timeout_ms) {
+	if (pushback_ >= 0) {
+		out = (unsigned char)pushback_;
+		pushback_ = -1;
+		return true;
+	}
+	if (timeout_ms > 0 && !stream_.WaitReadable(timeout_ms)) {
+		return false;
+	}
+	// NextPayloadByte, not GetChar: negotiation is still stripped and answered,
+	// so a client renegotiating mid-transfer does not corrupt the stream, but no
+	// CR/LF line discipline is applied. A 0x0D inside a file is data.
+	int ch = NextPayloadByte();
+	if (ch < 0) {
+		return false;
+	}
+	out = (unsigned char)ch;
+	return true;
+}
+
+void Session::DrainInput(int settle_ms) {
+	pushback_ = -1;
+	pending_cr_ = false;
+	unsigned char discard = 0;
+	// Bounded: a peer that never stops talking must not hold the thread here.
+	for (int i = 0; i < 4096; i++) {
+		if (!stream_.WaitReadable(settle_ms)) {
+			return;
+		}
+		if (!ReadRawByte(discard, settle_ms)) {
+			return;
+		}
+		(void)discard;
+	}
 }
 
 // ---- prompting -------------------------------------------------------------

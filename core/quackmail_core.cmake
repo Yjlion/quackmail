@@ -93,6 +93,9 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/itip.cpp
         ${QUACKMAIL_CORE_DIR}/src/vnote.cpp
         ${QUACKMAIL_CORE_DIR}/src/mime_build.cpp
+        # File areas: the QR_UPLOAD/QR_DOWNLOAD/QR_VISDIR flags, shared by the
+        # telnet, WebDAV and FTP front doors.
+        ${QUACKMAIL_CORE_DIR}/src/filearea.cpp
         ${QUACKMAIL_CORE_DIR}/src/html_sanitize.cpp
     )
     # Linked into loadable .so extensions, so it must be position independent.

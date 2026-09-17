@@ -73,6 +73,48 @@ from the telnet NAWS negotiation, and listings pause at each screenful.
 Sessions register in `citadel_sessions`, so telnet users and native Citadel
 clients see each other in the who-list and can page one another.
 
+`C`hat holds a conversation rather than firing a single page. It is built on the
+same `citadel_express` rows `P`age, the web chat view and XMPP use, so a line
+typed at a terminal reaches somebody reading their mail in a browser and their
+reply comes back — one conversation, not four. `.` as the correspondent sends to
+everyone currently online. There is no separate chat channel, which is the
+deliberate difference from real Citadel's room-wide `CHAT`.
+
+`.H`elp is prose, where `?` is the command menu. Topics are compiled in, so a
+fresh install has working help with nothing to seed; an aide can override any of
+them by posting to a room called `Help` with the euid `help/<topic>`.
+
+### File directories
+
+A room with the `QR_DIRECTORY` flag is a file area. The three companion flags
+decide what may be done in it: `QR_UPLOAD` to deposit, `QR_DOWNLOAD` to fetch,
+and `QR_VISDIR` to see the listing without being able to fetch — which is how an
+upload-only drop box is expressed. All four are Citadel's own bits, and until now
+nothing in this server read them.
+
+| Command | |
+|---|---|
+| `.RF` | list the directory |
+| `.RFG` | fetch a file — type it out, Xmodem, or base64 |
+| `.EF` | upload one, by Xmodem or by pasting base64 |
+| `.AFD` / `.AFE` | delete, or change a description (aide) |
+
+**A file is a message**: a directory room's files are ordinary euid-keyed
+messages carrying one attachment part, exactly like a mail attachment. That is
+what makes per-user storage quotas, the room ACL, DAV sync tombstones and room
+deletion apply to files without any of them being taught about files.
+
+The transfer protocol is **Xmodem-1K with CRC**. Zmodem is not implemented: it is
+a much larger protocol for the same result over a link TCP has already made
+reliable. Typing a text file out through the pager, and base64 for a terminal
+with no transfer protocol at all, cover the rest. Anything large, or a whole
+directory at once, is better fetched over WebDAV at `/dav/files/` — the same
+files, the same rooms, the same permissions.
+
+Note one consequence of Xmodem having no length field: the last block is padded
+and the padding is stripped on arrival, so a file whose real last byte is `0x1A`
+cannot survive an Xmodem round trip. WebDAV and FTP have no such limit.
+
 ## News (NNTP)
 
 Every room a user can see is a newsgroup, using Citadel's own name mapping
