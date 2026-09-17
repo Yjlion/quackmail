@@ -157,6 +157,27 @@ from a Citadel client, the BBS shell, IMAP and POP3. (It also resolves
 `<message-id>` fetches and reports real `:bytes`/`:lines` in `OVER`, both of
 which Citadel punts on.)
 
+### Peer feeds
+
+`IHAVE` (RFC 3977 §6.3.2) and `MODE STREAM` with `CHECK`/`TAKETHIS` (RFC 4644),
+so this server can take a news feed from a peer. All three turn on one question
+— *do I already have this article?* — which was unanswerable until a Message-ID
+index existed: resolving an id previously meant scanning the selected group,
+fine for a reader fetching one article and hopeless for a peer offering
+thousands.
+
+Unlike everything else here, **this half has no Citadel behind it**: Citadel's
+own NNTP implements none of these verbs. The RFCs are the spec.
+
+Three decisions worth knowing:
+
+- **A peer must authenticate.** The verbs sit after the `480` gate deliberately.
+- **An article for a group this server does not carry is refused permanently**
+  (`437`), not deferred. Creating a room for every group a peer offers would let
+  one peer fill the room list.
+- **A transit article keeps the `From:` it arrived with.** Rewriting it to the
+  peer's login would be forging it.
+
 ## Instant messaging (XMPP)
 
 `quackmail_xmpp` speaks client-to-server XMPP: STARTTLS, SASL `PLAIN` (and the

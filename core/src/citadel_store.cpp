@@ -315,6 +315,25 @@ void EnsureCitadelSchema(Connection &con) {
 	)");
 	con.Query("CREATE INDEX IF NOT EXISTS idx_dav_locks_res ON citadel_dav_locks(room_num, resource)");
 
+	// RFC 822 Message-ID -> message number.
+	//
+	// "Do I already have this article?" is the whole of NNTP's IHAVE and CHECK,
+	// and until now there was no way to answer it: the ARTICLE-by-message-id
+	// path scans the current group, which is fine for a reader fetching one
+	// article and useless for a peer offering thousands.
+	//
+	// A separate table rather than a column on citadel_messages, because a
+	// message's id is derived (see citadel::MessageId) rather than stored, and
+	// because a row here is only worth having for messages that arrived from
+	// somewhere else or are offered outward.
+	con.Query(R"(
+		CREATE TABLE IF NOT EXISTS citadel_msgids (
+			msgid  VARCHAR PRIMARY KEY,
+			msgnum BIGINT
+		)
+	)");
+	con.Query("CREATE INDEX IF NOT EXISTS idx_msgids_msgnum ON citadel_msgids(msgnum)");
+
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_state (
 			username  VARCHAR,
@@ -1733,6 +1752,32 @@ std::vector<int64_t> CreatableFloors(Connection &con, const std::string &usernam
 	}
 	std::sort(out.begin(), out.end());
 	return out;
+}
+
+// ---- the Message-ID index ------------------------------------------------
+
+void RecordMessageId(Connection &con, const std::string &msgid, int64_t msgnum) {
+	if (msgid.empty() || msgnum <= 0) {
+		return;
+	}
+	ExecP(con,
+	      "INSERT INTO citadel_msgids (msgid, msgnum) VALUES ($1, $2) "
+	      "ON CONFLICT (msgid) DO UPDATE SET msgnum = excluded.msgnum",
+	      {Value(msgid), Value::BIGINT(msgnum)});
+}
+
+int64_t FindByMessageId(Connection &con, const std::string &msgid) {
+	if (msgid.empty()) {
+		return -1;
+	}
+	// The join is the point: a row whose message has since been purged must not
+	// make this server claim to have an article it can no longer serve. An
+	// expiry sweep does not know about this table, and should not have to.
+	auto v = ScalarP(con,
+	                 "SELECT i.msgnum FROM citadel_msgids i "
+	                 "JOIN citadel_messages m ON m.msgnum = i.msgnum WHERE i.msgid = $1",
+	                 {Value(msgid)});
+	return v.IsNull() ? -1 : v.GetValue<int64_t>();
 }
 
 // ---- the Global Address Book --------------------------------------------

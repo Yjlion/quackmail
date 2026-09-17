@@ -150,9 +150,9 @@ SELECT count(*) FROM duckdb_tables() WHERE table_name IN (
     'citadel_room_state', 'citadel_msg_flags', 'citadel_config',
     'citadel_sessions', 'citadel_user_prefs', 'citadel_room_acl',
     'citadel_express', 'citadel_dav_names', 'citadel_dav_collections',
-    'citadel_dav_locks');
+    'citadel_dav_locks', 'citadel_msgids');
 ----
-17
+18
 
 # What a DAV client calls each object.
 #
@@ -205,6 +205,23 @@ token,room_num,resource,username,owner,depth,expires_at
 
 query I
 SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_dav_locks_res';
+----
+1
+
+# RFC 822 Message-ID -> message number.
+#
+# "Do I already have this article?" is the whole of NNTP's IHAVE and CHECK, and
+# it was unanswerable before this: the ARTICLE-by-message-id path scans the
+# selected group, which is fine for a reader fetching one article and hopeless
+# for a peer offering thousands.
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index)
+FROM duckdb_columns() WHERE table_name = 'citadel_msgids';
+----
+msgid,msgnum
+
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_msgids_msgnum';
 ----
 1
 

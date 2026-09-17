@@ -217,6 +217,22 @@ bool GetRegistration(duckdb::Connection &con, const std::string &username, Regis
 // repeatedly: the card is keyed by euid, so it is replaced rather than
 // duplicated.
 bool PublishUserVcard(duckdb::Connection &con, const std::string &username, std::string &err);
+
+// ---- the Message-ID index ------------------------------------------------
+//
+// "Do I already have this article?" — the whole of NNTP's IHAVE and CHECK.
+// Until this existed the only way to answer was to scan a group, which is fine
+// for a reader fetching one article by id and useless for a peer offering
+// thousands.
+//
+// Records an id against a message number. Idempotent: offering the same article
+// twice records it once.
+void RecordMessageId(duckdb::Connection &con, const std::string &msgid, int64_t msgnum);
+
+// The message this id names, or -1. Also returns -1 when the row exists but the
+// message it pointed at is gone — a stale row must not make the server claim to
+// have an article it cannot serve.
+int64_t FindByMessageId(duckdb::Connection &con, const std::string &msgid);
 bool SetRegistration(duckdb::Connection &con, const std::string &username, const Registration &reg);
 // Replace only the biography, leaving the registration fields alone.
 bool SetBio(duckdb::Connection &con, const std::string &username, const std::string &bio);

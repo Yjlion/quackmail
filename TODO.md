@@ -261,6 +261,30 @@ Unreleased, on top of v1.0.1.
         have your own card for is offered with the name *you* gave them; the
         shared room is only offered to somebody who may actually read it.
 
+- [x] **Citadel breadth, part 3: the NNTP peer feed** — `IHAVE`, and
+      `MODE STREAM` with `CHECK`/`TAKETHIS`. This server can now take a news
+      feed from a peer.
+  - [x] **A Message-ID index** (`citadel_msgids`), which is the prerequisite all
+        three verbs turn on. Resolving an id previously meant scanning the
+        selected group — fine for a reader fetching one article, hopeless for a
+        peer offering thousands. The lookup joins `citadel_messages`, so a row
+        whose message has since been purged cannot make this server claim to
+        have an article it can no longer serve; the expiry sweep does not know
+        about this table and should not have to.
+  - [x] **No parity oracle for this one, and that is worth stating.** Citadel's
+        own NNTP implements none of these verbs — it has `ACTIVE`, `AUTHINFO`,
+        `GROUP`, `LISTGROUP`, `NEWSGROUPS` and the article verbs and stops. The
+        RFCs are the spec here, unlike everything else in this section.
+  - [x] Three decisions: a peer must authenticate (the verbs sit after the `480`
+        gate deliberately); an article for a group this server does not carry is
+        refused **permanently** (`437`), because creating a room for every group
+        a peer offers would let one peer fill the room list; and a transit
+        article keeps the `From:` it arrived with, because rewriting it would be
+        forging it.
+  - [x] A `TAKETHIS` for an article already held still reads the article off the
+        wire before answering — otherwise the connection desynchronises, which
+        the test proves by issuing a command after the refusal.
+
 Released work lives in [TODO-archive.md](TODO-archive.md), newest first.
 
 ## Backlog
@@ -308,14 +332,17 @@ The first came out of building 0.6.0 and is the one most likely to bite.
     per-user `My Citadel Config` room Citadel keeps a user's own card in; this
     publishes straight to the shared book instead, which is the half that
     mattered.
-  - **The Citadel network mesh**, and the NNTP peer-feed verbs. Worth knowing
-    before starting: **Citadel's own NNTP implements none of
-    `IHAVE`/`CHECK`/`TAKETHIS` or `MODE STREAM`** — it has ACTIVE, AUTHINFO,
-    GROUP, LISTGROUP, NEWSGROUPS and the article verbs and stops there. So this
-    is RFC 3977/4644 work with no parity oracle behind it, unlike everything
-    else in this section. The prerequisite either way is a Message-ID index:
-    `IHAVE` and `CHECK` ask "do I already have this?" and there is no index to
-    answer from.
+  - **The Citadel network mesh is gone from Citadel**, and this entry should
+    not have survived as long as it did. Modern Citadel's per-room netconfig
+    accepts exactly seven keys — `listrecp`, `lastsent`, `roommailalias`,
+    `pop3client`, `rssclient`, `subpending`, `unsubpending` (`netconfig.c`) —
+    which is mailing lists, POP3 pulls, RSS and list subscriptions. There is no
+    node list, no `ignet_push_share`, no inter-node replication anywhere in the
+    tree. **QuackCit already implements every one of those seven**, through
+    `listserv`, `mail_client` and `fetch`. So there is nothing here to mirror;
+    anyone wanting inter-node replication would be designing it, not porting it.
+    The NNTP peer-feed half has shipped (above) and is the part that turned out
+    to be real.
 - SMTP: PIPELINING, CHUNKING/BDAT, DSN.
 - Mail authentication depth: DMARC aggregate (`rua`) reports; ARC, so forwarded
   mail keeps an authenticated chain; MTA-STS / DANE for outbound transport.

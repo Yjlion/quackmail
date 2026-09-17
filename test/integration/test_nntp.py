@@ -66,6 +66,21 @@ class News:
         self.f.flush()
         return self.f.readline().decode().strip()
 
+    def send_line(self, text):
+        """A command with no reply read.
+
+        TAKETHIS answers only after the article, which is the whole point of
+        streaming -- so reading a reply here would block forever.
+        """
+        self.f.write(text.encode() + b"\r\n")
+        self.f.flush()
+
+    def send_body(self, article):
+        """The article half of IHAVE or TAKETHIS, dot-terminated."""
+        self.f.write(article.replace("\n", "\r\n").encode() + b"\r\n.\r\n")
+        self.f.flush()
+        return self.f.readline().decode().strip()
+
     def close(self):
         try:
             self.s.close()
@@ -194,12 +209,97 @@ def main():
         assert c.cmd("QUIT")[0].startswith("205")
         c.close()
 
+        # --- the peer feed: IHAVE, CHECK, TAKETHIS -------------------------
+        # RFC 3977 §6.3.2 and RFC 4644. Worth stating plainly: Citadel's own
+        # NNTP implements none of these, so unlike the reader verbs above there
+        # is no parity oracle here -- the RFCs are the spec.
+        #
+        # All three turn on one question, "do I already have this?", which was
+        # unanswerable until citadel_msgids existed: the ARTICLE-by-message-id
+        # path scans the selected group, which is hopeless for a peer offering
+        # thousands.
+        c = News(PORT)
+        assert c.cmd("AUTHINFO USER newsuser")[0].startswith("381")
+        assert c.cmd("AUTHINFO PASS secret")[0].startswith("281")
+
+        status, caps = c.cmd("CAPABILITIES", multiline=True)
+        assert "IHAVE" in caps, f"IHAVE is not advertised to a peer: {caps}"
+        assert "STREAMING" in caps, f"STREAMING is not advertised: {caps}"
+        assert c.cmd("MODE STREAM")[0].startswith("203"), "MODE STREAM refused"
+
+        transit = (
+            "From: someone@peer.example\n"
+            "Newsgroups: ctdl.lobby\n"
+            "Subject: Fed in over IHAVE\n"
+            "Message-ID: <feed-1@peer.example>\n"
+            "\n"
+            "Body from the peer.\n"
+        )
+        status, _ = c.cmd("IHAVE <feed-1@peer.example>")
+        assert status.startswith("335"), f"IHAVE was not wanted: {status}"
+        assert c.send_body(transit).startswith("235"), "IHAVE transfer failed"
+
+        # Offering it again must say "already have it" rather than filing a
+        # second copy -- the entire point of the index.
+        status, _ = c.cmd("IHAVE <feed-1@peer.example>")
+        assert status.startswith("435"), f"a duplicate offer was accepted: {status}"
+        # 435 and not 437: "I have it" is not "it is bad", and a peer uses the
+        # difference to decide whether to keep offering it.
+        dupes = con.execute(
+            "SELECT count(*) FROM citadel_messages WHERE subject = 'Fed in over IHAVE'"
+        ).fetchone()[0]
+        assert dupes == 1, f"the duplicate offer stored {dupes} copies"
+
+        # CHECK is the streaming form of that question.
+        assert c.cmd("CHECK <feed-1@peer.example>")[0].startswith("438"), "CHECK on a held article"
+        status, _ = c.cmd("CHECK <feed-2@peer.example>")
+        assert status.startswith("238"), f"CHECK on a new article: {status}"
+
+        # TAKETHIS sends the article with no intervening reply.
+        transit2 = transit.replace("feed-1", "feed-2").replace("over IHAVE", "over TAKETHIS")
+        # The reply comes after the article, not after the command.
+        c.send_line("TAKETHIS <feed-2@peer.example>")
+        assert c.send_body(transit2).startswith("239"), "TAKETHIS transfer failed"
+
+        # A TAKETHIS for something already held still has to read the article
+        # off the wire before answering, or the connection desynchronises --
+        # which the next command proves it did not.
+        c.send_line("TAKETHIS <feed-2@peer.example>")
+        assert c.send_body(transit2).startswith("439"), "a duplicate TAKETHIS was accepted"
+        assert c.cmd("DATE")[0].startswith("111"), "the stream desynchronised after a refusal"
+
+        # An article for a group this server does not carry is refused
+        # permanently (437), not deferred: silently creating a room for every
+        # group a peer offers would let one peer fill the room list.
+        nocarry = transit.replace("feed-1", "feed-3").replace("ctdl.lobby", "ctdl.nosuchgroup")
+        status, _ = c.cmd("IHAVE <feed-3@peer.example>")
+        assert status.startswith("335"), status
+        assert c.send_body(nocarry).startswith("437"), "an uncarried group was accepted"
+
+        c.cmd("QUIT")
+        c.close()
+
+        # A peer must authenticate: these sit after the 480 gate deliberately.
+        c = News(PORT)
+        assert c.cmd("IHAVE <feed-9@peer.example>")[0].startswith("480"), \
+            "IHAVE was allowed without authentication"
+        assert c.cmd("TAKETHIS <feed-9@peer.example>")[0].startswith("480"), \
+            "TAKETHIS was allowed without authentication"
+        c.close()
+
         # --- implicit TLS listener -----------------------------------------
         c = News(PORT_TLS, use_tls=True)
         assert c.cmd("AUTHINFO USER newsuser")[0].startswith("381")
         assert c.cmd("AUTHINFO PASS secret")[0].startswith("281")
         status, groups = c.cmd("LIST ACTIVE ctdl.lobby", multiline=True)
-        assert len(groups) == 1 and groups[0].startswith("ctdl.lobby 1 1 y"), groups
+        # "<group> <high> <low> <posting>" (RFC 3977 §7.6.3). The high-water mark
+        # is whatever has accumulated by now -- the peer-feed block above adds
+        # two articles -- so what is pinned here is the shape and the posting
+        # flag, not a count that any earlier test can move.
+        assert len(groups) == 1, groups
+        parts = groups[0].split()
+        assert parts[0] == "ctdl.lobby" and parts[2] == "1" and parts[3] == "y", groups
+        assert int(parts[1]) >= 1, groups
         c.cmd("QUIT")
         c.close()
     finally:
@@ -212,9 +312,16 @@ def main():
         "JOIN citadel_room_msgs rm USING (msgnum) "
         "JOIN citadel_rooms r USING (room_num) WHERE r.name = 'Lobby'"
     ).fetchall()
-    assert rows == [("newsuser", "First post", 4)], rows
+    # The locally posted article, plus the two fed in over the peer verbs. A
+    # transit article keeps the From: it arrived with rather than the peer's
+    # login -- rewriting it would be forging it.
+    assert ("newsuser", "First post", 4) in rows, rows
+    assert ("someone@peer.example", "Fed in over IHAVE", 4) in rows, rows
+    assert ("someone@peer.example", "Fed in over TAKETHIS", 4) in rows, rows
+    assert len(rows) == 3, f"the Lobby holds {len(rows)} articles, not 3: {rows}"
 
-    print("PASS: NNTP reader parity (LIST/GROUP/ARTICLE/OVER/NEXT), POST, nntps")
+    print("PASS: NNTP reader parity (LIST/GROUP/ARTICLE/OVER/NEXT), POST, nntps,")
+    print("      and the peer feed (IHAVE, MODE STREAM, CHECK, TAKETHIS)")
 
 
 if __name__ == "__main__":
