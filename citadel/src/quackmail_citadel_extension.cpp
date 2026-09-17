@@ -9,6 +9,7 @@
 #include "quackmail/auth.hpp"
 #include "quackmail/citadel_msg.hpp"
 #include "quackmail/citadel_store.hpp"
+#include "quackmail/vcard.hpp"
 #include "quackmail/mail_store.hpp"
 #include "quackmail/server_controller.hpp"
 #include "quackmail/server_controls.hpp"
@@ -676,6 +677,94 @@ void HandleRegi(Connection &con, Session &s, net::ClientStream &stream) {
 		reg.country = at(7);
 	}
 	citadel::SetRegistration(con, s.username, reg);
+
+	// Citadel copies a user's own vCard into the Global Address Book whenever it
+	// is written (serv_vcard.c). Without this that room stays empty on a real
+	// system and nobody can be looked up on it. Best effort: registration itself
+	// has already succeeded, and failing REGI because the address book could not
+	// be updated would be the wrong trade.
+	std::string vc_err;
+	citadel::PublishUserVcard(con, s.username, vc_err);
+}
+
+// ---- GVSN / GVEA / DVCA --------------------------------------------------
+//
+// From citadel/server/modules/vcard/serv_vcard.c. All three are listings and
+// all three require only a logged-in session.
+
+void HandleGvsn(Connection &con, Session &s, net::ClientStream &stream) {
+	if (!s.authed) {
+		stream.WriteLine("530 You must log in first.");
+		return;
+	}
+	std::vector<std::string> names{s.username};
+	citadel::Registration reg;
+	citadel::GetRegistration(con, s.username, reg);
+	// The internet display name, when it differs from the account name. Citadel
+	// compares case-insensitively and emits only the second one.
+	if (!reg.real_name.empty() && util::Lower(reg.real_name) != util::Lower(s.username)) {
+		names.push_back(reg.real_name);
+	}
+	WriteListing(stream, names, "valid screen names:");
+}
+
+void HandleGvea(Connection &con, Session &s, net::ClientStream &stream) {
+	if (!s.authed) {
+		stream.WriteLine("530 You must log in first.");
+		return;
+	}
+	std::vector<std::string> addrs;
+	addrs.push_back(s.username + "@" + citadel::GetConfig(con, "c_fqdn", "localhost"));
+	citadel::Registration reg;
+	citadel::GetRegistration(con, s.username, reg);
+	if (!reg.email.empty() && util::Lower(reg.email) != util::Lower(addrs.front())) {
+		addrs.push_back(reg.email);
+	}
+	WriteListing(stream, addrs, "valid email addresses:");
+}
+
+void HandleDvca(Connection &con, Session &s, net::ClientStream &stream) {
+	if (!s.authed) {
+		stream.WriteLine("530 You must log in first.");
+		return;
+	}
+	if (!s.have_room) {
+		stream.WriteLine("540 No room selected.");
+		return;
+	}
+	// Every vCard in the current room, reduced to "Display Name <address>".
+	// Citadel walks the room's messages looking for vCard parts; so does this.
+	std::vector<std::string> out;
+	for (int64_t msgnum : citadel::RoomMessages(con, s.room.room_num, "all", 0, 0)) {
+		citadel::Message msg;
+		if (!citadel::LoadMessage(con, msgnum, msg)) {
+			continue;
+		}
+		std::string body = citadel::ObjectBody(msg, "text/vcard");
+		if (body.empty()) {
+			continue;
+		}
+		quackmail::vcard::Card card;
+		if (!quackmail::vcard::ParseOne(body, card)) {
+			continue;
+		}
+		std::string fn = card.Fn();
+		for (const auto &addr : card.Emails()) {
+			if (addr.empty()) {
+				continue;
+			}
+			// A display name containing a comma has to be quoted, or the
+			// address list it lands in parses as two recipients.
+			if (fn.empty()) {
+				out.push_back(addr);
+			} else if (fn.find(',') != std::string::npos) {
+				out.push_back("\"" + fn + "\" <" + addr + ">");
+			} else {
+				out.push_back(fn + " <" + addr + ">");
+			}
+		}
+	}
+	WriteListing(stream, out, "addresses:");
 }
 
 // GREG <user> — read registration back. A user may read their own; an aide may
@@ -1052,6 +1141,10 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 					stream.WriteLine("550 " + err);
 				} else {
 					CompleteLogin(con, s, name);
+					// A new account is findable straight away, rather than only
+					// after they happen to run REGI.
+					std::string vc_err;
+					citadel::PublishUserVcard(con, name, vc_err);
 					citadel::PostAideMessage(con, "New user: " + name,
 					                         "A new account was created from the Citadel client "
 					                         "protocol.\n\nUser: " + name + "\n");
@@ -1152,6 +1245,12 @@ void HandleCitadel(DatabaseInstance &db, net::ClientStream &stream) {
 				citadel::SetLastRead(con, s.username, s.room.room_num, n);
 				stream.WriteLine("200 " + std::to_string(n));
 			}
+		} else if (verb == "GVSN") {
+			HandleGvsn(con, s, stream);
+		} else if (verb == "GVEA") {
+			HandleGvea(con, s, stream);
+		} else if (verb == "DVCA") {
+			HandleDvca(con, s, stream);
 		} else if (verb == "CONF") {
 			HandleConf(con, s, stream, rest);
 		} else if (verb == "GPEX") {

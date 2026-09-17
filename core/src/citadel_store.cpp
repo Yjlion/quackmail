@@ -1,6 +1,7 @@
 #include "quackmail/citadel_store.hpp"
 
 #include "quackmail/citadel_msg.hpp"
+#include "quackmail/vcard.hpp"
 #include "quackmail/quota.hpp"
 #include "quackmail/wiki.hpp"
 
@@ -1732,6 +1733,70 @@ std::vector<int64_t> CreatableFloors(Connection &con, const std::string &usernam
 	}
 	std::sort(out.begin(), out.end());
 	return out;
+}
+
+// ---- the Global Address Book --------------------------------------------
+
+bool PublishUserVcard(Connection &con, const std::string &username, std::string &err) {
+	if (username.empty()) {
+		err = "no user";
+		return false;
+	}
+	int64_t usernum = GetOrAssignUserNum(con, username);
+	if (usernum == 0) {
+		// Returns 0 for a user that does not exist; it does not create one.
+		err = "no such user";
+		return false;
+	}
+
+	Registration reg;
+	GetRegistration(con, username, reg);
+
+	// The euid is stable per user, so re-registering replaces the card rather
+	// than leaving a second one behind. Citadel keys a vCard by its own UID;
+	// this is that UID, chosen so it cannot collide with a contact somebody
+	// imported.
+	std::string uid = "user-" + std::to_string(usernum) + "@" + GetConfig(con, "c_nodename", "quackcit");
+
+	vcard::Card card;
+	card.version = 3;
+	card.Set("UID", uid);
+	// FN is what a lookup shows. The real name when they gave one, the account
+	// name otherwise -- never empty, because a card with no label cannot be
+	// listed.
+	card.Set("FN", reg.real_name.empty() ? username : reg.real_name);
+	if (!reg.real_name.empty()) {
+		// N wants five components; we only ever know the whole string, so it
+		// goes in the family slot rather than being split on a guess about
+		// which word is the surname.
+		card.SetComponents("N", {reg.real_name, "", "", "", ""});
+	} else {
+		card.SetComponents("N", {username, "", "", "", ""});
+	}
+	card.Set("NICKNAME", username);
+	std::string email = reg.email;
+	if (email.empty()) {
+		email = username + "@" + GetConfig(con, "c_fqdn", GetConfig(con, "c_nodename", "quackcit"));
+	}
+	card.Set("EMAIL", email);
+	if (!reg.phone.empty()) {
+		card.Set("TEL", reg.phone);
+	}
+	if (!reg.street.empty() || !reg.city.empty() || !reg.state.empty() || !reg.zipcode.empty() ||
+	    !reg.country.empty()) {
+		card.SetComponents("ADR", {"", "", reg.street, reg.city, reg.state, reg.zipcode, reg.country});
+	}
+
+	Message msg;
+	msg.euid = uid;
+	msg.subject = card.Fn();
+	msg.author = username;
+	msg.msgtime = (int64_t)std::time(nullptr);
+	msg.format_type = 4;
+	msg.raw = WrapObject("text/vcard", vcard::Emit(card, 3), card.Fn(), uid, username,
+	                     GetConfig(con, "c_nodename", "quackcit"));
+
+	return UpsertByEuid(con, msg, kGlobalAddressBookRoom, err) >= 0;
 }
 
 ExpirePolicy::ExpirePolicy() {

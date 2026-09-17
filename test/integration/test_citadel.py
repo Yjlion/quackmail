@@ -254,6 +254,54 @@ def main():
             "SELECT count(*) FROM citadel_room_msgs WHERE room_num = 0").fetchone()[0]
         assert after == 1, f"the Lobby kept {after} messages under a policy of 1"
 
+        # ---- the Global Address Book -------------------------------------
+        # Citadel copies a user's own vCard into ADDRESS_BOOK_ROOM whenever it
+        # is written (serv_vcard.c). Without that the room stays empty on a real
+        # system and nobody can be looked up on it -- which is how it has been
+        # here since the room was first seeded.
+        cards = con.execute(
+            "SELECT m.subject FROM citadel_messages m JOIN citadel_room_msgs rm USING (msgnum) "
+            "WHERE rm.room_num = 2 ORDER BY m.subject"
+        ).fetchall()
+        assert ("citaide",) in cards and ("cituser",) in cards, \
+            f"registering did not publish a vCard to the Global Address Book: {cards}"
+
+        # REGI republishes it with the real name, and replaces rather than
+        # duplicates -- the card is keyed by euid.
+        a.send("REGI")
+        hdr = a.readline()
+        assert hdr.startswith("400"), f"REGI header: {hdr}"
+        for f in ("Ada Lovelace", "1 Analytical Way", "London", "", "NW1",
+                  "555-0100", "ada@example.org", "UK"):
+            a.send(f)
+        a.send("000")
+        assert a.command("NOOP").startswith("200"), "NOOP after REGI"
+        cards = con.execute(
+            "SELECT m.subject FROM citadel_messages m JOIN citadel_room_msgs rm USING (msgnum) "
+            "WHERE rm.room_num = 2 AND m.author = 'citaide'"
+        ).fetchall()
+        assert cards == [("Ada Lovelace",)], f"REGI left {cards} in the address book"
+
+        # GVSN / GVEA: the names and addresses this session may send as.
+        a.send("GVSN")
+        assert a.readline().startswith("100"), "GVSN header"
+        names = a.read_listing()
+        assert "citaide" in names and "Ada Lovelace" in names, f"GVSN: {names}"
+        a.send("GVEA")
+        assert a.readline().startswith("100"), "GVEA header"
+        addrs = a.read_listing()
+        assert any("ada@example.org" == x for x in addrs), f"GVEA: {addrs}"
+
+        # DVCA dumps the current room's vCards as addresses.
+        resp = a.command("GOTO Global Address Book")
+        assert resp.startswith("200"), f"GOTO the address book: {resp}"
+        a.send("DVCA")
+        assert a.readline().startswith("100"), "DVCA header"
+        dump = a.read_listing()
+        assert any("ada@example.org" in x for x in dump), f"DVCA: {dump}"
+        assert any(x.startswith("Ada Lovelace <") for x in dump), \
+            f"DVCA did not pair the name with the address: {dump}"
+
         a.command("QUIT")
         c.command("QUIT")
     finally:
@@ -295,7 +343,8 @@ def main():
     assert all(a == "quackcit" for a, _ in notice), f"an aide notice has a user author: {notice}"
 
     print("PASS: Citadel NEWU -> GOTO -> ENT0 -> MSGS -> MSG0 round-trip, Aide notice,")
-    print("      CONF (GET/SET/GETVAL/PUTVAL/LISTVAL/GETSYS/PUTSYS), GPEX/SPEX/TDAP")
+    print("      CONF (GET/SET/GETVAL/PUTVAL/LISTVAL/GETSYS/PUTSYS), GPEX/SPEX/TDAP,")
+    print("      and the Global Address Book (GVSN/GVEA/DVCA)")
 
 
 if __name__ == "__main__":

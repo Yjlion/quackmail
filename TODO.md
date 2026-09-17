@@ -245,6 +245,22 @@ Unreleased, on top of v1.0.1.
         there since the beginning; the write side was the same hand-rolled
         upsert in four places.
 
+- [x] **Citadel breadth, part 2: the Global Address Book actually has people in
+      it.** The room has been seeded since the beginning and nothing has ever
+      written to it, so nobody could be looked up on this server. Citadel points
+      a user's own vCard into `ADDRESS_BOOK_ROOM` whenever it is written
+      (`serv_vcard.c`); `PublishUserVcard` does the same on `NEWU` and on `REGI`,
+      keyed by euid so re-registering replaces the card rather than leaving a
+      second one.
+  - [x] `GVSN`, `GVEA` and `DVCA` — Citadel's actual verbs. There is no `IGAB`,
+        whatever the backlog said.
+  - [x] **The web composer's recipient picker now sees the directory.**
+        `ContactAddressOptions` read only the user's own Contacts room, so the
+        address book being empty was half the reason it looked thin. Own
+        contacts are harvested first and addresses deduped, so a colleague you
+        have your own card for is offered with the name *you* gave them; the
+        shared room is only offered to somebody who may actually read it.
+
 Released work lives in [TODO-archive.md](TODO-archive.md), newest first.
 
 ## Backlog
@@ -288,11 +304,10 @@ The first came out of building 0.6.0 and is the one most likely to bite.
     file areas that already exist, and would give the official `citadel` text
     client downloads. The best-specified piece left, and the natural follow-on
     to the file-area work.
-  - **Address books**: a user's vCard is not published to the Global Address
-    Book on `REGI`, so that room stays empty on a real system. Citadel's verbs
-    are `GVSN`/`GVEA`/`DVCA` — note there is no `IGAB`, whatever this list said
-    before. `ContactAddressOptions` in the web composer also reads only the
-    user's own Contacts room, so it would pick up colleagues for free.
+  - **Address books** have shipped (above). What is left of them is the
+    per-user `My Citadel Config` room Citadel keeps a user's own card in; this
+    publishes straight to the shared book instead, which is the half that
+    mattered.
   - **The Citadel network mesh**, and the NNTP peer-feed verbs. Worth knowing
     before starting: **Citadel's own NNTP implements none of
     `IHAVE`/`CHECK`/`TAKETHIS` or `MODE STREAM`** — it has ACTIVE, AUTHINFO,

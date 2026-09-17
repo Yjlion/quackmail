@@ -59,6 +59,8 @@ constexpr int64_t kUserSettableFlags = US_LASTOLD | US_EXPERT | US_UNLISTED | US
 // Reserved room numbers (fixed, seeded ids) — match Citadel's low room numbers.
 constexpr int64_t kLobbyRoom = 0;
 constexpr int64_t kAideRoom = 1;
+// Citadel's ADDRESS_BOOK_ROOM ("Global Address Book"), seeded with this number.
+constexpr int64_t kGlobalAddressBookRoom = 2;
 
 // Access level at which a user is an aide (system administrator).
 constexpr int64_t kAideAxLevel = 6;
@@ -201,6 +203,20 @@ struct Registration {
 };
 
 bool GetRegistration(duckdb::Connection &con, const std::string &username, Registration &out);
+
+// Publish a user's vCard into the Global Address Book (room 2).
+//
+// Citadel does this in serv_vcard.c: when a user's own vCard is written, the
+// server points the *same message* into ADDRESS_BOOK_ROOM — a pointer, not a
+// copy, which is exactly what citadel_room_msgs is. Without it that room stays
+// empty on a real system, which is why nothing has ever been able to look
+// somebody up on this server.
+//
+// Built from the registration when there is one and from the account otherwise,
+// so a user who never ran REGI is still findable by name. Safe to call
+// repeatedly: the card is keyed by euid, so it is replaced rather than
+// duplicated.
+bool PublishUserVcard(duckdb::Connection &con, const std::string &username, std::string &err);
 bool SetRegistration(duckdb::Connection &con, const std::string &username, const Registration &reg);
 // Replace only the biography, leaving the registration fields alone.
 bool SetBio(duckdb::Connection &con, const std::string &username, const std::string &bio);
