@@ -459,6 +459,19 @@ std::string FlashText(const std::string &slug) {
 	if (slug == "deleted") {
 		return "Deleted.";
 	}
+	if (slug == "uploaded") {
+		return "File uploaded.";
+	}
+	if (slug == "upload_failed") {
+		return "The upload did not go through: choose a file, and check that it fits your storage quota.";
+	}
+	if (slug == "sshkey_added") {
+		return "SSH key added.";
+	}
+	if (slug == "sshkey_bad") {
+		return "That is not an SSH public key this server accepts. Paste one line from a .pub file "
+		       "(ssh-ed25519, ecdsa-sha2-nistp256/384/521, or an RSA key of 2048 bits or more).";
+	}
 	if (slug == "sent") {
 		return "Message sent.";
 	}
@@ -797,6 +810,14 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 		for (auto &u : unread) {
 			room_link(u.first, u.first.display_name, u.second, "home");
 		}
+		// Only when a file area exists at all: a flag test over the listing
+		// already in hand, not another query.
+		for (auto &r : rooms) {
+			if (r.qr_flags & quackmail::citadel::QR_DIRECTORY) {
+				item("/bbs/files", "nav.files", "files", "folder");
+				break;
+			}
+		}
 	}
 	item("/search", "nav.search", "search", "search");
 	if (MayCreateRooms(ctx)) {
@@ -813,6 +834,7 @@ std::string SidebarFor(const Ctx &ctx, const std::string &active) {
 	item("/prefs", "nav.preferences", "prefs", "settings");
 	item("/prefs/sieve", "nav.filters", "sieve", "filter");
 	item("/prefs/sessions", "nav.sessions", "sessions", "monitor");
+	item("/prefs/ssh", "nav.ssh_keys", "ssh", "shield");
 	endgroup();
 
 	// Same gate as the router applies to every /admin route, so the link never

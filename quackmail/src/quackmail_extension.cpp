@@ -39,6 +39,7 @@
 #include "quackmail/quota.hpp"
 #include "quackmail/sieve.hpp"
 #include "quackmail/spf.hpp"
+#include "quackmail/sshkeys.hpp"
 #include "quackmail/tz.hpp"
 #include "quackmail/util.hpp"
 #include "quackmail/vcard.hpp"
@@ -122,6 +123,11 @@ enum class UmbrellaKind {
 	FEED_TEST,
 	FEED_PARSE,
 	FEED_RENDER,
+	SSHKEY_ADD,
+	SSHKEY_LIST,
+	SSHKEY_REMOVE,
+	SSH_HOSTKEY,
+	SSH_HOSTKEY_IMPORT,
 };
 
 struct RowsBindData : public FunctionData {
@@ -844,6 +850,53 @@ unique_ptr<GlobalTableFunctionState> RowsInit(ClientContext &context, TableFunct
 			                        Value::BOOLEAN(it.html),
 			                        Value(it.content.empty() ? it.summary : it.content)});
 		}
+		break;
+	}
+	case UmbrellaKind::SSHKEY_ADD: {
+		// The user must exist: a key on a name nobody holds would log in the
+		// first person to register that name.
+		if (quackmail::citadel::GetOrAssignUserNum(con, bind.args[0]) == 0) {
+			gstate->rows.push_back({Value::BOOLEAN(false), Value("no such user"), Value()});
+			break;
+		}
+		quackmail::ssh::StoredKey k;
+		std::string err;
+		bool ok = quackmail::ssh::AddKey(con, bind.args[0], bind.args[1], k, err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "key added" : err),
+		                        ok ? Value(k.fingerprint) : Value()});
+		break;
+	}
+	case UmbrellaKind::SSHKEY_LIST: {
+		for (auto &k : quackmail::ssh::ListKeys(con, bind.args[0])) {
+			gstate->rows.push_back({Value(k.username), Value(k.type), Value::INTEGER(k.bits), Value(k.fingerprint),
+			                        Value(k.comment), Value::BIGINT(k.added_at), Value::BIGINT(k.last_used)});
+		}
+		break;
+	}
+	case UmbrellaKind::SSHKEY_REMOVE: {
+		bool ok = quackmail::ssh::RemoveKey(con, bind.args[0], bind.args[1]);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "key removed" : "no such key for that user")});
+		break;
+	}
+	case UmbrellaKind::SSH_HOSTKEY: {
+		// Generated here if the listener has not needed it yet, so an operator
+		// can publish the fingerprint before anyone connects.
+		quackmail::ssh::HostKey hk;
+		std::string err;
+		if (!quackmail::ssh::SiteHostKey(con, hk, err)) {
+			gstate->rows.push_back({Value(), Value(), Value(err)});
+			break;
+		}
+		quackmail::ssh::PublicKey pk;
+		quackmail::ssh::ParseKeyBlob(hk.blob, pk, err);
+		gstate->rows.push_back({Value(quackmail::ssh::AuthorizedKeyLine(pk)),
+		                        Value(quackmail::ssh::Fingerprint(hk.blob)), Value("ok")});
+		break;
+	}
+	case UmbrellaKind::SSH_HOSTKEY_IMPORT: {
+		std::string err;
+		bool ok = quackmail::ssh::ImportHostKey(con, bind.args[0], err);
+		gstate->rows.push_back({Value::BOOLEAN(ok), Value(ok ? "host key replaced; restart qm_ssh" : err)});
 		break;
 	}
 	case UmbrellaKind::FEED_RENDER: {
@@ -2699,6 +2752,19 @@ void LoadInternal(ExtensionLoader &loader) {
 	                 {V, V, V, V, V, I, B, V});
 	RegisterPolicyFn(loader, "qm_feed_render", UmbrellaKind::FEED_RENDER, {V, I}, {"message", "note"},
 	                 {V, V});
+
+	// SSH: each user's public keys (the `publickey` logins the qm_ssh listener
+	// accepts), and the server's own host key.
+	RegisterPolicyFn(loader, "qm_sshkey_add", UmbrellaKind::SSHKEY_ADD, {V, V}, {"ok", "note", "fingerprint"},
+	                 {B, V, V});
+	RegisterPolicyFn(loader, "qm_sshkeys", UmbrellaKind::SSHKEY_LIST, {V},
+	                 {"username", "type", "bits", "fingerprint", "comment", "added_at", "last_used"},
+	                 {V, V, LogicalType::INTEGER, V, V, I, I});
+	RegisterPolicyFn(loader, "qm_sshkey_remove", UmbrellaKind::SSHKEY_REMOVE, {V, V}, kOkNote, kOkNoteTypes);
+	RegisterPolicyFn(loader, "qm_ssh_hostkey", UmbrellaKind::SSH_HOSTKEY, {}, {"public_key", "fingerprint", "note"},
+	                 {V, V, V});
+	RegisterPolicyFn(loader, "qm_ssh_hostkey_import", UmbrellaKind::SSH_HOSTKEY_IMPORT, {V}, kOkNote,
+	                 kOkNoteTypes);
 }
 
 } // namespace

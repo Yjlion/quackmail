@@ -67,6 +67,8 @@ const Msg kMessages[] = {
     {"nav.groupware", "Groupware", "Groupware", "Travail collaboratif"},
     {"nav.rooms", "Rooms", "Räume", "Salons"},
     {"nav.all_rooms", "All rooms", "Alle Räume", "Tous les salons"},
+    {"nav.files", "Files", "Dateien", "Fichiers"},
+    {"nav.ssh_keys", "SSH keys", "SSH-Schlüssel", "Clés SSH"},
     {"nav.create_room", "Create a room", "Raum erstellen", "Créer un salon"},
     {"nav.who_online", "Who is online", "Wer ist online", "Qui est en ligne"},
     {"nav.you", "You", "Sie", "Vous"},

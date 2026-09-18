@@ -298,10 +298,10 @@ def main():
 
         # ---- saving preferences ------------------------------------------
         #
-        # QR_UPLOAD is not one of this form's checkboxes. A checkbox set that is
+        # QR_NETWORK is not one of this form's checkboxes. A checkbox set that is
         # not exhaustive silently clears whatever it left out, so the bits the
         # form does not offer have to be carried over rather than rebuilt.
-        con.execute("UPDATE citadel_rooms SET qr_flags = qr_flags | 64 WHERE room_num = ?", [room_num])
+        con.execute("UPDATE citadel_rooms SET qr_flags = qr_flags | 2048 WHERE room_num = ?", [room_num])
         before = flags_of(con, room_num)
         status, _, _ = post(
             owner, settings + "/save",
@@ -311,7 +311,7 @@ def main():
         )
         assert status == 303, f"saving room settings returned {status}"
         after = flags_of(con, room_num)
-        assert after & 64, f"a flag the form does not offer was cleared: {before} -> {after}"
+        assert after & 2048, f"a flag the form does not offer was cleared: {before} -> {after}"
         assert after & 4, "the private flag was lost on save"
         view = con.execute(
             "SELECT default_view FROM citadel_rooms WHERE room_num = ?", [room_num]

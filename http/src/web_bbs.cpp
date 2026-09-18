@@ -3,6 +3,7 @@
 #include "web_views.hpp"
 
 #include "quackmail/citadel_msg.hpp"
+#include "quackmail/filearea.hpp"
 #include "quackmail/html_sanitize.hpp"
 #include "quackmail/mime.hpp"
 
@@ -188,6 +189,12 @@ void GetBbsRoom(Ctx &ctx) {
 	// deliberate escape hatch back to the message list — you want it the first
 	// time a Contacts room turns out to hold something that is not a vCard.
 	if (ctx.req.Param("view") != "raw") {
+		// A directory room is a file listing whatever its view says: being a
+		// file area is a flag, not a view (see web_files.cpp).
+		if (quackmail::filearea::IsFileArea(room)) {
+			FilesIndex(ctx, room);
+			return;
+		}
 		const RoomViewHandler &vh = ViewFor((int)room.default_view);
 		if (vh.index) {
 			vh.index(ctx, room);
