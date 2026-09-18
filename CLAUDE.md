@@ -107,6 +107,16 @@ or a timer-driven background worker.
   (RSS/Atom over the existing `xmlstream` tokenizer), `fetch.hpp` (the model).
   `net::Connect` is the shared dialer, with a connect timeout — never write
   another `getaddrinfo`/`connect` pair.
+- `filearea.hpp` — the file areas (`QR_DIRECTORY` rooms): `VisibleAreas` /
+  `FindArea` (the "/" of FTP, SFTP and the web file view), `CanList` /
+  `CanDownload` / `CanUpload`, `ListFiles`, `GetFile`, `PutFile`. A file is a
+  message; never store one any other way.
+- `sshkeys.hpp` — SSH wire `Reader`/`Writer`, `ParseAuthorizedKey`,
+  `Fingerprint`, `VerifySignature`, the site host key (`SiteHostKey`), and the
+  per-user key store (`AddKey`, `UserHasKey`). The SSH transport, listener and
+  SFTP server are in `telnet/src/ssh_*.cpp` and `sftp.cpp`, because the shell
+  they carry is the telnet extension's; it reaches the shell over a socket pair
+  still speaking telnet framing (0xFF doubled, window changes as NAWS).
 - Cross-session state lives in `citadel_sessions` and `citadel_express`
   (already backing `RWHO` / `SEXP` / `GEXP`).
 

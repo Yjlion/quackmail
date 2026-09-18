@@ -49,7 +49,7 @@ listings):
 verbs (`OPEN`/`READ`/`CLOS`/`UOPN`/`WRIT`) are deferred (see Roadmap). There is
 no `EXPI` verb in Citadel; `TDAP` is the one that runs the purger.
 
-## The BBS shell (telnet)
+## The BBS shell (telnet and SSH)
 
 ![Signing in over telnet](../screenshots/text-login.png)
 
@@ -60,7 +60,18 @@ login, the `<Room>>` prompt, and the menu from `citadel.rc`:
 
 ```
 telnet localhost 2300
+ssh -p 2222 alice@localhost
 ```
+
+Over SSH the shell starts already signed in — by password, or by a key
+registered in the user's profile (*Preferences → SSH keys* on the web, or
+`quackcitadm.sh sshkey add`) — so the name and password prompts are skipped.
+A space in a user name can be typed as `_`: `ssh joe_user@host` is "Joe User".
+The terminal type and window size come from the SSH pty request, and resizing
+the window reflows the pager. `sftp` on the same port reaches the file areas; see
+[SSH and SFTP](protocols.md#ssh-and-sftp).
+
+![Signing in over SSH with a key](../screenshots/text-ssh-login.png)
 ```
 QuackCit BBS - The Cloud
 
@@ -134,8 +145,9 @@ The transfer protocol is **Xmodem-1K with CRC**. Zmodem is not implemented: it i
 a much larger protocol for the same result over a link TCP has already made
 reliable. Typing a text file out through the pager, and base64 for a terminal
 with no transfer protocol at all, cover the rest. Anything large, or a whole
-directory at once, is better fetched over WebDAV at `/dav/files/` — the same
-files, the same rooms, the same permissions.
+directory at once, is better fetched over WebDAV at `/dav/files/`, over SFTP, or
+from the file view in the web interface — the same files, the same rooms, the
+same permissions.
 
 Note one consequence of Xmodem having no length field: the last block is padded
 and the padding is stripped on arrival, so a file whose real last byte is `0x1A`

@@ -21,6 +21,14 @@ Run after `make release`, from anywhere:
     ~/venv/bin/python tools/screenshots.py [--out screenshots] [--keep-running]
 """
 import argparse
+import fcntl
+import pty
+import select
+import shutil
+import struct
+import subprocess
+import tempfile
+import termios
 import base64
 import datetime as dt
 import html
@@ -45,6 +53,7 @@ HOST = "127.0.0.1"
 PORT_HTTP = 18080
 PORT_HTTPS = 18443
 PORT_TELNET = 12300
+PORT_SSH = 12222
 BASE = f"http://{HOST}:{PORT_HTTP}"
 # The browser uses the TLS listener. Every page served over plaintext carries a
 # "this connection is not encrypted" banner, which is correct and which would
@@ -196,6 +205,20 @@ EVENTS = [
     ("Docs day", +12, "10:00", "12:00", "", "", "Split the README into docs/."),
 ]
 
+# A file area (a QR_DIRECTORY room) and what is in it: (name, type, description,
+# body). Uploaded over WebDAV, which is one of the doors a real user would use.
+FILE_ROOM = "Downloads"
+FILES = [
+    ("citadel-3.0-manual.pdf", "application/pdf", "The original Citadel manual, scanned",
+     b"%PDF-1.4\n" + b"x" * 184_000),
+    ("quackcit-logo.png", "image/png", "Logo, 512x512",
+     b"\x89PNG\r\n\x1a\n" + b"\0" * 41_500),
+    ("room-list.txt", "text/plain", "Every room on the old board, one per line",
+     b"Lobby\nMail\nAide\nComputers\nHam radio\n" * 40),
+    ("release-notes.md", "text/markdown", "",
+     b"# Release notes\n\nSSH, SFTP and a file view in the webmail.\n" * 30),
+]
+
 # The pages to capture: (filename stem, path, viewport).
 WEB_SHOTS = [
     ("login", "/login", DESKTOP),
@@ -206,6 +229,8 @@ WEB_SHOTS = [
     ("search", "/search?q=citadel", DESKTOP),
     ("prefs", "/prefs", DESKTOP),
     ("prefs-sieve", "/prefs/sieve", DESKTOP),
+    ("prefs-ssh", "/prefs/ssh", DESKTOP),
+    ("files-index", "/bbs/files", DESKTOP),
 ]
 
 # Captured in a second browser context, signed in as the aide.
@@ -439,6 +464,52 @@ def seed_wiki(c, con):
     return room
 
 
+def seed_files(con):
+    """A file area with a few uploads in it, put there over WebDAV."""
+    con.execute("CALL cit_room_add(?)", [FILE_ROOM])
+    # QR_DIRECTORY | QR_UPLOAD | QR_DOWNLOAD | QR_VISDIR
+    con.execute("UPDATE citadel_rooms SET qr_flags = qr_flags | 32 | 64 | 128 | 256, "
+                "info = 'Shared downloads. Also on FTP, SFTP and as a WebDAV drive.' "
+                "WHERE display_name = ?", [FILE_ROOM])
+    room_num = con.execute("SELECT room_num FROM citadel_rooms WHERE display_name = ?",
+                           [FILE_ROOM]).fetchone()[0]
+    auth = "Basic " + base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
+    for name, ctype, _, body in FILES:
+        req = urllib.request.Request(f"{BASE}/dav/files/{USER}/{room_num}/{urllib.parse.quote(name)}",
+                                     data=body, method="PUT")
+        req.add_header("Authorization", auth)
+        req.add_header("Content-Type", ctype)
+        try:
+            urllib.request.urlopen(req, timeout=15).close()
+        except urllib.error.HTTPError as e:
+            if e.code not in (201, 204):
+                raise SystemExit(f"uploading {name} over WebDAV returned {e.code}")
+    return f"/bbs/room/{room_num}"
+
+
+def seed_ssh_key(con):
+    """A key already on the SSH keys page, so the picture shows the list."""
+    if not shutil.which("ssh-keygen"):
+        return
+    tmp = tempfile.mkdtemp(prefix="qc-shot-key-")
+    try:
+        key = os.path.join(tmp, "id")
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "alice@desktop", "-f", key],
+                       check=True)
+        with open(key + ".pub") as f:
+            con.execute("SELECT * FROM qm_sshkey_add(?, ?)", [USER, f.read().strip()]).fetchall()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def describe_files(c, room):
+    """Descriptions go in through the file view's own form."""
+    _, page = c.get(room)
+    for name, _, desc, _ in FILES:
+        if desc:
+            c.post(room + "/file/describe", {"_csrf": csrf(page), "name": name, "description": desc})
+
+
 def start_server(con):
     for name in EXTENSIONS:
         con.execute(f"LOAD '{ext(name)}'")
@@ -474,6 +545,9 @@ def start_server(con):
                        [HOST, PORT_TELNET]).fetchone()[0]
     if note != "started":
         raise SystemExit(f"qm_telnet did not start: {note}")
+    note = con.execute("SELECT note FROM qm_ssh_start(?, ?)", [HOST, PORT_SSH]).fetchone()[0]
+    if note != "started":
+        raise SystemExit(f"qm_ssh did not start: {note}")
     time.sleep(0.5)
 
 
@@ -590,6 +664,63 @@ def telnet_session(keystrokes, settle=0.7):
     # the last thing a reader should see is the prompt, not "Goodbye".
     s.close()
     return bytes(out)
+
+
+def ssh_session(con, keystrokes, settle=0.8):
+    """Log in with the system `ssh` under a real pty and return the transcript.
+
+    A pty rather than pipes, so ssh sends a pty-req with an actual window size
+    and the BBS pages and echoes exactly as it does for a person. The key is a
+    throwaway ed25519 registered through qm_sshkey_add, which is the point of
+    the picture: no password prompt anywhere.
+    """
+    tmp = tempfile.mkdtemp(prefix="qc-shot-ssh-")
+    try:
+        key = os.path.join(tmp, "id_ed25519")
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "alice@laptop", "-f", key],
+                       check=True)
+        with open(key + ".pub") as f:
+            con.execute("SELECT * FROM qm_sshkey_add(?, ?)", [USER, f.read().strip()]).fetchall()
+        hostkey = con.execute("SELECT public_key FROM qm_ssh_hostkey()").fetchone()[0]
+        known = os.path.join(tmp, "known_hosts")
+        with open(known, "w") as f:
+            f.write(f"[{HOST}]:{PORT_SSH} {hostkey}\n")
+
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+        env = dict(os.environ, TERM="xterm-256color")
+        env.pop("SSH_AUTH_SOCK", None)
+        proc = subprocess.Popen(
+            ["ssh", "-F", "/dev/null", "-p", str(PORT_SSH), "-i", key, "-o", "IdentitiesOnly=yes",
+             "-o", f"UserKnownHostsFile={known}", "-o", "StrictHostKeyChecking=yes",
+             "-o", "LogLevel=ERROR", f"{USER}@{HOST}"],
+            stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True)
+        os.close(slave)
+        out = bytearray(f"$ ssh {USER}@quackcit.example\r\n".encode())
+
+        def drain(wait):
+            end = time.time() + wait
+            while time.time() < end:
+                r, _, _ = select.select([master], [], [], 0.1)
+                if r:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    out.extend(chunk)
+
+        drain(2.5)
+        for k in keystrokes:
+            os.write(master, k.encode())
+            drain(settle)
+        proc.kill()
+        proc.wait()
+        os.close(master)
+        return bytes(out)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 PALETTE = {
@@ -741,6 +872,9 @@ def main():
         post_to_lobby(con, author, subject, body)
     rooms = seed_groupware(c)
     wiki_room = seed_wiki(c, con)
+    files_room = seed_files(con)
+    describe_files(c, files_room)
+    seed_ssh_key(con)
 
     # The Lobby by number: a Citadel room name may contain '/', so rooms are
     # addressed by number everywhere, and the sidebar only lists rooms with
@@ -777,6 +911,8 @@ def main():
             captured.append((shoot(page, args.out, "web-room-" + label.lower(),
                                    href, DESKTOP), href))
         captured.append((shoot(page, args.out, "web-bbs-room", lobby, DESKTOP), lobby))
+        # A file area: the room page of a directory room is a file listing.
+        captured.append((shoot(page, args.out, "web-files", files_room, DESKTOP), files_room))
 
         # The wiki: the page itself, the index, the history and a diff.
         captured.append((shoot(page, args.out, "web-wiki", wiki_room + "/wiki?page=home",
@@ -836,7 +972,7 @@ def main():
         # Narrow: the sidebar is a CSS-only toggle, the listing becomes cards,
         # and with a message open the list gets out of the way entirely — which
         # is the layout most likely to regress, so it is captured too.
-        mobile = [("mail-inbox", inbox), ("bbs-room", lobby)]
+        mobile = [("mail-inbox", inbox), ("bbs-room", lobby), ("files", files_room)]
         if opened:
             mobile.append(("mail-reader", opened))
         for stem, path in mobile:
@@ -876,6 +1012,22 @@ def main():
             print(f"  text-{stem}.png  <- {' '.join(k or '<enter>' for k in keys[2:]) or 'sign in'}")
             term_shots.append((f"text-{stem}", caption))
 
+        # The same shell over SSH, logged in with a key: no name, no password.
+        if shutil.which("ssh") and shutil.which("ssh-keygen"):
+            con.execute("UPDATE citadel_users SET flags = (flags & ~(?::BIGINT)) | ? WHERE username = ?",
+                        [US_EXPERT, US_COLOR, USER])
+            caption = "ssh alice@host - signed in with a key registered in her profile"
+            raw = ssh_session(con, [])
+            term.set_content(terminal_html(raw, caption), wait_until="load")
+            box = term.locator(".term").bounding_box()
+            term.set_viewport_size({"width": int(box["width"]) + 40,
+                                    "height": int(box["height"]) + 60})
+            term.screenshot(path=os.path.join(args.out, "text-ssh-login.png"), full_page=True)
+            print("  text-ssh-login.png  <- ssh with a key")
+            term_shots.append(("text-ssh-login", caption))
+        else:
+            print("  (no ssh client installed - skipping text-ssh-login.png)")
+
         browser.close()
 
     write_index(args.out, captured, term_shots)
@@ -891,6 +1043,7 @@ def main():
     con.execute("CALL qm_http_stop()")
     con.execute("CALL qm_https_stop()")
     con.execute("CALL qm_telnet_stop()")
+    con.execute("CALL qm_ssh_stop()")
     con.close()
     print(f"\n{len(captured) + len(term_shots)} images in {args.out}")
 
@@ -911,10 +1064,10 @@ def write_index(out, web, term):
     ]
     for stem, path in web:
         lines += [f"### `{path}`", "", f"![{stem}]({stem}.png)", ""]
-    lines += ["## The BBS shell (telnet)", "",
+    lines += ["## The BBS shell (telnet and SSH)", "",
               "`quackmail_telnet` *is* the Citadel text client, running server-side,",
-              "so a plain `telnet` gets the BBS. These are real sessions replayed",
-              "through a terminal emulator.", ""]
+              "so a plain `telnet` — or `ssh user@host` — gets the BBS. These are real",
+              "sessions replayed through a terminal emulator.", ""]
     for stem, caption in term:
         lines += [f"### {caption}", "", f"![{stem}]({stem}.png)", ""]
     with open(os.path.join(out, "README.md"), "w", encoding="utf-8") as f:

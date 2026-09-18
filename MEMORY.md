@@ -967,6 +967,34 @@ and guarding only creation would have looked complete.
   prints. Neither file rotates, and `errlog_delta`'s absolute offsets are why
   adding rotation is not free.
 
+### SSH is written on OpenSSL, with no SSH library (2026-09-18)
+
+The user chose this over installing libssh: libssh2 (the only SSH library on
+the build host) is client-only, and a server library would be a new runtime
+dependency on every deploy host. The price is a transport we maintain, so the
+algorithm list is deliberately short and modern — `curve25519-sha256`,
+`ssh-ed25519` host key, chacha20-poly1305 / AES-GCM, and AES-CTR + HMAC-SHA2
+only because paramiko and older Java clients have no AEAD. No SHA-1, no CBC,
+strict kex on. Adding an algorithm means a real-client test in
+`test/integration/test_ssh.py`, which drives the system OpenSSH binaries.
+
+The listener is in `quackmail_telnet`, not its own module: the shell it carries
+is that extension's C++. The SSH session feeds the shell through a socket pair
+**still speaking telnet framing** — client 0xFF doubled, window-change sent as
+IAC SB NAWS — so `telnet::Session` has one input parser for both doors and only
+its output side knows about SSH (`BeginSsh`).
+
+### A 2026-09 crash-loop at startup that was never reproduced
+
+After v1.1.0 a deployed server died inside `startup.sql` with nothing in
+`quackcit.err`. The same tarball started cleanly here on fresh and
+v1.0.1-created databases. What was fixed on suspicion: schema warmed once before
+any listener/worker, workers' first tick delayed, `RunExpiry`'s table-wide
+orphan DELETE narrowed, an index on an upserted column dropped, and
+`ServerController::Stop` now drains sessions. If it recurs, get a gdb backtrace
+before theorising again — `test/integration/test_deploy_start.py` is the local
+harness for that path.
+
 ## The parity oracle in docker (portable, and what to use by default)
 
 The oracle does not need a dedicated box. `citadeldotorg/citadel` is the same
