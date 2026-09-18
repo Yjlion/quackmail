@@ -58,6 +58,7 @@ const std::vector<Route> &Routes() {
 		RegisterAuthRoutes(r);
 		RegisterMailRoutes(r);
 		RegisterBbsRoutes(r);
+		RegisterFileRoutes(r);
 		RegisterChatRoutes(r);
 		// After the BBS routes: these share its /bbs/room/:n prefix.
 		RegisterRoomAdminRoutes(r);

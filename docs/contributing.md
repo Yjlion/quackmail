@@ -107,7 +107,18 @@ must ask `CanPost`, never re-derive it), `citadel_msg.hpp`, `mime.hpp`,
 `auth.hpp`, `sasl.hpp`, `delivery.hpp`, `mailpolicy.hpp`, `spf.hpp`, `dkim.hpp`,
 `dmarc.hpp`, `rbl.hpp`, `sieve.hpp`, `quota.hpp`, `listserv.hpp`, `worker.hpp`,
 `psl.hpp`, `tz.hpp`, `vcard.hpp`, `ical.hpp`, `vnote.hpp`, `html_sanitize.hpp`,
-`http_client.hpp`, `mail_client.hpp`, `feed.hpp`, `net.hpp`.
+`http_client.hpp`, `mail_client.hpp`, `feed.hpp`, `net.hpp`, `filearea.hpp`
+(the file areas — every door that shows files asks it, and `VisibleAreas` /
+`FindArea` are the shared "/" of FTP, SFTP and the web view), `sshkeys.hpp`
+(the SSH wire encoding, key parsing and signature checks, the host key, and
+the per-user key store).
+
+The SSH transport, the SFTP server and the listener live in `telnet/src/`
+(`ssh_transport.cpp`, `ssh_server.cpp`, `sftp.cpp`), not in a module of their
+own: the shell they carry is the telnet extension's C++, and extensions share
+no C++ state. The SSH side talks to the shell over a socket pair, still in
+telnet framing (a client 0xFF doubled, a window change sent as NAWS), so the
+shell has one input parser for both doors.
 
 `quota.hpp` is storage quota rather than send quota, which is why it is not in
 `mailpolicy.hpp`: that file is scoped to SMTP site policy, whereas storage is

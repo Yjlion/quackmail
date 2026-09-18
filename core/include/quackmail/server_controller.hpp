@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -26,6 +27,10 @@ public:
 
 	bool Start(duckdb::DatabaseInstance &db, const std::string &host, int port,
 	           const tls::TlsConfig &tls_config, ConnHandler handler, std::string &err);
+	// Closes the listening socket, then shuts down every open session's socket
+	// and waits (bounded) for the session threads to finish. A session thread
+	// that outlives this call can outlive the database too, which is a
+	// use-after-free the moment it touches its connection.
 	bool Stop(std::string &err);
 
 	// Re-read the certificate and key from the paths Start was given and put
@@ -67,6 +72,11 @@ private:
 	std::atomic<uint64_t> conn_count_ {0};
 	std::atomic<int> active_conns_ {0};
 	std::atomic<int> max_conns_ {0};
+
+	// Open client sockets, so Stop() can shut them down. Guarded by mutex_; a
+	// session removes its fd *before* closing it, so Stop never shuts down a
+	// descriptor number the kernel has already handed to someone else.
+	std::set<int> client_fds_;
 
 	int listen_fd_ = -1;
 	std::string host_;

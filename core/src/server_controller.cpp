@@ -1,6 +1,7 @@
 #include "quackmail/server_controller.hpp"
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <thread>
 
@@ -118,15 +119,24 @@ void ServerController::AcceptLoop() {
 		bool implicit = tls_config_.implicit;
 		SSL_CTX *ctx = tls_ctx_.Get();
 
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			client_fds_.insert(cfd);
+		}
 		std::thread([this, cfd, db, handler, implicit, ctx]() {
-			net::ClientStream stream(cfd);
-			bool ok = true;
-			if (implicit) {
-				std::string terr;
-				ok = stream.AcceptTls(ctx, terr);
-			}
-			if (ok && handler && db) {
-				handler(*db, stream);
+			{
+				net::ClientStream stream(cfd);
+				bool ok = true;
+				if (implicit) {
+					std::string terr;
+					ok = stream.AcceptTls(ctx, terr);
+				}
+				if (ok && handler && db) {
+					handler(*db, stream);
+				}
+				// Before the stream's destructor closes the fd: see client_fds_.
+				std::lock_guard<std::mutex> lock(mutex_);
+				client_fds_.erase(cfd);
 			}
 			active_conns_.fetch_sub(1);
 		}).detach();
@@ -152,6 +162,18 @@ bool ServerController::Stop(std::string &err) {
 	}
 	if (to_join.joinable()) {
 		to_join.join();
+	}
+	// Wake every session blocked in a read. Each one sees EOF, unwinds and
+	// releases its Connection. Bounded, because a handler stuck somewhere other
+	// than the socket should delay shutdown, not hang it.
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		for (int fd : client_fds_) {
+			::shutdown(fd, SHUT_RDWR);
+		}
+	}
+	for (int i = 0; i < 100 && active_conns_.load() > 0; i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 	}
 	running_.store(false);
 	return true;

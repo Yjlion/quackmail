@@ -2,6 +2,7 @@
 
 #include "quackmail/mail_store.hpp"
 
+#include <algorithm>
 #include <chrono>
 
 namespace quackmail {
@@ -50,6 +51,14 @@ bool PeriodicWorker::Stop(std::string &) {
 }
 
 void PeriodicWorker::Loop() {
+	// The first tick waits a moment rather than firing at Start: a server's
+	// startup script starts its workers and listeners back to back, and a tick
+	// walking every room on its own connection while the rest of startup is
+	// still creating tables is a race nobody needs to win. Capped, so a worker
+	// on a one-hour interval does not sit idle for an hour after a restart.
+	for (int i = 0; i < std::min(poll_secs_.load(), 10) * 10 && !stop_; i++) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
 	while (!stop_) {
 		try {
 			Connection con(*db_);

@@ -61,6 +61,18 @@ bool CanDownload(duckdb::Connection &con, const std::string &user, const citadel
 // Citadel has exactly one answer to "may this person write here".
 bool CanUpload(duckdb::Connection &con, const std::string &user, const citadel::Room &room);
 
+// Every file area `user` may list and has unlocked (a passworded room they
+// have not entered the password for stays hidden), in room order. This is the
+// "/" of every front door that shows the file areas as a tree: FTP, SFTP and
+// the web file view.
+std::vector<citadel::Room> VisibleAreas(duckdb::Connection &con, const std::string &user);
+
+// One of VisibleAreas by display name, case-insensitively. False when the user
+// cannot see an area of that name, which callers report as "no such directory"
+// rather than "permission denied" so a hidden room does not confirm it exists.
+bool FindArea(duckdb::Connection &con, const std::string &user, const std::string &name,
+              citadel::Room &out);
+
 // Every file in the room, oldest first. Does not check permission: the caller
 // has already asked CanList, and this is also what an admin path wants.
 std::vector<File> ListFiles(duckdb::Connection &con, int64_t room_num);

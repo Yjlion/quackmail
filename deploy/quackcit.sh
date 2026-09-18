@@ -198,6 +198,11 @@ gen_startup_sql() {
     _umbrella=$(ext_path quackmail) ||
         die "quackmail.duckdb_extension not found under $QUACKCIT_EXT_DIR (run make first)"
     printf 'LOAD %s;\n' "$(sql_str "$_umbrella")"
+    # Create and migrate every table once, here, on this one connection —
+    # before any listener or worker opens its own. LOAD alone does not (see
+    # CLAUDE.md), and otherwise the first worker tick and the first sessions all
+    # run the same DDL at once on an upgraded database.
+    printf "SELECT 'schema', 'ready' FROM qm_status() LIMIT 1;\n"
     _loaded=' quackmail '
     while read -r _key _extension _prefix _host _port _tls; do
         case "$_loaded" in

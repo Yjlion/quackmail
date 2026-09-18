@@ -4,6 +4,7 @@
 
 #include "quackmail/auth.hpp"
 #include "quackmail/sieve.hpp"
+#include "quackmail/sshkeys.hpp"
 #include "quackmail/quota.hpp"
 
 #include <algorithm>
@@ -1464,6 +1465,73 @@ void GetSessions(Ctx &ctx) {
 	Render(ctx, "Signed-in browsers", SessionTable(ctx, rows, "/prefs/sessions/revoke", false), opts);
 }
 
+// SSH public keys: the passwordless logins the SSH listener (and SFTP) accept.
+void GetSshKeys(Ctx &ctx) {
+	std::string body = "<p>Add the public half of a key pair here and the SSH listener will let you in with it, "
+	                   "no password asked. Paste one line from a <code>.pub</code> file — for example "
+	                   "<code>~/.ssh/id_ed25519.pub</code>, made with <code>ssh-keygen -t ed25519</code>. "
+	                   "The private key never leaves your computer.</p>";
+	auto keys = quackmail::ssh::ListKeys(ctx.con, ctx.username);
+	if (keys.empty()) {
+		body += "<p class=\"muted\">No keys yet.</p>";
+	} else {
+		Table table(ctx, "ssh-keys",
+		            {Column("", "Type"), Column("", "Fingerprint"), Column("", "Comment"),
+		             Column("added", "Added", "", true), Column("used", "Last used", "", true), Column("", "")});
+		for (auto &k : keys) {
+			std::string type = k.type + (k.bits > 0 ? " (" + std::to_string(k.bits) + ")" : "");
+			table.Add()
+			    .Text(type)
+			    .Html("<code>" + T(k.fingerprint) + "</code>", k.fingerprint)
+			    .Text(k.comment)
+			    .Html(T(FormatTime(ctx, k.added_at)), std::to_string(k.added_at))
+			    .Html(k.last_used > 0 ? T(FormatTime(ctx, k.last_used)) : "<span class=\"muted\">never</span>",
+			          std::to_string(k.last_used))
+			    .Html(FormStart(ctx, "/prefs/ssh/remove", "inline") + Hidden("fingerprint", k.fingerprint) +
+			          IconButton("Remove", "trash", "sec") + FormEnd());
+		}
+		body += table.Render();
+	}
+	body += "<article><h3>Add a key</h3>" + FormStart(ctx, "/prefs/ssh/add") +
+	        TextArea("key", "", 4) + Button("Add key") + FormEnd() + "</article>";
+
+	// The fingerprint a first connection will ask about, so it can be checked
+	// against something other than the connection itself.
+	quackmail::ssh::HostKey hk;
+	std::string err;
+	if (quackmail::ssh::SiteHostKey(ctx.con, hk, err)) {
+		std::string host = ConfigStr(ctx.con, "c_fqdn", "this-server");
+		std::string user = ctx.username;
+		for (char &c : user) {
+			if (c == ' ') {
+				c = '_';
+			}
+		}
+		body += "<article><h3>Connecting</h3><pre>ssh " + T(user) + "@" + T(host) + "\nsftp " + T(user) + "@" +
+		        T(host) + "</pre><p>Add <code>-p</code>/<code>-P</code> and the port if the server is not on 22. "
+		        "A space in a user name can be typed as <code>_</code>. On the first connection, check that the "
+		        "server's key fingerprint is:</p><pre>" +
+		        T(quackmail::ssh::Fingerprint(hk.blob)) + "</pre></article>";
+	}
+	PageOpts opts;
+	opts.active = "ssh";
+	Render(ctx, Tr(ctx, "nav.ssh_keys"), body, opts);
+}
+
+void PostSshKeyAdd(Ctx &ctx) {
+	quackmail::ssh::StoredKey k;
+	std::string err;
+	bool ok = quackmail::ssh::AddKey(ctx.con, ctx.username, ctx.req.Form("key"), k, err);
+	RedirectTo(ctx, "/prefs/ssh", ok ? "sshkey_added" : "sshkey_bad");
+}
+
+void PostSshKeyRemove(Ctx &ctx) {
+	// Qualified by username, like session revocation: another user's
+	// fingerprint pasted into the form removes nothing.
+	quackmail::ssh::RemoveKey(ctx.con, ctx.username, ctx.req.Form("fingerprint"));
+	RedirectTo(ctx, "/prefs/ssh", "deleted");
+}
+
 void PostRevokeSession(Ctx &ctx) {
 	// Qualified by username, so pasting someone else's hash does nothing.
 	quackmail::web::RevokeByHash(ctx.con, ctx.req.Form("token_hash"), ctx.username);
@@ -1545,6 +1613,9 @@ void RegisterPrefsRoutes(std::vector<Route> &out) {
 	out.push_back({"POST", "/prefs/sieve/rule/match", Role::User, PostSieveRuleMatch});
 	out.push_back({"POST", "/prefs/sieve/rule/stop", Role::User, PostSieveRuleStop});
 	out.push_back({"GET", "/prefs/sessions", Role::User, GetSessions});
+	out.push_back({"GET", "/prefs/ssh", Role::User, GetSshKeys});
+	out.push_back({"POST", "/prefs/ssh/add", Role::User, PostSshKeyAdd});
+	out.push_back({"POST", "/prefs/ssh/remove", Role::User, PostSshKeyRemove});
 	out.push_back({"POST", "/prefs/sessions/revoke", Role::User, PostRevokeSession});
 }
 

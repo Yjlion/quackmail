@@ -220,10 +220,13 @@ FROM duckdb_columns() WHERE table_name = 'citadel_msgids';
 ----
 msgid,msgnum
 
+# No secondary index on msgnum: every lookup is by msgid, and the upsert that
+# records one rewrites msgnum — an index on the updated column is what v1.1.0
+# had and what the schema now drops.
 query I
 SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'idx_msgids_msgnum';
 ----
-1
+0
 
 # The token a collection's ctag and sync-token are built from spans both halves:
 # the largest message number pointed into the room, and the largest tombstone

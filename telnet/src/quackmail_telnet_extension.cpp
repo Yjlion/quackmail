@@ -2,6 +2,7 @@
 
 #include "quackmail_telnet_extension.hpp"
 
+#include "ssh_server.hpp"
 #include "xmodem.hpp"
 
 #include "duckdb.hpp"
@@ -40,6 +41,7 @@ using namespace quackmail;
 // the access level a command needs (0 anyone, 1 room aide, 2 aide).
 ServerController g_telnet;
 ServerController g_telnets;
+ServerController g_ssh;
 
 constexpr size_t kMaxPostBytes = 256 * 1024;
 
@@ -1575,6 +1577,17 @@ void ValidateUsers(Connection &con, Bbs &s, telnet::Session &t) {
 
 // ------------------------------------------------------------------- login
 
+// Everything that follows a successful authentication, whichever door it came
+// through: the password prompt below, or an SSH login that has already proved
+// who it is.
+void CompleteLogin(Connection &con, Bbs &s, const std::string &name) {
+	s.authed = true;
+	s.username = name;
+	citadel::EnsureUserRooms(con, name);
+	LoadUser(con, s);
+	citadel::RecordCall(con, name);
+}
+
 bool Login(Connection &con, Bbs &s, telnet::Session &t) {
 	for (int attempt = 0; attempt < 3; attempt++) {
 		std::string name;
@@ -1628,11 +1641,7 @@ bool Login(Connection &con, Bbs &s, telnet::Session &t) {
 			}
 		}
 
-		s.authed = true;
-		s.username = name;
-		citadel::EnsureUserRooms(con, name);
-		LoadUser(con, s);
-		citadel::RecordCall(con, name);
+		CompleteLogin(con, s, name);
 		if (fresh) {
 			// A stock BBS asks a new account to register before it lets them in.
 			EnterRegistration(con, s, t);
@@ -2113,16 +2122,32 @@ Outcome DotCommand(Connection &con, Bbs &s, telnet::Session &t, const std::strin
 	return Outcome::Continue;
 }
 
-void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerController &ctrl) {
+// How a shell session arrived. Telnet leaves `preauth` empty and the shell
+// asks for a name and password; SSH has already authenticated the user and
+// fills it in, with what its pty-req said about the terminal.
+struct BbsEntry {
+	std::string label; // the client column of RWHO
+	std::string peer_ip;
+	const sshd::ShellRequest *ssh;
+
+	BbsEntry(const std::string &l, const std::string &ip, const sshd::ShellRequest *req)
+	    : label(l), peer_ip(ip), ssh(req) {
+	}
+};
+
+void RunBbs(DatabaseInstance &db, net::ClientStream &stream, const BbsEntry &entry) {
 	Connection con(db);
 	store::EnsureSchema(con);
 
 	telnet::Session t(stream);
-	t.Negotiate();
+	if (entry.ssh) {
+		t.BeginSsh(entry.ssh->term, entry.ssh->cols, entry.ssh->rows);
+	} else {
+		t.Negotiate();
+	}
 
 	Bbs s;
-	s.session_id = citadel::RegisterSession(con, ctrl.ImplicitTls() ? "Telnets session" : "Telnet session",
-	                                       stream.PeerIp());
+	s.session_id = citadel::RegisterSession(con, entry.label, entry.peer_ip);
 
 	std::string humannode = citadel::GetConfig(con, "c_humannode", "QuackCit BBS");
 	std::string city = citadel::GetConfig(con, "c_bbs_city", "");
@@ -2130,7 +2155,9 @@ void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerControl
 
 	t.Write("\n" + humannode + (city.empty() ? "" : " - " + city) + "\n" + version + "\n");
 
-	if (!Login(con, s, t)) {
+	if (entry.ssh) {
+		CompleteLogin(con, s, entry.ssh->username);
+	} else if (!Login(con, s, t)) {
 		citadel::UnregisterSession(con, s.session_id);
 		return;
 	}
@@ -2309,10 +2336,20 @@ void HandleTelnet(DatabaseInstance &db, net::ClientStream &stream, ServerControl
 }
 
 void HandleTelnetConn(DatabaseInstance &db, net::ClientStream &stream) {
-	HandleTelnet(db, stream, g_telnet);
+	RunBbs(db, stream, BbsEntry("Telnet session", stream.PeerIp(), nullptr));
 }
 void HandleTelnetsConn(DatabaseInstance &db, net::ClientStream &stream) {
-	HandleTelnet(db, stream, g_telnets);
+	RunBbs(db, stream, BbsEntry("Telnets session", stream.PeerIp(), nullptr));
+}
+
+// The shell half of an SSH connection. Runs on its own thread, over a socket
+// pair whose other end the SSH session loop feeds (ssh_server.cpp).
+void RunSshShell(DatabaseInstance &db, net::ClientStream &stream, const sshd::ShellRequest &req) {
+	RunBbs(db, stream, BbsEntry("SSH session", req.peer_ip, &req));
+}
+
+void HandleSshConn(DatabaseInstance &db, net::ClientStream &stream) {
+	sshd::Serve(db, stream, RunSshShell);
 }
 
 void LoadInternal(ExtensionLoader &loader) {
@@ -2320,6 +2357,9 @@ void LoadInternal(ExtensionLoader &loader) {
 	store::EnsureSchema(con);
 	RegisterServerControls(loader, "qm_telnet", 2300, g_telnet, HandleTelnetConn);
 	RegisterServerControls(loader, "qm_telnets", 2992, g_telnets, HandleTelnetsConn);
+	// SSH: the same shell, plus SFTP over the file areas. No TLS arguments
+	// apply; the host key is the site's, from citadel_config (qm_ssh_hostkey()).
+	RegisterServerControls(loader, "qm_ssh", 2222, g_ssh, HandleSshConn);
 }
 
 } // namespace

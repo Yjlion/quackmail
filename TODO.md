@@ -33,7 +33,45 @@ fixes, webmail search and folder views, and Sieve past its core — `imap4flags`
 
 ## Shipped
 
-Unreleased, on top of v1.0.1.
+Unreleased, on top of v1.1.0.
+
+- [x] **A crash-loop at startup on an upgraded install, hardened against.** It
+      could not be reproduced here (the v1.1.0 tarball starts cleanly on a fresh
+      database and on one v1.0.1 wrote), so these are the races and hazards
+      reading the startup path turned up, fixed together:
+  - [x] every table is created and migrated once, first, on the startup
+        script's own connection (`qm_status()` straight after the umbrella's
+        `LOAD`), before any listener or worker opens its own;
+  - [x] a worker's first tick waits up to 10 s (its interval, capped) instead
+        of firing mid-startup — `qm_expire` would otherwise walk every room
+        while listeners were still running DDL;
+  - [x] `RunExpiry`'s orphan sweep deleted *every* message no room pointed at,
+        hourly, on sites with no policy at all — including one another session
+        had inserted and not yet linked. It now deletes only what that pass
+        unlinked, and reads room flags NULL-safely;
+  - [x] `idx_msgids_msgnum` is dropped: the Message-ID upsert updates the
+        column it indexed;
+  - [x] `ServerController::Stop()` shuts down its open sessions and waits for
+        them (bounded), so a session thread no longer outlives the database;
+  - [x] the FTP dev port moves from 1021 (privileged: `qm_ftp_start` failed for
+        any non-root install) to 2121, and FTP/FTPS ports are now in
+        `quackcit.conf`.
+  - [ ] **Get a backtrace from the affected server** to confirm which of these
+        it was: `gdb -batch -ex run -ex 'thread apply all bt 8' --args ./duckdb
+        -unsigned -init /run/quackcit/startup.sql /var/lib/quackcit/quackcit.duckdb`.
+- [x] **A file view in the web interface.** A `QR_DIRECTORY` room opens as a
+      file listing with upload, download, describe and delete, `/bbs/files`
+      lists every file area, and room settings carry the four file-area flags.
+      Downloads are attachments under a sandbox CSP.
+- [x] **SSH: the BBS shell and SFTP**, on `qm_ssh` (22; dev 2222), written on
+      OpenSSL with no SSH library. `ssh user@host` lands in the shell signed in;
+      `joe_user` reaches "Joe User".
+  - [x] per-user public keys (`citadel_user_sshkeys`), managed on
+        *Preferences → SSH keys*, with `qm_sshkey_*` and `quackcitadm.sh sshkey`;
+  - [x] SFTP v3 over the file areas, sharing `filearea::VisibleAreas` with FTP.
+  - [ ] `exec` (and so legacy `scp`), and the post-quantum hybrid key exchanges.
+
+Released in v1.1.0 (#57–#59), on top of v1.0.1.
 
 - [x] **The composer's editor is Squire.** The hand-rolled `contenteditable`
       editor was built on `document.execCommand`, which is deprecated in every

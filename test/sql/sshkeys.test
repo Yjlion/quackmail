@@ -1,0 +1,148 @@
+# name: test/sql/sshkeys.test
+# description: per-user SSH public keys — parsing, fingerprints, the store's refusals
+# group: [quackmail]
+#
+# The SSH listener's publickey login asks this store, so what it accepts is
+# what a user can log in with. The fingerprints below are what `ssh-keygen -l`
+# printed for the same keys: a mismatch here is a mismatch with every client's
+# "is this the key you expected?" prompt.
+
+require quackmail
+
+statement ok
+LOAD quackmail;
+
+statement ok
+SELECT count(*) FROM qm_status();
+
+statement ok
+CALL qm_user_add('ada', 'secret');
+
+statement ok
+CALL qm_user_add('bob', 'secret');
+
+# ---- the three key families, fingerprinted as ssh-keygen does -------------
+
+query III
+SELECT * FROM qm_sshkey_add('ada', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaELjeob1oikE6Z0qqEV7V/4/Bm1W7Bbrd8F3vZyN6N ada@example');
+----
+true	key added	SHA256:WXrzO1u5rUa4PI7LS92r/NtEkwe7v5UaSolMu6HN59k
+
+query III
+SELECT * FROM qm_sshkey_add('ada', 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCqOH0HXGeFZT+bUiWK2BDm/ZlmxqCjVi5Rcv6mWsvV9U0/A0aO1lvOcH1qzVeRofZrRW/669TlKuaxCpBAGuXOFKMvYxFXZ8IPTW/gDsWW8Eu70QfaON1PQNdpDcwCvre3cm8VpcXvlqZ9l6FMV3ACFdC7CsPvo5iwgP5Sp4WwvkuNKs41Gf0PC0Df6+BFPu/rJwaN/Vqp/FeJVJnUj/+0dMnVOQptZLv40wI7dUEK3dFieyBXAyQtKG8wiGIqiBLk0EwjUFxCtP9x8xxlAWbBvjgLPeG1y53iM5a8vEDcnzBfeM9+cHfAa5bkBrzRhx4bGhRXJylUjmsoWqwQC2wv rsa@example');
+----
+true	key added	SHA256:yE6xjbWGHztIWKK9Z6oXaEsZWNu/m8M8Zx6XV55UgaU
+
+query III
+SELECT * FROM qm_sshkey_add('ada', '  ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLGKDqHQ54K4OkEaP5bsmW4yFrStCcxRPaGSsBQM2jSPr16xzNlXU13hWrqKVhbfclSfXuv1dJnfY0LP9AJWHIo= ec@example  ');
+----
+true	key added	SHA256:QDU/sir3Hjsaip/fmSbKrXQ1Umlv2xg4U5Mlfd3IKfo
+
+query IIII
+SELECT type, bits, comment, last_used FROM qm_sshkeys('ada') ORDER BY type;
+----
+ecdsa-sha2-nistp256	256	ec@example	0
+ssh-ed25519	256	ada@example	0
+ssh-rsa	2048	rsa@example	0
+
+# A user name is matched case-insensitively, the way the listener resolves it.
+query I
+SELECT count(*) FROM qm_sshkeys('ADA');
+----
+3
+
+# ---- refusals ----------------------------------------------------------------
+
+# One key, one person: the same key on a second account would make a login
+# ambiguous.
+query II
+SELECT ok, note FROM qm_sshkey_add('bob', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaELjeob1oikE6Z0qqEV7V/4/Bm1W7Bbrd8F3vZyN6N');
+----
+false	that key is registered to another user
+
+query II
+SELECT ok, note FROM qm_sshkey_add('ada', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaELjeob1oikE6Z0qqEV7V/4/Bm1W7Bbrd8F3vZyN6N again');
+----
+false	that key is already registered
+
+# Options would be silently dropped — and a key restricted to one command would
+# become a key that opens a whole shell.
+query II
+SELECT ok, note FROM qm_sshkey_add('bob', 'command="/bin/false" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaELjeob1oikE6Z0qqEV7V/4/Bm1W7Bbrd8F3vZyN6N');
+----
+false	authorized_keys options are not supported; paste the key alone
+
+# The type named on the line must be the type encoded in the blob.
+query II
+SELECT ok, note FROM qm_sshkey_add('bob', 'ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIBaELjeob1oikE6Z0qqEV7V/4/Bm1W7Bbrd8F3vZyN6N');
+----
+false	the key type does not match its encoding
+
+query II
+SELECT ok, note FROM qm_sshkey_add('bob', 'ssh-ed25519 not*base64');
+----
+false	the key is not valid base64
+
+# A truncated ed25519 key (31 bytes of point instead of 32).
+query II
+SELECT ok, note FROM qm_sshkey_add('bob', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAHxaELjeob1oikE6Z0qqEV7V/4/Bm1W7Bbrd8F3vZyN4=');
+----
+false	malformed ed25519 key
+
+# DSA is gone from OpenSSH altogether; a stale key is named, not mistaken for junk.
+query II
+SELECT ok, note FROM qm_sshkey_add('bob', 'ssh-dss AAAAB3NzaC1kc3MAAACBAP');
+----
+false	unsupported key type ssh-dss
+
+query II
+SELECT ok, note FROM qm_sshkey_add('nobody', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaELjeob1oikE6Z0qqEV7V/4/Bm1W7Bbrd8F3vZyN6N');
+----
+false	no such user
+
+# ---- removal -----------------------------------------------------------------
+
+# Qualified by user: bob cannot remove ada's key by knowing its fingerprint.
+query II
+SELECT * FROM qm_sshkey_remove('bob', 'SHA256:WXrzO1u5rUa4PI7LS92r/NtEkwe7v5UaSolMu6HN59k');
+----
+false	no such key for that user
+
+query II
+SELECT * FROM qm_sshkey_remove('ada', 'SHA256:WXrzO1u5rUa4PI7LS92r/NtEkwe7v5UaSolMu6HN59k');
+----
+true	key removed
+
+query I
+SELECT count(*) FROM qm_sshkeys('ada');
+----
+2
+
+# Removing the user takes their keys with them, so recreating the name does not
+# inherit the old account's key logins.
+statement ok
+CALL qm_user_remove('ada');
+
+query I
+SELECT count(*) FROM qm_sshkeys('ada');
+----
+0
+
+# ---- the host key --------------------------------------------------------------
+
+# Generated on first ask and stable after: the fingerprint a client pinned has to
+# survive every later call.
+query I
+SELECT public_key LIKE 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5%' FROM qm_ssh_hostkey();
+----
+true
+
+query I
+SELECT count(DISTINCT fingerprint) FROM (SELECT fingerprint FROM qm_ssh_hostkey() UNION ALL SELECT fingerprint FROM qm_ssh_hostkey());
+----
+1
+
+query II
+SELECT * FROM qm_ssh_hostkey_import('not a key');
+----
+false	the host key must be an ed25519 private key in PEM (PKCS#8) form

@@ -37,6 +37,14 @@ throwaway server seeded with a demo world. Regenerate them with:
 
 ![web-prefs-sieve](web-prefs-sieve.png)
 
+### `/prefs/ssh`
+
+![web-prefs-ssh](web-prefs-ssh.png)
+
+### `/bbs/files`
+
+![web-files-index](web-files-index.png)
+
 ### `/bbs/room/104`
 
 ![web-room-calendar](web-room-calendar.png)
@@ -56,6 +64,10 @@ throwaway server seeded with a demo world. Regenerate them with:
 ### `/bbs/room/0`
 
 ![web-bbs-room](web-bbs-room.png)
+
+### `/bbs/room/109`
+
+![web-files](web-files.png)
 
 ### `/bbs/room/108/wiki?page=home`
 
@@ -117,6 +129,10 @@ throwaway server seeded with a demo world. Regenerate them with:
 
 ![web-mobile-bbs-room](web-mobile-bbs-room.png)
 
+### `/bbs/room/109  (390x844)`
+
+![web-mobile-files](web-mobile-files.png)
+
 ### `/bbs/room/100?f=all&p=1&n=30&open=7  (390x844)`
 
 ![web-mobile-mail-reader](web-mobile-mail-reader.png)
@@ -149,11 +165,11 @@ throwaway server seeded with a demo world. Regenerate them with:
 
 ![web-room-settings](web-room-settings.png)
 
-## The BBS shell (telnet)
+## The BBS shell (telnet and SSH)
 
 `quackmail_telnet` *is* the Citadel text client, running server-side,
-so a plain `telnet` gets the BBS. These are real sessions replayed
-through a terminal emulator.
+so a plain `telnet` — or `ssh user@host` — gets the BBS. These are real
+sessions replayed through a terminal emulator.
 
 ### Signing in: the banner, the Lobby, and the citadel.rc menu
 
@@ -174,3 +190,7 @@ through a terminal emulator.
 ### <E>nter a message: subject, body, and '.' to finish
 
 ![text-enter](text-enter.png)
+
+### ssh alice@host - signed in with a key registered in her profile
+
+![text-ssh-login](text-ssh-login.png)

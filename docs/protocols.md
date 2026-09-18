@@ -24,12 +24,65 @@ they live in `quackcit_services()` in
 | NNTP / NNTPS | `quackmail_nntp` | 119 (1119) / 563 (1563) | STARTTLS / implicit |
 | XMPP / XMPPS | `quackmail_xmpp` | 5222 (15222) / 5223 (15223) | STARTTLS / implicit |
 | Telnet / Telnets | `quackmail_telnet` | 23 (2300) / 992 (2992) | none / implicit |
-| FTP / FTPS | `quackmail_ftp` | 21 (1021) / 990 (1990) | AUTH TLS / implicit |
+| SSH (shell + SFTP) | `quackmail_telnet` | 22 (2222) | SSH transport |
+| FTP / FTPS | `quackmail_ftp` | 21 (2121) / 990 (1990) | AUTH TLS / implicit |
 | HTTP / HTTPS | `quackmail_http` | 80 (8080) / 443 (8443) | none / implicit |
 
 `quackmail_spool` binds nothing: it is the timer-driven half (mailing lists,
 remote pulls, certificate renewal). See [Mailing lists and feeds](lists.md) and
 [TLS](tls.md).
+
+## SSH and SFTP
+
+`ssh user@host` gets the same BBS shell telnet does, already signed in; `sftp
+user@host` gets the file areas. One listener (`qm_ssh`), in `quackmail_telnet`,
+because the shell is that extension's C++ and extensions share no C++ state.
+
+| | Standard | State |
+|---|---|---|
+| Transport | RFC 4253, 8731 (curve25519), 8709 (ed25519), 5647 (AES-GCM) | `curve25519-sha256`; host key `ssh-ed25519`; `chacha20-poly1305@openssh.com`, `aes256-gcm`/`aes128-gcm@openssh.com`, and `aes256-ctr`/`aes128-ctr` with `hmac-sha2-256`/`-512` (plain and `-etm@openssh.com`); strict kex (the Terrapin fix); client-initiated re-exchange |
+| Authentication | RFC 4252, 8308, 8332 | `publickey` (ed25519, ECDSA P-256/384/521, RSA ≥ 2048 bits signing with SHA-2) and `password`; `server-sig-algs` |
+| Connection | RFC 4254 | one `session` channel: `pty-req`, `window-change`, `shell`, `subsystem sftp` |
+| SFTP | draft-ietf-secsh-filexfer-02 (v3) | `OPEN`/`READ`/`WRITE`/`CLOSE`, `OPENDIR`/`READDIR`, `STAT`/`LSTAT`/`FSTAT`, `REMOVE`, `RENAME`, `MKDIR`/`RMDIR`, `REALPATH`; `SETSTAT` accepted and ignored |
+
+**Not** — `exec` (so no `ssh host command`, and no legacy `scp`; OpenSSH's
+`scp` uses SFTP by default since 9.0 and works), port and agent forwarding, X11,
+more than one session channel per connection, compression, SHA-1 anywhere
+(`diffie-hellman-group14-sha1`, `ssh-rsa` signatures, `hmac-sha1`), CBC modes,
+and the post-quantum hybrids (`mlkem768x25519-sha256`,
+`sntrup761x25519-sha512`). OpenSSH 10 prints a warning about the last one and
+connects over `curve25519-sha256`.
+
+There is no SSH library underneath. libssh2 is client-only, and a server library
+would be a new runtime dependency on every deploy host; the transport is written
+on the OpenSSL already linked in (`telnet/src/ssh_transport.cpp`), with a
+deliberately short algorithm list.
+
+**User names.** The SSH user is matched against accounts exactly, then
+case-insensitively, then with `_` or `.` standing in for a space — `ssh
+joe_user@host` reaches "Joe User", whose name a shell cannot pass unquoted. A
+match must be unique; a disabled account never matches.
+
+**Keys** are per user, pasted into *Preferences → SSH keys* in the web interface
+or added with `quackcitadm.sh sshkey add <user> @id_ed25519.pub`. A key belongs
+to one account only, `authorized_keys` options (`command=`, `from=`) are refused
+rather than dropped, and removing a user removes their keys. Set
+`qm_ssh_allow_password` to `0` to take password logins away altogether.
+
+**The host key** is an ed25519 key generated on first use and kept in
+`citadel_config`, so it survives restarts and moves with a database backup.
+`quackcitadm.sh sshkey hostkey` (or `SELECT * FROM qm_ssh_hostkey()`) prints the
+public key and fingerprint to publish; `qm_ssh_hostkey_import(pem)` replaces it
+with one of your own.
+
+Login gets 120 seconds and six wrong answers; each failure adds a growing delay.
+
+**SFTP** shows the tree FTP shows — `/` is the file areas, `/<area>/<file>` a
+file — and asks the same questions of `core/filearea.hpp`. A file is a message
+written whole, so an upload is buffered (64 MiB, the FTP ceiling) and stored on
+`CLOSE`, which is where a storage-quota refusal is reported. `RENAME` never
+overwrites (SFTP v3), `RMDIR` removes only an empty area, and `MKDIR` below an
+area is refused because an area has no subdirectories.
 
 ## FTP and FTPS
 

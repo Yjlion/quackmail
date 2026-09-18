@@ -1,4 +1,5 @@
 #include "quackmail/auth.hpp"
+#include "quackmail/sshkeys.hpp"
 #include "quackmail/mail_store.hpp"
 
 #include "duckdb/main/materialized_query_result.hpp"
@@ -187,6 +188,9 @@ bool RemoveUser(Connection &con, const std::string &username, std::string &err) 
 		err = r->GetError();
 		return false;
 	}
+	// A removed user's SSH keys go with them, or recreating the name would hand
+	// the new account the old one's key logins.
+	ssh::RemoveAllKeys(con, username);
 	return true;
 }
 

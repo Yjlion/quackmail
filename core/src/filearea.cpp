@@ -123,6 +123,29 @@ bool CanUpload(duckdb::Connection &con, const std::string &user, const citadel::
 	return citadel::CanPost(con, user, room);
 }
 
+std::vector<citadel::Room> VisibleAreas(duckdb::Connection &con, const std::string &user) {
+	std::vector<citadel::Room> out;
+	for (auto &room : citadel::ListRooms(con, user, -1, "all")) {
+		if (!IsFileArea(room) || !CanList(con, user, room) || !citadel::RoomUnlocked(con, user, room)) {
+			continue;
+		}
+		out.push_back(room);
+	}
+	return out;
+}
+
+bool FindArea(duckdb::Connection &con, const std::string &user, const std::string &name,
+              citadel::Room &out) {
+	std::string want = util::Lower(name);
+	for (auto &room : VisibleAreas(con, user)) {
+		if (util::Lower(room.display_name) == want) {
+			out = room;
+			return true;
+		}
+	}
+	return false;
+}
+
 std::vector<File> ListFiles(duckdb::Connection &con, int64_t room_num) {
 	std::vector<File> out;
 	for (int64_t msgnum : citadel::RoomMessages(con, room_num, "all", 0, 0)) {

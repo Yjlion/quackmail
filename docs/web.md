@@ -211,6 +211,41 @@ of history, so it is itself undoable. An edit that changes nothing is refused
 rather than stored as an empty change set, which is what Citadel does and what
 keeps the chain replayable.
 
+### File areas
+
+![A file area](../screenshots/web-files.png)
+
+A room with the `QR_DIRECTORY` flag opens as a file listing instead of a message
+board: name, size, type, who uploaded it and when, and a description. Where the
+room allows it (`QR_UPLOAD`) there is an upload form; where it allows downloads
+(`QR_DOWNLOAD`) the names are links. A name can be listed without being
+downloadable (`QR_VISDIR` alone), which is how a catalogue or an upload-only
+drop box is expressed. Anyone with the room's write right can delete a file or
+edit its description. *Files* in the sidebar (`/bbs/files`) lists every file
+area you can see, and `?view=raw` shows the messages underneath.
+
+A download is always served as an attachment, under a sandboxing
+`Content-Security-Policy`, whatever type the uploader claimed — an uploaded HTML
+file must never become a page on this origin.
+
+These are the same files, in the same rooms, as WebDAV (`/dav/files/`), FTP,
+SFTP and the BBS shell's `.RF` family. Each room page shows its WebDAV address,
+to mount as a network drive. The room settings page (for whoever administers the
+room) and the admin console both carry the four file-area flags.
+
+![Every file area](../screenshots/web-files-index.png)
+
+### SSH keys
+
+![SSH keys](../screenshots/web-prefs-ssh.png)
+
+*Preferences → SSH keys* (`/prefs/ssh`) holds the public keys the SSH listener
+accepts in place of your password: paste one line from a `.pub` file. Each key
+shows its fingerprint, when it was added and when it last logged in; removing it
+revokes it at once. The page also prints the `ssh`/`sftp` command line for this
+server and its host-key fingerprint, so the first connection can be checked
+against something other than itself. See [SSH and SFTP](protocols.md#ssh-and-sftp).
+
   Contacts, calendar entries, tasks and notes are ordinary `format_type = 4`
   messages wrapping one `text/vcard`, `text/calendar` or `text/vnote` part and
   keyed by the object's own UID — so an object created in the browser is a

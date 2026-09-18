@@ -50,11 +50,12 @@ struct RoomFlag {
 	const char *label;
 };
 
-// Deliberately a subset of the admin console's list. QR_DIRECTORY / QR_UPLOAD /
-// QR_DOWNLOAD / QR_VISDIR describe a file area this server does not implement
-// yet, and QR_NETWORK is inter-node replication — all three are the operator's
-// business, not a room administrator's. QR_MAILBOX is never a checkbox anywhere:
-// it is what makes a room somebody's personal folder.
+// Deliberately a subset of the admin console's list. QR_NETWORK is inter-node
+// replication, which is the operator's business, not a room administrator's.
+// The four file-area bits are here: whoever runs a room decides whether it is a
+// directory and what visitors may do with its files, the same way they decide
+// whether it is read-only. QR_MAILBOX is never a checkbox anywhere: it is what
+// makes a room somebody's personal folder.
 const RoomFlag kRoomFlags[] = {
     {"private", quackmail::citadel::QR_PRIVATE, "Invitation only"},
     {"passworded", quackmail::citadel::QR_PASSWORDED, "Password protected"},
@@ -62,6 +63,10 @@ const RoomFlag kRoomFlags[] = {
     {"readonly", quackmail::citadel::QR_READONLY, "Read only"},
     {"prefonly", quackmail::citadel::QR_PREFONLY, "Preferred users only"},
     {"permanent", quackmail::citadel::QR_PERMANENT, "Never auto-purge"},
+    {"directory", quackmail::citadel::QR_DIRECTORY, "Directory (file area)"},
+    {"upload", quackmail::citadel::QR_UPLOAD, "Uploads allowed"},
+    {"download", quackmail::citadel::QR_DOWNLOAD, "Downloads allowed"},
+    {"visdir", quackmail::citadel::QR_VISDIR, "Directory listing visible"},
 };
 
 int64_t EditableFlagMask() {

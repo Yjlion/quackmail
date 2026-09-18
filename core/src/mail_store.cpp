@@ -1,4 +1,5 @@
 #include "quackmail/mail_store.hpp"
+#include "quackmail/sshkeys.hpp"
 
 #include "quackmail/citadel_store.hpp"
 #include "quackmail/fetch.hpp"
@@ -98,6 +99,7 @@ void EnsureSchema(Connection &con) {
 	// The Citadel room/floor/message model is the message store. Create it here
 	// so every extension gets the full schema on load, regardless of load order.
 	citadel::EnsureCitadelSchema(con);
+	ssh::EnsureSchema(con);
 
 	// Site policy (domains, aliases, ACLs, DNSBL zones, DKIM keys, quotas).
 	// Must follow the Citadel schema: it seeds enforcement defaults into

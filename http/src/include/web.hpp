@@ -93,6 +93,12 @@ void RegisterChatRoutes(std::vector<Route> &out);
 // citadel::CanAdminister rather than on the Aide role — see web_rooms.cpp.
 void RegisterRoomAdminRoutes(std::vector<Route> &out);
 void RegisterMailRoutes(std::vector<Route> &out);
+// The file areas: /bbs/files, and download/upload/delete/describe on one
+// directory room. Defined in web_files.cpp.
+void RegisterFileRoutes(std::vector<Route> &out);
+// The room page of a directory room (QR_DIRECTORY), which GetBbsRoom hands
+// over to ahead of the view dispatch.
+void FilesIndex(Ctx &ctx, const quackmail::citadel::Room &room);
 // Message search across every room the caller can read. Defined in
 // web_search.cpp.
 void RegisterSearchRoutes(std::vector<Route> &out);
