@@ -172,6 +172,18 @@ SELECT note FROM qm_telnets_stop();
 ----
 stopped
 
+# SSH, from the same extension: the shell and SFTP. No TLS arguments; the host
+# key is generated into citadel_config on first use.
+query I
+SELECT note FROM qm_ssh_start('127.0.0.1', 12222);
+----
+started
+
+query I
+SELECT note FROM qm_ssh_stop();
+----
+stopped
+
 # NNTP and NNTPS.
 query I
 SELECT note FROM qm_nntp_start('127.0.0.1', 11190, starttls => true);
