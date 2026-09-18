@@ -55,6 +55,26 @@ void Session::Negotiate() {
 	Send3(DO, OPT_TTYPE);
 }
 
+void Session::BeginSsh(const std::string &term, int width, int height) {
+	ssh_ = true;
+	// With a pty the client sends keystrokes and the server echoes, as a
+	// negotiated telnet client does. Without one (`ssh -T`) it sends lines and
+	// echoes nothing it types, like a raw socket — the same two cases telnet has.
+	echo_ = !term.empty();
+	term_type_ = term;
+	std::string lower;
+	for (char c : term) {
+		lower += (char)std::tolower((unsigned char)c);
+	}
+	// No pty at all (`ssh -T`) arrives as an empty TERM: that is a pipe, not a
+	// terminal, and gets neither colour nor escapes.
+	dumb_terminal_ = lower.empty() || lower == "dumb" || lower == "unknown";
+	if (width > 0 && height > 0) {
+		SetSize(width, height);
+		have_naws_ = true;
+	}
+}
+
 std::string Session::Colour(Attr attr) const {
 	if (!ColorEnabled()) {
 		return "";
@@ -320,6 +340,10 @@ void Session::WriteRaw(const std::string &bytes) {
 	// start of a telnet command, which is how a binary transfer over telnet
 	// silently corrupts any file containing one. Doubling it is the escape the
 	// protocol defines (RFC 854).
+	if (ssh_) {
+		stream_.Write(bytes); // an SSH channel is 8-bit clean
+		return;
+	}
 	std::string out;
 	out.reserve(bytes.size() + 8);
 	for (char c : bytes) {

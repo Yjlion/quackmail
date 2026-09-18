@@ -332,7 +332,10 @@ void EnsureCitadelSchema(Connection &con) {
 			msgnum BIGINT
 		)
 	)");
-	con.Query("CREATE INDEX IF NOT EXISTS idx_msgids_msgnum ON citadel_msgids(msgnum)");
+	// No secondary index on msgnum: every lookup is by msgid, and RecordMessageId
+	// upserts msgnum, which DuckDB turns into a delete + insert on any index
+	// covering the updated column. v1.1.0 created one; drop it.
+	con.Query("DROP INDEX IF EXISTS idx_msgids_msgnum");
 
 	con.Query(R"(
 		CREATE TABLE IF NOT EXISTS citadel_room_state (
@@ -1991,13 +1994,16 @@ int64_t RunExpiry(Connection &con, std::string &err) {
 		auto &mat = rq->Cast<MaterializedQueryResult>();
 		for (idx_t i = 0; i < mat.RowCount(); i++) {
 			Room r;
-			r.room_num = mat.GetValue(0, i).GetValue<int64_t>();
-			r.floor_num = mat.GetValue(1, i).GetValue<int64_t>();
-			r.qr_flags = mat.GetValue(2, i).GetValue<int64_t>();
+			// AsBigint, not GetValue<int64_t>: a NULL in a row an older release
+			// wrote would throw here and abandon the whole sweep.
+			r.room_num = AsBigint(mat.GetValue(0, i));
+			r.floor_num = AsBigint(mat.GetValue(1, i));
+			r.qr_flags = AsBigint(mat.GetValue(2, i));
 			rooms.push_back(r);
 		}
 	}
 
+	std::vector<int64_t> unlinked;
 	for (const auto &room : rooms) {
 		// QR_PERMANENT has been set on seeded and personal rooms since the
 		// beginning and has never done anything. This is the thing it meant.
@@ -2028,6 +2034,7 @@ int64_t RunExpiry(Connection &con, std::string &err) {
 			std::string derr;
 			if (DeleteMessage(con, room.room_num, msgnum, derr)) {
 				purged++;
+				unlinked.push_back(msgnum);
 			}
 		}
 	}
@@ -2036,10 +2043,19 @@ int64_t RunExpiry(Connection &con, std::string &err) {
 	// row when another room still points at it, which is right — a copy filed
 	// elsewhere must survive. But a row nothing points at any more is storage
 	// nobody can reach, and without this it would accumulate forever.
-	auto r = con.Query("DELETE FROM citadel_messages WHERE msgnum NOT IN "
-	                   "(SELECT msgnum FROM citadel_room_msgs)");
-	if (r && r->HasError()) {
-		err = r->GetError();
+	//
+	// Only the rows *this pass* unlinked. A table-wide `NOT IN` sweep would also
+	// take a message another session has just inserted and not yet linked to its
+	// room — InsertMessage is two statements — and it ran every hour on every
+	// site, including the ones with no expiry policy at all.
+	for (int64_t msgnum : unlinked) {
+		auto r = ExecP(con,
+		               "DELETE FROM citadel_messages WHERE msgnum = $1 AND NOT EXISTS "
+		               "(SELECT 1 FROM citadel_room_msgs WHERE msgnum = $1)",
+		               {Value::BIGINT(msgnum)});
+		if (!r) {
+			err = "could not remove an expired message";
+		}
 	}
 	return purged;
 }

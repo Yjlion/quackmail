@@ -376,6 +376,31 @@ cmd_status() {
 
 # Browser sessions for the web front-end. The raw token is never stored — only
 # its SHA-256 — so there is nothing here that could be replayed as a login.
+# A user's SSH public keys: what the qm_ssh listener accepts in place of a
+# password. The key is one authorized_keys line, quoted, or @file to read it
+# from a .pub file.
+cmd_sshkey() {
+    action=${1:-list}; shift 2>/dev/null || true
+    case "$action" in
+        add)    need 2 "$@"
+                _key=$2
+                case "$_key" in
+                    @*) [ -r "${_key#@}" ] || die "cannot read ${_key#@}"
+                        _key=$(head -n 1 "${_key#@}") ;;
+                esac
+                q "SELECT ok, note, fingerprint FROM qm_sshkey_add($(sql_str "$1"), $(sql_str "$_key"))" ;;
+        remove) need 2 "$@"
+                q "SELECT ok, note FROM qm_sshkey_remove($(sql_str "$1"), $(sql_str "$2"))" ;;
+        list)   need 1 "$@"
+                q "SELECT type, bits, fingerprint, comment,
+                          to_timestamp(added_at) AS added,
+                          CASE WHEN last_used > 0 THEN to_timestamp(last_used) END AS last_used
+                   FROM qm_sshkeys($(sql_str "$1"))" ;;
+        hostkey) q "SELECT public_key, fingerprint FROM qm_ssh_hostkey()" ;;
+        *) die "unknown sshkey command '$action' (add|remove|list|hostkey)" ;;
+    esac
+}
+
 cmd_websession() {
     action=${1:-list}; shift 2>/dev/null || true
     case "$action" in
@@ -476,6 +501,8 @@ usage: quackcitadm.sh <object> <action> [arguments]
               subject_prefix, interval, leave_on_server, max_per_run
   queue     list | retry <id> | flush
   websession list | revoke <token_hash> | revoke-user <name> | prune
+  sshkey    add <user> '<ssh-ed25519 AAAA... comment>'|@file.pub | remove <user> <SHA256:...>
+            | list <user> | hostkey
               signed-in browsers; only the hash of each token is stored
   spf       <client-ip> <helo> <mail-from>
   dmarc     <domain>
@@ -508,6 +535,7 @@ case "$object" in
     feed)      cmd_feed "$@" ;;
     queue)     cmd_queue "$@" ;;
     websession) cmd_websession "$@" ;;
+    sshkey)    cmd_sshkey "$@" ;;
     spf)       cmd_spf "$@" ;;
     dmarc)     cmd_dmarc "$@" ;;
     status)    cmd_status ;;

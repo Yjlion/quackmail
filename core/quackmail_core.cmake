@@ -31,6 +31,9 @@ if(NOT TARGET quackmail_core)
         ${QUACKMAIL_CORE_DIR}/src/http.cpp
         ${QUACKMAIL_CORE_DIR}/src/websession.cpp
         ${QUACKMAIL_CORE_DIR}/src/telnet.cpp
+        # SSH public keys, signatures and the per-user key store. The SSH
+        # transport itself is in telnet/src/, the only module that speaks it.
+        ${QUACKMAIL_CORE_DIR}/src/sshkeys.cpp
         ${QUACKMAIL_CORE_DIR}/src/wildmat.cpp
         # Wiki rooms: a line diff/patch pair in Citadel's own on-the-wire
         # format, a bounded Markdown subset, and the page/history storage the

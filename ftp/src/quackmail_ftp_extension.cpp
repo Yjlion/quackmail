@@ -28,7 +28,7 @@ using namespace quackmail;
 namespace filearea = quackmail::filearea;
 
 // Two listeners over one implementation, the smtp_out/pop3 pattern: explicit
-// AUTH TLS on the plaintext port (21; dev 1021) and implicit FTPS (990; dev
+// AUTH TLS on the plaintext port (21; dev 2121) and implicit FTPS (990; dev
 // 1990).
 ServerController g_ftp;
 ServerController g_ftps;
@@ -120,30 +120,11 @@ int ConfigInt(Connection &con, const std::string &key, int dflt) {
 
 // The file areas visible to this user, by display name.
 std::vector<citadel::Room> VisibleAreas(Ftp &s) {
-	std::vector<citadel::Room> out;
-	for (auto &room : citadel::ListRooms(*s.con, s.username, -1, "all")) {
-		if (!filearea::IsFileArea(room)) {
-			continue;
-		}
-		if (!filearea::CanList(*s.con, s.username, room)) {
-			continue;
-		}
-		if (!citadel::RoomUnlocked(*s.con, s.username, room)) {
-			continue;
-		}
-		out.push_back(room);
-	}
-	return out;
+	return filearea::VisibleAreas(*s.con, s.username);
 }
 
 bool FindArea(Ftp &s, const std::string &name, citadel::Room &out) {
-	for (auto &room : VisibleAreas(s)) {
-		if (util::Lower(room.display_name) == util::Lower(name)) {
-			out = room;
-			return true;
-		}
-	}
-	return false;
+	return filearea::FindArea(*s.con, s.username, name, out);
 }
 
 std::string CurrentPath(const Ftp &s) {
@@ -703,7 +684,7 @@ void HandleFtpsConn(DatabaseInstance &db, net::ClientStream &stream) {
 void LoadInternal(ExtensionLoader &loader) {
 	Connection con(loader.GetDatabaseInstance());
 	store::EnsureSchema(con);
-	RegisterServerControls(loader, "qm_ftp", 1021, g_ftp, HandleFtpConn);
+	RegisterServerControls(loader, "qm_ftp", 2121, g_ftp, HandleFtpConn);
 	RegisterServerControls(loader, "qm_ftps", 1990, g_ftps, HandleFtpsConn);
 }
 

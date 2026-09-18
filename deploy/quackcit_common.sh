@@ -392,9 +392,10 @@ IMAPS        quackmail_imap        qm_imaps            1993   implicit  -
 MANAGESIEVE  quackmail_managesieve qm_managesieve      4190   starttls  -
 TELNET       quackmail_telnet      qm_telnet           2300   none      -
 TELNETS      quackmail_telnet      qm_telnets          2992   implicit  -
+SSH          quackmail_telnet      qm_ssh              2222   none      -
 NNTP         quackmail_nntp        qm_nntp             1119   starttls  -
 NNTPS        quackmail_nntp        qm_nntps            1563   implicit  -
-FTP          quackmail_ftp         qm_ftp              1021   starttls  -
+FTP          quackmail_ftp         qm_ftp              2121   starttls  -
 FTPS         quackmail_ftp         qm_ftps             1990   implicit  -
 XMPP         quackmail_xmpp        qm_xmpp             15222  starttls  -
 XMPPS        quackmail_xmpp        qm_xmpps            15223  implicit  -

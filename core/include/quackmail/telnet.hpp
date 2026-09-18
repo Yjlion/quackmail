@@ -25,6 +25,18 @@ public:
 	// Offer WILL ECHO + WILL SUPPRESS-GO-AHEAD (character-at-a-time mode).
 	void Negotiate();
 
+	// The same shell carried over SSH instead (telnet/src/ssh_*.cpp), in place
+	// of Negotiate. Everything telnet negotiates arrives in the pty-req instead:
+	// the terminal type, the window size, and the fact that the server echoes.
+	// The SSH side still speaks telnet framing *into* this session — it doubles
+	// a 0xFF from the client and reports window-change as an IAC SB NAWS — so
+	// the input parser needs no second mode; only output differs, because there
+	// is no telnet peer on the far side to undo an IAC escape.
+	void BeginSsh(const std::string &term, int width, int height);
+	bool IsSsh() const {
+		return ssh_;
+	}
+
 	// Next input character with IAC sequences removed. Returns -1 on EOF.
 	int GetChar();
 
@@ -163,6 +175,7 @@ private:
 	bool color_ = false;
 	bool dumb_terminal_ = false;
 	std::string term_type_;
+	bool ssh_ = false;
 };
 
 } // namespace telnet
